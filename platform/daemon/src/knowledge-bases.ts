@@ -4,7 +4,15 @@ import { basename, resolve } from "node:path";
 import { parseSimpleYaml } from "@signet/core";
 import type { ReadDb, WriteDb } from "./db-accessor";
 
-export type KnowledgeBaseKind = "csv" | "json" | "sqlite" | "postgres" | "filesystem" | "repo" | "obsidian";
+export type KnowledgeBaseKind =
+	| "csv"
+	| "json"
+	| "sqlite"
+	| "postgres"
+	| "filesystem"
+	| "repo"
+	| "obsidian"
+	| "codebase";
 
 export interface KnowledgeBaseMapping {
 	readonly entity?: string | { readonly field?: string; readonly type?: string; readonly aspect?: string };
@@ -14,7 +22,19 @@ export interface KnowledgeBaseMapping {
 		Record<string, { readonly aspect?: string; readonly groupKey?: string; readonly claimKey?: string }>
 	>;
 	readonly aspects?: Readonly<Record<string, readonly string[]>>;
+	readonly relationships?: readonly KnowledgeBaseRelationshipMapping[];
 	readonly hints?: readonly string[];
+}
+
+export interface KnowledgeBaseRelationshipMapping {
+	readonly sourceField?: string;
+	readonly targetField?: string;
+	readonly type?: string;
+	readonly reasonField?: string;
+	readonly sourceType?: string;
+	readonly targetType?: string;
+	readonly strength?: number;
+	readonly confidence?: number;
 }
 
 export interface KnowledgeSourceRow {
@@ -29,6 +49,8 @@ export interface KnowledgeBaseRecord {
 	readonly name: string;
 	readonly kind: string;
 	readonly sourceUri: string | null;
+	readonly sourceConfig: Readonly<Record<string, unknown>>;
+	readonly mapping: KnowledgeBaseMapping | null;
 	readonly status: string;
 	readonly createdByAgentId: string;
 	readonly lastSyncedAt: string | null;
@@ -42,6 +64,11 @@ export interface KnowledgeBasePolicyRecord {
 	readonly agentId: string;
 	readonly allowed: boolean;
 	readonly enabled: boolean;
+}
+
+export interface KnowledgeBaseSourceRecord extends KnowledgeBaseRecord {
+	readonly sourceConfig: Readonly<Record<string, unknown>>;
+	readonly mapping: KnowledgeBaseMapping | null;
 }
 
 export interface StructuredProjection {
@@ -62,11 +89,11 @@ export interface StructuredProjection {
 	readonly hints: string[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isKnowledgeRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeKey(value: string): string {
+export function normalizeKnowledgeFieldKey(value: string): string {
 	return value
 		.trim()
 		.toLowerCase()
@@ -91,7 +118,7 @@ function readAgentYaml(agentsDir: string): Record<string, unknown> {
 
 export function resolveWorkspaceDefaultAgentIds(agentsDir: string): string[] {
 	const cfg = readAgentYaml(agentsDir);
-	const agent = isRecord(cfg.agent) ? cfg.agent : null;
+	const agent = isKnowledgeRecord(cfg.agent) ? cfg.agent : null;
 	const candidates = [
 		typeof agent?.name === "string" ? agent.name.trim() : "",
 		typeof cfg.name === "string" ? cfg.name.trim() : "",
@@ -180,30 +207,61 @@ export function setKnowledgeBasePolicy(
 	).run(knowledgeBaseId, agentId, allowed ? 1 : 0, enabled ? 1 : 0, input.now, input.now);
 }
 
+function parseObjectJson(value: unknown): Record<string, unknown> {
+	if (typeof value !== "string" || !value.trim()) return {};
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		return isKnowledgeRecord(parsed) ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+function parseMappingJson(value: unknown): KnowledgeBaseMapping | null {
+	const parsed = parseObjectJson(value);
+	return Object.keys(parsed).length > 0 ? (parsed as KnowledgeBaseMapping) : null;
+}
+
+function rowToKnowledgeBaseRecord(row: Record<string, unknown>): KnowledgeBaseRecord {
+	return {
+		id: String(row.id),
+		name: String(row.name),
+		kind: String(row.kind),
+		sourceUri: typeof row.source_uri === "string" ? row.source_uri : null,
+		sourceConfig: parseObjectJson(row.source_config_json),
+		mapping: parseMappingJson(row.mapping_json),
+		status: String(row.status),
+		createdByAgentId: String(row.created_by_agent_id),
+		lastSyncedAt: typeof row.last_synced_at === "string" ? row.last_synced_at : null,
+		lastError: typeof row.last_error === "string" ? row.last_error : null,
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+	};
+}
+
 export function listKnowledgeBases(db: ReadDb): KnowledgeBaseRecord[] {
 	return db
 		.prepare(
-			`SELECT id, name, kind, source_uri, status, created_by_agent_id,
-			        last_synced_at, last_error, created_at, updated_at
+			`SELECT id, name, kind, source_uri, source_config_json, mapping_json, status,
+			        created_by_agent_id, last_synced_at, last_error, created_at, updated_at
 			 FROM knowledge_bases
 			 ORDER BY updated_at DESC, name ASC`,
 		)
 		.all()
-		.map((row) => {
-			const r = row as Record<string, unknown>;
-			return {
-				id: String(r.id),
-				name: String(r.name),
-				kind: String(r.kind),
-				sourceUri: typeof r.source_uri === "string" ? r.source_uri : null,
-				status: String(r.status),
-				createdByAgentId: String(r.created_by_agent_id),
-				lastSyncedAt: typeof r.last_synced_at === "string" ? r.last_synced_at : null,
-				lastError: typeof r.last_error === "string" ? r.last_error : null,
-				createdAt: String(r.created_at),
-				updatedAt: String(r.updated_at),
-			};
-		});
+		.map((row) => rowToKnowledgeBaseRecord(row as Record<string, unknown>));
+}
+
+export function listActiveKnowledgeBaseSources(db: ReadDb): KnowledgeBaseSourceRecord[] {
+	return db
+		.prepare(
+			`SELECT id, name, kind, source_uri, source_config_json, mapping_json, status,
+			        created_by_agent_id, last_synced_at, last_error, created_at, updated_at
+			 FROM knowledge_bases
+			 WHERE status = 'active'
+			 ORDER BY updated_at DESC, name ASC`,
+		)
+		.all()
+		.map((row) => rowToKnowledgeBaseRecord(row as Record<string, unknown>));
 }
 
 export function listKnowledgeBasePolicies(db: ReadDb, knowledgeBaseId: string): KnowledgeBasePolicyRecord[] {
@@ -256,7 +314,7 @@ function parseCsv(content: string): KnowledgeSourceRow[] {
 		.split("\n")
 		.filter((line) => line.trim().length > 0);
 	if (lines.length === 0) return [];
-	const headers = parseCsvLine(lines[0] ?? "").map((h, index) => normalizeKey(h) || `field_${index + 1}`);
+	const headers = parseCsvLine(lines[0] ?? "").map((h, index) => normalizeKnowledgeFieldKey(h) || `field_${index + 1}`);
 	return lines.slice(1).map((line, index) => {
 		const cells = parseCsvLine(line);
 		const values: Record<string, string> = {};
@@ -271,23 +329,23 @@ function parseCsv(content: string): KnowledgeSourceRow[] {
 }
 
 function flatten(value: unknown, prefix = ""): Record<string, string> {
-	if (!isRecord(value)) return prefix ? { [prefix]: String(value ?? "") } : {};
+	if (!isKnowledgeRecord(value)) return prefix ? { [prefix]: String(value ?? "") } : {};
 	const out: Record<string, string> = {};
 	for (const [key, item] of Object.entries(value)) {
 		const next = prefix ? `${prefix}.${key}` : key;
-		if (isRecord(item)) Object.assign(out, flatten(item, next));
+		if (isKnowledgeRecord(item)) Object.assign(out, flatten(item, next));
 		else if (Array.isArray(item))
-			out[normalizeKey(next)] = item
-				.map((entry) => (isRecord(entry) ? JSON.stringify(entry) : String(entry)))
+			out[normalizeKnowledgeFieldKey(next)] = item
+				.map((entry) => (isKnowledgeRecord(entry) ? JSON.stringify(entry) : String(entry)))
 				.join(", ");
-		else out[normalizeKey(next)] = String(item ?? "");
+		else out[normalizeKnowledgeFieldKey(next)] = String(item ?? "");
 	}
 	return out;
 }
 
 function parseJson(content: string): KnowledgeSourceRow[] {
 	const raw = JSON.parse(content) as unknown;
-	const items = Array.isArray(raw) ? raw : isRecord(raw) && Array.isArray(raw.items) ? raw.items : [raw];
+	const items = Array.isArray(raw) ? raw : isKnowledgeRecord(raw) && Array.isArray(raw.items) ? raw.items : [raw];
 	return items.map((item, index) => {
 		const values = flatten(item);
 		return {
@@ -351,12 +409,12 @@ export function projectionForRow(
 	const entityType =
 		typeof entityMapping === "object" && entityMapping.type
 			? entityMapping.type
-			: kind === "filesystem"
+			: kind === "filesystem" || kind === "repo" || kind === "obsidian"
 				? "document"
 				: "record";
 	const fallbackField = ["name", "title", "id", "key", "slug"].find((field) => values[field]?.trim());
 	const entityName =
-		(entityField ? values[normalizeKey(entityField)] : undefined) ||
+		(entityField ? values[normalizeKnowledgeFieldKey(entityField)] : undefined) ||
 		(fallbackField ? values[fallbackField] : undefined) ||
 		`${kbName} ${row.sourceKey}`;
 	const entityAspect =
@@ -367,7 +425,9 @@ export function projectionForRow(
 	const addAttr = (field: string, value: string, aspect: string): void => {
 		const trimmed = value.trim();
 		if (!trimmed) return;
-		const fieldCfg = mapping?.fields?.[field];
+		const fieldCfg =
+			mapping?.fields?.[field] ??
+			Object.entries(mapping?.fields ?? {}).find(([key]) => normalizeKnowledgeFieldKey(key) === field)?.[1];
 		attributes.push({
 			groupKey: fieldCfg?.groupKey ?? "fields",
 			claimKey: fieldCfg?.claimKey ?? field,
@@ -378,9 +438,9 @@ export function projectionForRow(
 	};
 
 	for (const [field, value] of Object.entries(values)) {
-		if (field === normalizeKey(entityField ?? "")) continue;
+		if (field === normalizeKnowledgeFieldKey(entityField ?? "")) continue;
 		const explicitAspect = Object.entries(mapping?.aspects ?? {}).find(([, fields]) =>
-			fields.map(normalizeKey).includes(field),
+			fields.map(normalizeKnowledgeFieldKey).includes(field),
 		)?.[0];
 		addAttr(field, value, explicitAspect ?? mapping?.fields?.[field]?.aspect ?? defaultAspect);
 	}

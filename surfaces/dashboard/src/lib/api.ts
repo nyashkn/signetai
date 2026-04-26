@@ -2985,6 +2985,7 @@ export interface KnowledgeBaseImportResult {
 	skipped: number;
 	embedded: number;
 	attributes: number;
+	relationships?: number;
 	errors: string[];
 }
 
@@ -2995,6 +2996,23 @@ export async function getKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
 	return Array.isArray(data.items) ? data.items : [];
 }
 
+export interface KnowledgeBaseMappingInput {
+	entity?: string | { field?: string; type?: string; aspect?: string };
+	content?: string;
+	aspect?: string;
+	fields?: Record<string, { aspect?: string; groupKey?: string; claimKey?: string }>;
+	aspects?: Record<string, string[]>;
+	relationships?: Array<{
+		sourceField?: string;
+		targetField?: string;
+		type?: string;
+		reasonField?: string;
+		sourceType?: string;
+		targetType?: string;
+	}>;
+	hints?: string[];
+}
+
 export async function importKnowledgeBase(input: {
 	path?: string;
 	content?: string;
@@ -3002,6 +3020,7 @@ export async function importKnowledgeBase(input: {
 	name?: string;
 	kind?: string;
 	agentId?: string;
+	mapping?: KnowledgeBaseMappingInput;
 }): Promise<KnowledgeBaseImportResult> {
 	const response = await fetch(`${API_BASE}/api/knowledge-bases/import`, {
 		method: "POST",
@@ -3012,5 +3031,51 @@ export async function importKnowledgeBase(input: {
 		const text = await response.text();
 		throw new Error(text || "Failed to import knowledge base");
 	}
+	return response.json();
+}
+
+export async function registerKnowledgeBaseSource(input: {
+	path: string;
+	name?: string;
+	kind?: string;
+	agentId?: string;
+	mapping?: KnowledgeBaseMappingInput;
+}): Promise<KnowledgeBaseImportResult & { status?: string }> {
+	const response = await fetch(`${API_BASE}/api/knowledge-bases/sources`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	if (!response.ok) throw new Error((await response.text()) || "Failed to register knowledge source");
+	return response.json();
+}
+
+export async function connectKnowledgeBaseDatabase(input: {
+	uri: string;
+	name?: string;
+	kind: "sqlite" | "postgres";
+	config?: Record<string, unknown>;
+	mapping?: KnowledgeBaseMappingInput;
+}): Promise<{ id: string; name: string; kind: string; status: string }> {
+	const response = await fetch(`${API_BASE}/api/knowledge-bases/connect`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	if (!response.ok) throw new Error((await response.text()) || "Failed to connect knowledge database");
+	return response.json();
+}
+
+export async function registerCodebaseKnowledgeBase(input: {
+	path: string;
+	name?: string;
+	mapping?: KnowledgeBaseMappingInput;
+}): Promise<{ id: string; name: string; kind: string; project: string; stats?: Record<string, number> }> {
+	const response = await fetch(`${API_BASE}/api/knowledge-bases/codebase`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	if (!response.ok) throw new Error((await response.text()) || "Failed to register codebase knowledge base");
 	return response.json();
 }

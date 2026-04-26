@@ -12,6 +12,7 @@ import {
 	type PredictorProjectSlice,
 	type PredictorTrainingRun,
 	type TraversalStatusSnapshot,
+	connectKnowledgeBaseDatabase,
 	getKnowledgeAspects,
 	getKnowledgeAttributes,
 	getKnowledgeBases,
@@ -26,6 +27,8 @@ import {
 	getPredictorTrainingRuns,
 	importKnowledgeBase,
 	pinKnowledgeEntity,
+	registerCodebaseKnowledgeBase,
+	registerKnowledgeBaseSource,
 	unpinKnowledgeEntity,
 } from "$lib/api";
 import PageBanner from "$lib/components/layout/PageBanner.svelte";
@@ -71,6 +74,28 @@ let pinBusyEntityId = $state<string | null>(null);
 let knowledgeBases = $state<KnowledgeBaseSummary[]>([]);
 let kbImportPath = $state("");
 let kbImportName = $state("");
+// biome-ignore lint/style/useConst: Select onValueChange mutates $state.
+let kbImportKind = $state("filesystem");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbEntityField = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbEntityType = $state("record");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbContentField = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbDefaultAspect = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbFieldMappings = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbRelationshipMappings = $state("");
+let kbDbUri = $state("");
+// biome-ignore lint/style/useConst: Select onValueChange mutates $state.
+let kbDbKind = $state<"sqlite" | "postgres">("sqlite");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbDbTable = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbDbPrimaryKey = $state("");
+let kbCodebasePath = $state("");
 let kbImportBusy = $state(false);
 let kbImportMessage = $state<string | null>(null);
 
@@ -264,21 +289,118 @@ async function togglePin(entityId: string, pinned: boolean): Promise<void> {
 	}
 }
 
+function buildKnowledgeBaseMapping(): Record<string, unknown> | undefined {
+	const fields: Record<string, { aspect?: string; groupKey?: string; claimKey?: string }> = {};
+	for (const line of kbFieldMappings.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		const [field, aspect, groupKey, claimKey] = trimmed.split(":").map((part) => part?.trim() ?? "");
+		if (!field) continue;
+		fields[field] = { aspect: aspect || undefined, groupKey: groupKey || undefined, claimKey: claimKey || undefined };
+	}
+	const relationships: Array<{ sourceField?: string; targetField?: string; type?: string; reasonField?: string }> = [];
+	for (const line of kbRelationshipMappings.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		const [sourceField, targetField, type, reasonField] = trimmed.split(":").map((part) => part?.trim() ?? "");
+		if (!targetField) continue;
+		relationships.push({
+			sourceField: sourceField || undefined,
+			targetField,
+			type: type || "related_to",
+			reasonField: reasonField || undefined,
+		});
+	}
+	const mapping = {
+		entity: kbEntityField.trim()
+			? {
+					field: kbEntityField.trim(),
+					type: kbEntityType.trim() || undefined,
+					aspect: kbDefaultAspect.trim() || undefined,
+				}
+			: undefined,
+		content: kbContentField.trim() || undefined,
+		aspect: kbDefaultAspect.trim() || undefined,
+		fields: Object.keys(fields).length > 0 ? fields : undefined,
+		relationships: relationships.length > 0 ? relationships : undefined,
+	};
+	return Object.values(mapping).some(Boolean) ? mapping : undefined;
+}
+
+async function refreshKnowledgeBases(): Promise<void> {
+	knowledgeBases = await getKnowledgeBases().catch(() => knowledgeBases);
+	void loadEntities();
+}
+
 async function importKnowledgeBaseFromPath(): Promise<void> {
 	const path = kbImportPath.trim();
 	if (!path || kbImportBusy) return;
 	kbImportBusy = true;
 	kbImportMessage = null;
 	try {
-		const result = await importKnowledgeBase({
-			path,
-			name: kbImportName.trim() || undefined,
-		});
-		kbImportMessage = `Imported ${result.imported} records, ${result.attributes} attributes.`;
+		const mapping = buildKnowledgeBaseMapping();
+		if (kbImportKind === "repo" || kbImportKind === "obsidian" || kbImportKind === "filesystem") {
+			const result = await registerKnowledgeBaseSource({
+				path,
+				name: kbImportName.trim() || undefined,
+				kind: kbImportKind,
+				mapping,
+			});
+			kbImportMessage = `Registered watched source. Imported ${result.imported ?? 0} records.`;
+		} else {
+			const result = await importKnowledgeBase({
+				path,
+				name: kbImportName.trim() || undefined,
+				kind: kbImportKind,
+				mapping,
+			});
+			kbImportMessage = `Imported ${result.imported} records, ${result.attributes} attributes.`;
+		}
 		kbImportPath = "";
 		kbImportName = "";
-		knowledgeBases = await getKnowledgeBases().catch(() => knowledgeBases);
-		void loadEntities();
+		await refreshKnowledgeBases();
+	} catch (error) {
+		kbImportMessage = error instanceof Error ? error.message : String(error);
+	} finally {
+		kbImportBusy = false;
+	}
+}
+
+async function connectDatabaseKnowledgeBase(): Promise<void> {
+	if (!kbDbUri.trim() || kbImportBusy) return;
+	kbImportBusy = true;
+	kbImportMessage = null;
+	try {
+		await connectKnowledgeBaseDatabase({
+			uri: kbDbUri.trim(),
+			name: kbImportName.trim() || undefined,
+			kind: kbDbKind,
+			config: { table: kbDbTable.trim() || undefined, primaryKey: kbDbPrimaryKey.trim() || undefined },
+			mapping: buildKnowledgeBaseMapping(),
+		});
+		kbImportMessage = "Registered database source for polling.";
+		kbDbUri = "";
+		await refreshKnowledgeBases();
+	} catch (error) {
+		kbImportMessage = error instanceof Error ? error.message : String(error);
+	} finally {
+		kbImportBusy = false;
+	}
+}
+
+async function registerCodebaseKnowledge(): Promise<void> {
+	if (!kbCodebasePath.trim() || kbImportBusy) return;
+	kbImportBusy = true;
+	kbImportMessage = null;
+	try {
+		const result = await registerCodebaseKnowledgeBase({
+			path: kbCodebasePath.trim(),
+			name: kbImportName.trim() || undefined,
+			mapping: buildKnowledgeBaseMapping(),
+		});
+		kbImportMessage = `Registered GraphIQ codebase ${result.name}.`;
+		kbCodebasePath = "";
+		await refreshKnowledgeBases();
 	} catch (error) {
 		kbImportMessage = error instanceof Error ? error.message : String(error);
 	} finally {
@@ -339,14 +461,14 @@ onMount(() => {
 					Knowledge Bases
 				</Card.Title>
 				<Card.Description class="sig-label text-[var(--sig-text-muted)]">
-					Import CSV, JSON, and file-backed sources as first-class scoped knowledge.
+					Import, watch, poll, and map external sources into scoped knowledge.
 				</Card.Description>
 			</Card.Header>
-			<Card.Content class="space-y-3 p-3">
-				<div class="grid gap-2 lg:grid-cols-[1fr_220px_auto]">
+			<Card.Content class="space-y-4 p-3">
+				<div class="grid gap-2 lg:grid-cols-[1fr_200px_160px_auto]">
 					<Input
 						class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]"
-						placeholder="/path/to/source.csv or .json"
+						placeholder="/path/to/file, folder, repo, or vault"
 						bind:value={kbImportPath}
 					/>
 					<Input
@@ -354,10 +476,57 @@ onMount(() => {
 						placeholder="Name"
 						bind:value={kbImportName}
 					/>
+					<Select.Root type="single" value={kbImportKind} onValueChange={(value) => { kbImportKind = value ?? "filesystem"; }}>
+						<Select.Trigger class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]">
+							{kbImportKind}
+						</Select.Trigger>
+						<Select.Content class="border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)]">
+							{#each ["filesystem", "repo", "obsidian", "csv", "json"] as kind}
+								<Select.Item value={kind} label={kind} />
+							{/each}
+						</Select.Content>
+					</Select.Root>
 					<Button class="sig-label" disabled={kbImportBusy || !kbImportPath.trim()} onclick={importKnowledgeBaseFromPath}>
-						{kbImportBusy ? "Importing..." : "Import"}
+						{kbImportBusy ? "Working..." : "Add source"}
 					</Button>
 				</div>
+
+				<div class="grid gap-2 md:grid-cols-4">
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Entity field" bind:value={kbEntityField} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Entity type" bind:value={kbEntityType} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Content field" bind:value={kbContentField} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Default aspect" bind:value={kbDefaultAspect} />
+				</div>
+				<textarea
+					class="sig-label min-h-16 w-full rounded-md border border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] p-2 text-[var(--sig-text-bright)]"
+					placeholder="Optional field mappings, one per line: field:aspect:groupKey:claimKey"
+					bind:value={kbFieldMappings}
+				></textarea>
+				<textarea
+					class="sig-label min-h-16 w-full rounded-md border border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] p-2 text-[var(--sig-text-bright)]"
+					placeholder="Optional relationship mappings, one per line: sourceField:targetField:type:reasonField"
+					bind:value={kbRelationshipMappings}
+				></textarea>
+
+				<div class="grid gap-2 lg:grid-cols-[120px_1fr_180px_180px_auto]">
+					<Select.Root type="single" value={kbDbKind} onValueChange={(value) => { kbDbKind = value === "postgres" ? "postgres" : "sqlite"; }}>
+						<Select.Trigger class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]">{kbDbKind}</Select.Trigger>
+						<Select.Content class="border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)]">
+							<Select.Item value="sqlite" label="sqlite" />
+							<Select.Item value="postgres" label="postgres" />
+						</Select.Content>
+					</Select.Root>
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Database URI or SQLite path" bind:value={kbDbUri} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Table/view" bind:value={kbDbTable} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Primary key" bind:value={kbDbPrimaryKey} />
+					<Button class="sig-label" disabled={kbImportBusy || !kbDbUri.trim()} onclick={connectDatabaseKnowledgeBase}>Poll DB</Button>
+				</div>
+
+				<div class="grid gap-2 lg:grid-cols-[1fr_auto]">
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="/path/to/codebase for GraphIQ registration" bind:value={kbCodebasePath} />
+					<Button class="sig-label" disabled={kbImportBusy || !kbCodebasePath.trim()} onclick={registerCodebaseKnowledge}>Register codebase</Button>
+				</div>
+
 				{#if kbImportMessage}
 					<p class="sig-label text-[var(--sig-text-muted)]">{kbImportMessage}</p>
 				{/if}
@@ -369,12 +538,14 @@ onMount(() => {
 							{#if kb.sourceUri}
 								<div class="sig-label truncate text-[var(--sig-text-muted)]">{kb.sourceUri}</div>
 							{/if}
+							{#if kb.lastSyncedAt}
+								<div class="sig-label text-[var(--sig-text-muted)]">synced {formatDateOnly(kb.lastSyncedAt)}</div>
+							{/if}
 						</div>
 					{/each}
 				</div>
 			</Card.Content>
 		</Card.Root>
-
 		<Card.Root class="border-[var(--sig-border)] bg-[var(--sig-surface)]">
 			<Card.Header class="border-b border-[var(--sig-border)] pb-3">
 				<Card.Title class="sig-heading flex items-center gap-2">

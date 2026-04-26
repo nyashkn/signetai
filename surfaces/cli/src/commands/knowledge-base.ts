@@ -109,20 +109,33 @@ export function registerKnowledgeBaseCommands(program: Command, deps: KnowledgeB
 		});
 
 	kb.command("connect")
-		.description("Register a read-only database knowledge source")
+		.description("Register and poll a read-only database knowledge source")
 		.argument("<kind>", "sqlite or postgres")
 		.option("--name <name>", "Knowledge base name")
 		.option("--uri <uri>", "Database URI or file path")
+		.option("--table <table>", "Table or view to poll")
+		.option("--primary-key <field>", "Stable primary key field")
+		.option("--query <sql>", "Read-only query override")
 		.option("--config <json>", "Connection config JSON")
+		.option("--mapping <json>", "Inline mapping JSON")
 		.option("--json", "Output JSON")
 		.action(async (kind: string, options) => {
 			if (!(await deps.ensureDaemonForSecrets())) return;
-			let config: unknown;
+			let config = asRecord({});
+			let mapping: unknown;
 			if (options.config) {
 				try {
-					config = JSON.parse(options.config);
+					config = asRecord(JSON.parse(options.config));
 				} catch {
 					console.error(chalk.red("  --config must be valid JSON"));
+					process.exit(1);
+				}
+			}
+			if (options.mapping) {
+				try {
+					mapping = JSON.parse(options.mapping);
+				} catch {
+					console.error(chalk.red("  --mapping must be valid JSON"));
 					process.exit(1);
 				}
 			}
@@ -130,11 +143,63 @@ export function registerKnowledgeBaseCommands(program: Command, deps: KnowledgeB
 				kind,
 				name: options.name ?? options.uri ?? kind,
 				uri: options.uri,
-				config,
+				config: { ...config, table: options.table, primaryKey: options.primaryKey, query: options.query },
+				mapping,
 			});
 			if (options.json) console.log(JSON.stringify(data, null, 2));
 			else
 				console.log(chalk.green(`  ✓ Registered ${kind} knowledge base ${asRecord(data).name ?? asRecord(data).id}`));
+		});
+
+	kb.command("source")
+		.description("Register a watched filesystem, repo, or Obsidian knowledge source")
+		.argument("<path>", "Source path")
+		.option("--name <name>", "Knowledge base name")
+		.option("--kind <kind>", "filesystem, repo, or obsidian", "filesystem")
+		.option("--mapping <json>", "Inline mapping JSON")
+		.option("--json", "Output JSON")
+		.action(async (path: string, options) => {
+			if (!(await deps.ensureDaemonForSecrets())) return;
+			let mapping: unknown;
+			if (options.mapping) {
+				try {
+					mapping = JSON.parse(options.mapping);
+				} catch {
+					console.error(chalk.red("  --mapping must be valid JSON"));
+					process.exit(1);
+				}
+			}
+			const data = await api(deps, "POST", "/api/knowledge-bases/sources", {
+				path,
+				name: options.name,
+				kind: options.kind,
+				mapping,
+			});
+			if (options.json) console.log(JSON.stringify(data, null, 2));
+			else console.log(chalk.green(`  ✓ Registered watched source ${asRecord(data).name ?? asRecord(data).id}`));
+		});
+
+	kb.command("codebase")
+		.description("Register a codebase knowledge source through GraphIQ")
+		.argument("<path>", "Project path")
+		.option("--name <name>", "Knowledge base name")
+		.option("--json", "Output JSON")
+		.action(async (path: string, options) => {
+			if (!(await deps.ensureDaemonForSecrets())) return;
+			const data = await api(deps, "POST", "/api/knowledge-bases/codebase", { path, name: options.name });
+			if (options.json) console.log(JSON.stringify(data, null, 2));
+			else console.log(chalk.green(`  ✓ Registered GraphIQ codebase ${asRecord(data).name ?? asRecord(data).id}`));
+		});
+
+	kb.command("sync")
+		.description("Sync one knowledge base now")
+		.argument("<id>", "Knowledge base id")
+		.option("--json", "Output JSON")
+		.action(async (id: string, options) => {
+			if (!(await deps.ensureDaemonForSecrets())) return;
+			const data = await api(deps, "POST", `/api/knowledge-bases/${encodeURIComponent(id)}/sync`);
+			if (options.json) console.log(JSON.stringify(data, null, 2));
+			else console.log(chalk.green(`  ✓ Synced ${id}`));
 		});
 
 	kb.command("policies")

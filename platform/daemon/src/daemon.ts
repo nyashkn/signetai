@@ -44,6 +44,7 @@ import { writeFileIfChangedAsync } from "./file-sync";
 import { createSignetHttpServer } from "./http-server";
 import { syncAgentWorkspaces } from "./identity-sync";
 import { getOrCreateInferenceRouter } from "./inference-router.js";
+import { type KnowledgeBaseSyncHandle, startKnowledgeBaseSync } from "./knowledge-base-sync";
 import { closeInferenceProviderResolver, getInferenceProvider, initInferenceProviderResolver } from "./llm";
 import { logger } from "./logger";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
@@ -120,8 +121,8 @@ import { registerGraphiqRoutes } from "./routes/graphiq-routes.js";
 import { mountHealthRoutes } from "./routes/health.js";
 import { registerHooksRoutes } from "./routes/hooks-routes.js";
 import { mountInferenceRoutes } from "./routes/inference.js";
-import { registerKnowledgeRoutes } from "./routes/knowledge-routes.js";
 import { registerKnowledgeBaseRoutes } from "./routes/knowledge-base-routes.js";
+import { registerKnowledgeRoutes } from "./routes/knowledge-routes.js";
 import { mountMarketplaceReviewsRoutes } from "./routes/marketplace-reviews.js";
 import { mountMarketplaceRoutes } from "./routes/marketplace.js";
 import { mountMcpAnalyticsRoutes } from "./routes/mcp-analytics.js";
@@ -236,6 +237,7 @@ setupDashboardRoutes(app);
 
 let watcher: ReturnType<typeof watch> | null = null;
 let nativeMemoryBridge: NativeMemoryBridgeHandle | null = null;
+let knowledgeBaseSync: KnowledgeBaseSyncHandle | null = null;
 
 // Track ingested files to avoid re-processing (path -> content hash)
 const ingestedMemoryFiles = new Map<string, string>();
@@ -1175,6 +1177,10 @@ async function cleanup() {
 		await nativeMemoryBridge.close();
 		nativeMemoryBridge = null;
 	}
+	if (knowledgeBaseSync) {
+		await knowledgeBaseSync.close();
+		knowledgeBaseSync = null;
+	}
 
 	if (heartbeatTimer) {
 		clearInterval(heartbeatTimer);
@@ -1557,6 +1563,14 @@ async function main() {
 		nativeMemoryBridge.syncExisting().catch((e) => {
 			const errDetails = e instanceof Error ? { message: e.message, stack: e.stack } : { error: String(e) };
 			logger.error("daemon", "Failed to sync native memory sources", undefined, errDetails);
+		});
+
+		if (!knowledgeBaseSync) {
+			knowledgeBaseSync = startKnowledgeBaseSync();
+		}
+		knowledgeBaseSync.syncExisting().catch((e) => {
+			const errDetails = e instanceof Error ? { message: e.message, stack: e.stack } : { error: String(e) };
+			logger.error("daemon", "Failed to sync knowledge base sources", undefined, errDetails);
 		});
 	};
 
