@@ -54,6 +54,7 @@ flowchart TD
     CHA[Connector: Hermes Agent]
     CFC[Connector: ForgeCode]
     PAPI[Plugin API Ecosystem]
+    KBS[Knowledge Base Source Sync]
     CUV[Constellation Unified Viewer]
     DIR[Dashboard IA Refactor]
     PIA[Post-Install Migration Audit]
@@ -116,6 +117,9 @@ flowchart TD
   SR --> CHA
   SR --> CFC
   SR --> PAPI
+  KA --> KBS
+  MA --> KBS
+  PAPI -.-> KBS
   KA --> CUV
   SR --> DIR
   MP --> PIA
@@ -153,6 +157,7 @@ and market subdirectories). Reference repos live in `references/`.
 | `dreaming-memory-consolidation` | LCM-PATTERNS, memory-pipeline-plan, knowledge-architecture-schema | How should Signet consolidate accumulated session knowledge into a cleaner entity graph during idle periods? |
 | `native-harness-memory-bridge` | RESEARCH-NATIVE-HARNESS-MEMORY-BRIDGE | How should Signet make harness-native memories portable without duplicating each harness's memory pipeline? |
 | `model-provider-router` | RESEARCH-INFERENCE-CONTROL-PLANE, RESEARCH-COMPETITIVE-SYSTEMS | How should Signet centralize inference across harnesses, daemon workloads, and heterogeneous provider backends under one policy surface? |
+| `knowledge-base-source-sync` | RESEARCH-OBSIDIAN-VAULT-RECALL-EVAL, RESEARCH-GITNEXUS-PATTERNS, competitive-landscape | How should imported local files, repos, vaults, databases, and code indexes stay current while preserving agent scoping and provenance? |
 
 ### Research Adoption Ledger (high-impact)
 
@@ -675,6 +680,11 @@ Phase ordering based on hard dependencies and integration contracts.
     connectors, SDK, and prompt lifecycle contributions
   - uses Signet Secrets as the reference privileged core plugin and provider
     architecture
+- **Knowledge Base Source Sync** (`knowledge-base-source-sync`)
+  - modular watcher-backed sync for local files, repos, and Obsidian vaults
+  - deferred read-only SQLite/Postgres table ingestion contract
+  - GraphIQ-backed codebase knowledge bases instead of duplicate symbol
+    indexing
 - **Unified Constellation Viewer** (`constellation-unified-viewer`)
   - realtime unified constellation/embedding/entity view, replace slow 3D path
 - **Dashboard IA Refactor** (`dashboard-information-architecture-refactor`)
@@ -776,6 +786,7 @@ Legend:
 | `connector-forgecode` | complete | `docs/specs/complete/connector-forgecode.md` | `signet-runtime` | - | ForgeCode connector: AGENTS.md, MCP server registration, skills symlink. MCP-only (no external hook API). |
 | `plugin-api-ecosystem` | planning | `docs/specs/planning/plugin-api-ecosystem.md` | `signet-runtime` | `plugin-sdk-core-v1` | Cross-surface plugin SDK/host architecture with TypeScript and Rust support, marketplace-ready manifests, prompt contributions, and Signet Secrets as the reference core plugin/provider model |
 | `plugin-sdk-core-v1` | complete | `docs/specs/complete/plugin-sdk-core-v1.md` | `signet-runtime` | - | PR #518 complete: bundled `signet.secrets` core plugin, daemon plugin host/registry diagnostics, prompt and surface metadata, redacted audit events, SDK helpers, setup-time core plugin selection, and local Secrets provider extraction preserving existing `secrets.enc` without rewrite |
+| `knowledge-base-source-sync` | planning | `docs/specs/planning/knowledge-base-source-sync.md` | `knowledge-architecture-schema`, `multi-agent-support` | - | Modular watcher-backed local file/repo/vault sync, deferred read-only SQLite/Postgres ingestion contract, and GraphIQ-backed codebase knowledge-base integration |
 | `constellation-unified-viewer` | planning | `docs/specs/planning/constellation-unified-viewer.md` | `knowledge-architecture-schema` | - | Stub: realtime unified constellation/embedding/entity viewer |
 | `dashboard-information-architecture-refactor` | planning | `docs/specs/planning/dashboard-information-architecture-refactor.md` | `signet-runtime` | - | Stub: dashboard IA cleanup, settings split, breadcrumb navigation |
 | `postinstall-behavior-migration-audit` | planning | `docs/specs/planning/postinstall-behavior-migration-audit.md` | `memory-pipeline-v2` | - | Stub: ensure post-install behavior is daemon/CLI-owned |

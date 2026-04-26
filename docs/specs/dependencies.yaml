@@ -995,6 +995,27 @@ specs:
       - "The V1 manifest and registry store marketplace-ready metadata and future Rust sidecar compatibility fields without implementing marketplace install or Rust sidecar execution"
     decision: null
 
+  - id: knowledge-base-source-sync
+    status: planning
+    path: docs/specs/planning/knowledge-base-source-sync.md
+    hard_depends_on:
+      - knowledge-architecture-schema
+      - multi-agent-support
+    soft_depends_on:
+      - plugin-api-ecosystem
+    blocks: []
+    informed_by:
+      - docs/research/technical/RESEARCH-OBSIDIAN-VAULT-RECALL-EVAL.md
+      - docs/research/technical/RESEARCH-GITNEXUS-PATTERNS.md
+      - docs/research/market/competitive-landscape.md
+    success_criteria:
+      - "Local folders, repos, and Obsidian vaults can be registered as scoped knowledge bases and update as files change"
+      - "Knowledge-base watchers start, debounce, sync, and stop without leaking handles or duplicating in-flight work"
+      - "SQLite and Postgres table ingestion has an approved read-only mapping contract before implementation"
+      - "Codebase knowledge bases use the existing GraphIQ plugin for symbols, backlinks, call sites, constants, and blast-radius context"
+      - "Synced knowledge remains subject to agent allowlists, enabled/disabled state, prospective hints, graph, embedding, and SEC policies"
+    decision: null
+
 
   - id: constellation-unified-viewer
     status: planning
