@@ -141,14 +141,17 @@ where recency is `1 / (1 + age_in_days)`.
 Called before each user turn is handed to the model. Returns lightweight
 context for the current prompt.
 
-The hook always includes current date/time metadata and per-turn Memory Check
-guidance unless the session is bypassed. When automatic recall finds useful
-context, the response also includes a `## Relevant Memory` block. When no
-strong automatic match is found, the response says so explicitly and reminds
-the agent to run targeted Signet recall before acting if the request depends
-on prior context, preferences, project history, or unresolved work. Both
-matched and no-strong-match paths also remind the agent to save durable facts
-with `/remember` or `memory_store`.
+The hook always includes current date/time metadata, active peer-session
+visibility, and per-turn Memory Check guidance unless the session is bypassed.
+Peer visibility is intentionally compact: it reports how many other Signet
+sessions are currently active, which apps they are in, and which are in the
+same project, with `agent_peers` available for the full live list. When
+automatic recall finds useful context, the response also includes a
+`## Relevant Memory` block. When no strong automatic match is found, the
+response says so explicitly and reminds the agent to run targeted Signet recall
+before acting if the request depends on prior context, preferences, project
+history, or unresolved work. Both matched and no-strong-match paths also remind
+the agent to save durable facts with `/remember` or `memory_store`.
 
 Recall order is:
 

@@ -107,6 +107,9 @@ flowchart TD
   MP --> RDC
   DP --> DMS
   SSF --> DMS
+  MA --> CSV
+  SCP --> CSV
+  DMS -.-> CSV
   SR --> MCB
   PAF --> GMM
   PM --> ASL
@@ -153,6 +156,7 @@ and market subdirectories). Reference repos live in `references/`.
 | `dreaming-memory-consolidation` | LCM-PATTERNS, memory-pipeline-plan, knowledge-architecture-schema | How should Signet consolidate accumulated session knowledge into a cleaner entity graph during idle periods? |
 | `native-harness-memory-bridge` | RESEARCH-NATIVE-HARNESS-MEMORY-BRIDGE | How should Signet make harness-native memories portable without duplicating each harness's memory pipeline? |
 | `model-provider-router` | RESEARCH-INFERENCE-CONTROL-PLANE, RESEARCH-COMPETITIVE-SYSTEMS | How should Signet centralize inference across harnesses, daemon workloads, and heterogeneous provider backends under one policy surface? |
+| `cross-session-visibility-and-search` | RESEARCH-CROSS-SESSION-VISIBILITY | How should Signet expose live and historical cross-session visibility without flooding prompt context or violating scope boundaries? |
 
 ### Research Adoption Ledger (high-impact)
 
@@ -654,6 +658,9 @@ Phase ordering based on hard dependencies and integration contracts.
   - parity completion and primary-runtime switch strategy
 - **Deep Memory Search** (`deep-memory-search`)
   - optional multi-agent LLM memory search path (not primary retrieval)
+- **Cross-Session Visibility and Search** (`cross-session-visibility-and-search`)
+  - live peer-session visibility, recent-session browser, and scoped transcript or summary search
+  - reference inspiration: Hermes Agent session search and recent-session metadata flow
 - **MCP CLI Bridge and Usage Analytics** (`mcp-cli-bridge-and-usage-analytics`)
   - expose installed MCP servers as Signet CLI commands and track usage in dashboard
   - reference inspiration: MC Porter
@@ -764,6 +771,7 @@ Legend:
 | `remember-recall-skill-parity` | planning | `docs/specs/planning/remember-recall-skill-parity.md` | `procedural-memory-plan` | - | Stub: /remember and /recall architecture/schema parity |
 | `rust-daemon-parity-cutover` | planning | `docs/specs/planning/rust-daemon-parity-cutover.md` | `daemon-rust-rewrite`, `memory-pipeline-v2` | - | Stub: rust daemon parity and primary-runtime cutover |
 | `deep-memory-search` | planning | `docs/specs/planning/deep-memory-search.md` | `desire-paths-epic`, `ssm-foundation-evaluation` | - | Stub: optional supermemory-style deep memory escalation |
+| `cross-session-visibility-and-search` | planning | `docs/specs/planning/cross-session-visibility-and-search.md` | `multi-agent-support`, `session-continuity-protocol`, `jsonl-transcript-source-of-truth` | - | Durable session registry over live presence and canonical JSONL transcripts, with compact prompt-submit peer visibility plus explicit scoped summary/transcript search. |
 | `mcp-cli-bridge-and-usage-analytics` | approved | `docs/specs/approved/mcp-cli-bridge-and-usage-analytics.md` | `signet-runtime` | - | Phase 1: CLI bridge, invocation tracking, analytics API, dashboard panel |
 | `overview-usage-analytics` | approved | `docs/specs/approved/overview-usage-analytics.md` | `mcp-cli-bridge-and-usage-analytics`, `procedural-memory-plan` | - | Home overview card ranks most-used MCP servers and skills from real analytics instead of catalog popularity |
 | `git-marketplace-monorepo` | planning | `docs/specs/planning/git-marketplace-monorepo.md` | `predictor-agent-feedback` | - | Stub: GitHub-authenticated PR marketplace for skills and MCP servers |
@@ -841,6 +849,11 @@ independent of harness-specific connectors.
 
 **multi-agent-support**: Multiple agents share one SQLite database
 without data collision via agent_id scoping.
+
+**cross-session-visibility-and-search**: Agents can see compact live
+peer-session visibility during prompt-submit from a durable session registry,
+then explicitly list or search recent/live session summaries and canonical JSONL
+transcript excerpts under agent scope, visibility, project, and lineage policy.
 
 **sub-agent-context-continuity**: Parent session transcript is queryable during active sessions, and sub-agents inherit deterministic parent context with no LLM call.
 

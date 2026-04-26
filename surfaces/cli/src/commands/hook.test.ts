@@ -6,6 +6,7 @@ import {
 	buildSessionEndBody,
 	buildSessionStartFallback,
 	buildUserPromptSubmitBody,
+	pickSessionId,
 	pickSessionKey,
 	registerHookCommands,
 	resolvePromptSubmitTimeout,
@@ -37,6 +38,18 @@ describe("pickSessionKey", () => {
 				sessionId: "sess-camel-id",
 			}),
 		).toBe("sess-camel-id");
+	});
+});
+
+describe("pickSessionId", () => {
+	test("preserves legacy session ids without treating canonical keys as ids", () => {
+		expect(
+			pickSessionId({
+				sessionKey: "sess-canonical-key",
+				sessionId: "sess-legacy-id",
+			}),
+		).toBe("sess-legacy-id");
+		expect(pickSessionId({ sessionKey: "sess-canonical-key" })).toBe("");
 	});
 });
 
@@ -141,7 +154,7 @@ describe("buildSessionEndBody", () => {
 			harness: "claude-code",
 			transcriptPath: "/tmp/session.txt",
 			transcript: "user: hi\nassistant: hello",
-			sessionId: "sess-1",
+			sessionId: "",
 			sessionKey: "sess-1",
 			cwd: "/tmp/project",
 			reason: "shutdown",
@@ -192,10 +205,27 @@ describe("buildUserPromptSubmitBody", () => {
 			userMessage: "clean prompt",
 			userPrompt: "raw prompt",
 			sessionKey: "sess-2",
+			sessionId: "",
 			transcriptPath: "",
 			transcript: "user: hi",
 			runtimePath: "legacy",
 			lastAssistantMessage: "prior answer",
+		});
+	});
+
+	test("preserves distinct legacy session ids without collapsing them into sessionKey", () => {
+		expect(
+			buildUserPromptSubmitBody(
+				{
+					prompt: "raw prompt",
+					sessionId: "sess-legacy-id",
+				},
+				"claude-code",
+				"/tmp/project",
+			),
+		).toMatchObject({
+			sessionKey: "",
+			sessionId: "sess-legacy-id",
 		});
 	});
 

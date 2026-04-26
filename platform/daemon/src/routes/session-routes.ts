@@ -4,6 +4,7 @@ import { requirePermission } from "../auth";
 import { listAgentPresence, touchAgentPresence } from "../cross-agent.js";
 import { getDbAccessor } from "../db-accessor.js";
 import { logger } from "../logger.js";
+import { listActiveSessionRegistry } from "../session-registry.js";
 import {
 	type RuntimePath,
 	bypassSession,
@@ -24,7 +25,10 @@ function listLiveSessions(agentId: string): Array<{
 	expiresAt: string | null;
 	bypassed: boolean;
 }> {
-	const byKey = new Map<string, { key: string; runtimePath: string; claimedAt: string; expiresAt: string | null; bypassed: boolean }>(
+	const byKey = new Map<
+		string,
+		{ key: string; runtimePath: string; claimedAt: string; expiresAt: string | null; bypassed: boolean }
+	>(
 		getActiveSessions()
 			.filter((s) => s.agentId === agentId)
 			.map((session) => [session.key, session] as const),
@@ -39,6 +43,17 @@ function listLiveSessions(agentId: string): Array<{
 			key,
 			runtimePath: presence.runtimePath ?? "unknown",
 			claimedAt: presence.startedAt,
+			expiresAt: null,
+			bypassed: isSessionBypassed(key),
+		});
+	}
+	for (const session of listActiveSessionRegistry({ agentId, includeSelf: true, limit: Number.MAX_SAFE_INTEGER })) {
+		const key = normalizeSessionKey(session.sessionKey ?? session.sessionId ?? session.id);
+		if (byKey.has(key)) continue;
+		byKey.set(key, {
+			key,
+			runtimePath: session.runtimePath ?? "unknown",
+			claimedAt: session.startedAt,
 			expiresAt: null,
 			bypassed: isSessionBypassed(key),
 		});

@@ -834,6 +834,28 @@ specs:
     decision: null
 
 
+  - id: cross-session-visibility-and-search
+    status: planning
+    path: docs/specs/planning/cross-session-visibility-and-search.md
+    hard_depends_on:
+      - multi-agent-support
+      - session-continuity-protocol
+      - jsonl-transcript-source-of-truth
+    soft_depends_on:
+      - deep-memory-search
+      - transcript-surface-separation
+    blocks: []
+    informed_by:
+      - docs/research/technical/RESEARCH-CROSS-SESSION-VISIBILITY.md
+    success_criteria:
+      - "Agents see compact live peer-session visibility during prompt-submit without materially increasing prompt noise"
+      - "Agents can explicitly list recent and active sessions with app, project, age, lifecycle status, end reason, and canonical transcript pointer"
+      - "Agents can search session summaries and transcript excerpts under the same agent scope and visibility rules as memory recall"
+      - "Ongoing transcript search reads from canonical JSONL or derived transcript indexes and cannot expose another agent's private session data across policy boundaries"
+      - "Operators can tune or disable prompt-submit peer visibility separately from explicit session search"
+    decision: null
+
+
   - id: mcp-cli-bridge-and-usage-analytics
     status: approved
     path: docs/specs/approved/mcp-cli-bridge-and-usage-analytics.md

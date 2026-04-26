@@ -44,6 +44,7 @@ import { writeCompactionArtifact } from "../memory-lineage.js";
 import { hybridRecall } from "../memory-search";
 import { getSynthesisWorker, readLastSynthesisTime } from "../pipeline";
 import { isNoiseSession } from "../session-noise";
+import { listActiveSessionRegistry, markSessionRegistryEnded, upsertSessionRegistry } from "../session-registry";
 import {
 	type RuntimePath,
 	claimSession,
@@ -214,6 +215,17 @@ export function listLiveSessions(agentId: string): Array<{
 			bypassed: isSessionBypassed(key),
 		});
 	}
+	for (const session of listActiveSessionRegistry({ agentId, includeSelf: true, limit: Number.MAX_SAFE_INTEGER })) {
+		const key = normalizeSessionKey(session.sessionKey ?? session.sessionId ?? session.id);
+		if (byKey.has(key)) continue;
+		byKey.set(key, {
+			key,
+			runtimePath: session.runtimePath ?? "unknown",
+			claimedAt: session.startedAt,
+			expiresAt: null,
+			bypassed: isSessionBypassed(key),
+		});
+	}
 	return [...byKey.values()].sort((a, b) => b.claimedAt.localeCompare(a.claimedAt));
 }
 
@@ -237,11 +249,15 @@ function registerSessionStart(app: Hono): void {
 			const runtimePath = resolveRuntimePath(c, body);
 			if (runtimePath) body.runtimePath = runtimePath;
 
-			if (body.sessionKey && runtimePath) {
+			const sessionKey = parseOptionalString(body.sessionKey);
+			const sessionId = parseOptionalString(body.sessionId);
+			const sessionIdentity = sessionKey ?? sessionId;
+
+			if (sessionIdentity && runtimePath) {
 				const claim = claimSession(
-					body.sessionKey,
+					sessionIdentity,
 					runtimePath,
-					resolveAgentId({ agentId: body.agentId, sessionKey: body.sessionKey }),
+					resolveAgentId({ agentId: body.agentId, sessionKey: sessionIdentity }),
 				);
 				if (!claim.ok) {
 					return c.json(
@@ -253,9 +269,22 @@ function registerSessionStart(app: Hono): void {
 				}
 			}
 
+			const agentId = resolveAgentId({
+				agentId: parseOptionalString(body.agentId),
+				sessionKey: sessionIdentity,
+			});
 			upsertAgentPresence({
-				sessionKey: parseOptionalString(body.sessionKey),
-				agentId: parseOptionalString(body.agentId) ?? "default",
+				sessionKey: sessionIdentity,
+				agentId,
+				harness: body.harness,
+				project: parseOptionalString(body.project),
+				runtimePath,
+				provider: body.harness,
+			});
+			upsertSessionRegistry({
+				sessionKey,
+				sessionId,
+				agentId,
 				harness: body.harness,
 				project: parseOptionalString(body.project),
 				runtimePath,
@@ -303,10 +332,12 @@ function registerUserPromptSubmit(app: Hono): void {
 			if (runtimePath) body.runtimePath = runtimePath;
 
 			const sessionKey = parseOptionalString(body.sessionKey);
-			const known = sessionKey ? hasSession(sessionKey) : false;
+			const sessionId = parseOptionalString(body.sessionId);
+			const sessionIdentity = sessionKey ?? sessionId;
+			const known = sessionIdentity ? hasSession(sessionIdentity) : false;
 
-			const agentId = parseOptionalString(body.agentId) ?? "default";
-			const duplicate = claimAutomaticSessionOrSkip(sessionKey, runtimePath, agentId, "user-prompt-submit", {
+			const agentId = resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey: sessionIdentity });
+			const duplicate = claimAutomaticSessionOrSkip(sessionIdentity, runtimePath, agentId, "user-prompt-submit", {
 				inject: "",
 				memoryCount: 0,
 				sessionKnown: known,
@@ -314,11 +345,11 @@ function registerUserPromptSubmit(app: Hono): void {
 			if (duplicate) {
 				return c.json(duplicate);
 			}
-			if (sessionKey) {
-				const touched = touchAgentPresence(sessionKey);
+			if (sessionIdentity) {
+				const touched = touchAgentPresence(sessionIdentity);
 				if (!touched) {
 					upsertAgentPresence({
-						sessionKey,
+						sessionKey: sessionIdentity,
 						agentId,
 						harness: body.harness,
 						project: parseOptionalString(body.project),
@@ -326,6 +357,15 @@ function registerUserPromptSubmit(app: Hono): void {
 						provider: body.harness,
 					});
 				}
+				upsertSessionRegistry({
+					sessionKey,
+					sessionId,
+					agentId,
+					harness: body.harness,
+					project: parseOptionalString(body.project),
+					runtimePath,
+					provider: body.harness,
+				});
 			} else {
 				upsertAgentPresence({
 					agentId,
@@ -369,13 +409,15 @@ function registerSessionEnd(app: Hono): void {
 
 			stampHarness(body.harness);
 
-			const sessionKey = body.sessionKey || body.sessionId;
+			const rawSessionKey = parseOptionalString(body.sessionKey);
+			const sessionId = parseOptionalString(body.sessionId);
+			const sessionKey = rawSessionKey ?? sessionId;
 			const conflict = skipConflictingSessionEnd(sessionKey, runtimePath);
 			if (conflict) return c.json(conflict);
 			const duplicate = claimAutomaticSessionOrSkip(
 				sessionKey,
 				runtimePath,
-				parseOptionalString(body.agentId) ?? "default",
+				resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey }),
 				"session-end",
 				{
 					memoriesSaved: 0,
@@ -385,6 +427,16 @@ function registerSessionEnd(app: Hono): void {
 
 			if (sessionKey && isSessionBypassed(sessionKey)) {
 				markSessionEnded(sessionKey, runtimePath);
+				markSessionRegistryEnded({
+					sessionKey: rawSessionKey,
+					sessionId,
+					agentId: resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey }),
+					harness: body.harness,
+					cwd: parseOptionalString(body.cwd),
+					runtimePath,
+					provider: body.harness,
+					reason: "bypassed",
+				});
 				removeAgentPresence(sessionKey);
 				return c.json({ memoriesSaved: 0, bypassed: true });
 			}
@@ -393,12 +445,32 @@ function registerSessionEnd(app: Hono): void {
 				const result = await handleSessionEnd(body);
 				if (sessionKey) {
 					markSessionEnded(sessionKey, runtimePath);
+					markSessionRegistryEnded({
+						sessionKey: rawSessionKey,
+						sessionId,
+						agentId: resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey }),
+						harness: body.harness,
+						cwd: parseOptionalString(body.cwd),
+						runtimePath,
+						provider: body.harness,
+						reason: parseOptionalString(body.reason) ?? "session-end",
+					});
 					removeAgentPresence(sessionKey);
 				}
 				return c.json(result);
 			} catch (e) {
 				if (sessionKey) {
 					releaseSession(sessionKey);
+					markSessionRegistryEnded({
+						sessionKey: rawSessionKey,
+						sessionId,
+						agentId: resolveAgentId({ agentId: parseOptionalString(body.agentId), sessionKey }),
+						harness: body.harness,
+						cwd: parseOptionalString(body.cwd),
+						runtimePath,
+						provider: body.harness,
+						reason: "error",
+					});
 					removeAgentPresence(sessionKey);
 				}
 				throw e;

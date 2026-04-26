@@ -135,7 +135,8 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.option("--codex-json", "Output Codex hook JSON")
 		.action(async (options) => {
 			const input = await readJson();
-			const sessionKey = pickSessionKey(input);
+			const sessionKey = pickCanonicalSessionKey(input);
+			const sessionId = pickSessionId(input);
 			const stdinProject = pickString(input?.cwd);
 			const res = await deps.fetchDaemonResult<{
 				identity?: { name: string; description?: string };
@@ -151,6 +152,7 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 					agentId: options.agentId,
 					context: options.context,
 					sessionKey,
+					sessionId,
 					runtimePath: LEGACY_RUNTIME_PATH,
 				}),
 				timeout: SESSION_START_TIMEOUT_MS,
@@ -429,7 +431,17 @@ function pickString(...values: unknown[]): string {
 
 export function pickSessionKey(input: Record<string, unknown> | null): string {
 	if (!input) return "";
-	return pickString(input.session_key, input.sessionKey, input.session_id, input.sessionId);
+	return pickString(pickCanonicalSessionKey(input), pickSessionId(input));
+}
+
+function pickCanonicalSessionKey(input: Record<string, unknown> | null): string {
+	if (!input) return "";
+	return pickString(input.session_key, input.sessionKey);
+}
+
+export function pickSessionId(input: Record<string, unknown> | null): string {
+	if (!input) return "";
+	return pickString(input.session_id, input.sessionId);
 }
 
 export function buildUserPromptSubmitBody(
@@ -442,6 +454,7 @@ export function buildUserPromptSubmitBody(
 	userMessage: string;
 	userPrompt: string;
 	sessionKey: string;
+	sessionId: string;
 	transcriptPath: string;
 	transcript: string;
 	lastAssistantMessage?: string;
@@ -456,7 +469,8 @@ export function buildUserPromptSubmitBody(
 		project,
 		userMessage,
 		userPrompt,
-		sessionKey: pickSessionKey(body),
+		sessionKey: pickCanonicalSessionKey(body),
+		sessionId: pickSessionId(body),
 		transcriptPath: pickString(body?.transcript_path, body?.transcriptPath),
 		transcript: pickString(body?.transcript),
 		runtimePath: LEGACY_RUNTIME_PATH,
@@ -509,8 +523,8 @@ export function buildSessionEndBody(
 	runtimePath: typeof LEGACY_RUNTIME_PATH;
 } {
 	const body = input ?? {};
-	const sessionKey = pickSessionKey(body);
-	const sessionId = pickString(body.session_id, body.sessionId, sessionKey);
+	const sessionKey = pickCanonicalSessionKey(body);
+	const sessionId = pickSessionId(body);
 	return {
 		harness,
 		transcriptPath: pickString(body.transcript_path, body.transcriptPath),

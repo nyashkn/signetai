@@ -75,6 +75,7 @@ import {
 } from "./predictor-scoring";
 import { getPredictorState, updatePredictorState } from "./predictor-state";
 import { listSecrets } from "./secrets";
+import { formatSessionAppLabel } from "./session-apps";
 import {
 	flushPendingCheckpoints,
 	formatPeriodicDigest,
@@ -88,6 +89,7 @@ import {
 } from "./session-checkpoints";
 import { parseFeedback, recordAgentFeedback, recordSessionCandidates, trackFtsHits } from "./session-memories";
 import { isNoiseSession } from "./session-noise";
+import { type SessionRegistryRecord, listActiveSessionRegistry } from "./session-registry";
 import { getExpiryWarning } from "./session-tracker";
 import {
 	ensureCanonicalTranscriptHistory,
@@ -273,16 +275,161 @@ function formatTranscriptSessionLabel(sessionKey: string): string {
 	return `${sessionKey.slice(0, 8)}…${sessionKey.slice(-6)}`;
 }
 
-function harnessSupportsNamedCrossAgentTools(harness: string): boolean {
-	return harness.trim().toLowerCase() === "codex";
-}
-
 function sanitizePeerPromptField(value: string | undefined): string {
 	if (!value) return "";
 	return value
 		.replace(/[\r\n`*#[\]<>]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function sanitizePeerPromptLabel(value: string | undefined): string {
+	return sanitizePeerPromptField(value) || "Unknown app";
+}
+
+function pluralizeSession(count: number): string {
+	return count === 1 ? "session" : "sessions";
+}
+
+const PEER_VISIBILITY_FETCH_LIMIT = 50;
+const PEER_VISIBILITY_DISPLAY_LIMIT = 8;
+const PEER_VISIBILITY_LIST_LIMIT = PEER_VISIBILITY_DISPLAY_LIMIT;
+
+interface PromptPeerSession {
+	readonly agentId: string;
+	readonly sessionKey?: string;
+	readonly harness: string;
+	readonly appLabel: string;
+	readonly project?: string;
+	readonly startedAt: string;
+	readonly lastSeenAt: string;
+}
+
+function promptPeerAppId(harness: string): string {
+	return (
+		harness
+			.trim()
+			.toLowerCase()
+			.replace(/[_\s]+/g, "-") || "unknown"
+	);
+}
+
+function registryPeerKey(peer: SessionRegistryRecord): string {
+	const token = peer.sessionKey ?? peer.sessionId;
+	return `${peer.appId}:${token ? `session:${token}` : `row:${peer.id}`}`;
+}
+
+function presencePeerKey(peer: {
+	readonly harness: string;
+	readonly sessionKey?: string;
+	readonly key: string;
+}): string {
+	const token = peer.sessionKey ? `session:${peer.sessionKey}` : `row:${peer.key}`;
+	const appId = promptPeerAppId(peer.harness);
+	return `${appId}:${token}`;
+}
+
+function collectPromptPeerSessions(
+	req: Pick<
+		UserPromptSubmitRequest | SessionStartRequest,
+		"agentId" | "harness" | "project" | "sessionKey" | "sessionId"
+	>,
+	agentId: string,
+	listPresence: typeof listAgentPresence,
+	listRegistry: typeof listActiveSessionRegistry,
+): PromptPeerSession[] {
+	const byKey = new Map<string, PromptPeerSession>();
+	const currentSession = req.sessionKey ?? req.sessionId;
+	for (const peer of listRegistry({
+		agentId,
+		sessionKey: req.sessionKey,
+		sessionId: req.sessionId,
+		harness: req.harness,
+		includeSelf: false,
+		limit: PEER_VISIBILITY_FETCH_LIMIT,
+	})) {
+		byKey.set(registryPeerKey(peer), {
+			agentId: peer.agentId,
+			sessionKey: peer.sessionKey ?? peer.sessionId ?? undefined,
+			harness: peer.harness,
+			appLabel: peer.appLabel,
+			project: peer.project ?? undefined,
+			startedAt: peer.startedAt,
+			lastSeenAt: peer.lastSeenAt,
+		});
+	}
+
+	for (const peer of listPresence({
+		agentId,
+		sessionKey: currentSession,
+		includeSelf: false,
+		limit: PEER_VISIBILITY_FETCH_LIMIT,
+	})) {
+		const key = presencePeerKey(peer);
+		byKey.set(key, {
+			agentId: peer.agentId,
+			sessionKey: peer.sessionKey,
+			harness: peer.harness,
+			appLabel: formatSessionAppLabel(peer.harness),
+			project: peer.project,
+			startedAt: peer.startedAt,
+			lastSeenAt: peer.lastSeenAt,
+		});
+	}
+
+	return [...byKey.values()].sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+}
+
+function buildPeerSessionVisibilitySection(
+	req: Pick<
+		UserPromptSubmitRequest | SessionStartRequest,
+		"agentId" | "harness" | "project" | "sessionKey" | "sessionId"
+	>,
+	agentId: string,
+	listPresence: typeof listAgentPresence = listAgentPresence,
+	listRegistry: typeof listActiveSessionRegistry = listActiveSessionRegistry,
+): string {
+	const peers = collectPromptPeerSessions(req, agentId, listPresence, listRegistry);
+	if (peers.length === 0) return "";
+	const visiblePeers = peers.slice(0, PEER_VISIBILITY_DISPLAY_LIMIT);
+
+	const counts = new Map<string, number>();
+	for (const peer of visiblePeers) {
+		const label = sanitizePeerPromptLabel(peer.appLabel);
+		counts.set(label, (counts.get(label) ?? 0) + 1);
+	}
+	const appSummary = [...counts.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.map(([label, count]) => `${label} ${count}`)
+		.join(", ");
+	const sameProject = req.project ? peers.filter((peer) => peer.project === req.project).length : 0;
+	const projectSummary =
+		req.project && sameProject > 0 ? `; ${sameProject} in this project` : req.project ? "; none in this project" : "";
+	const countLabel =
+		peers.length > visiblePeers.length
+			? `Showing ${visiblePeers.length} of ${peers.length} active peer ${pluralizeSession(peers.length)}`
+			: `Showing ${visiblePeers.length} active peer ${pluralizeSession(visiblePeers.length)}`;
+	const lines = ["## Active Peer Sessions", "", `${countLabel} (${appSummary}${projectSummary}).`];
+
+	for (const peer of visiblePeers.slice(0, PEER_VISIBILITY_LIST_LIMIT)) {
+		const app = sanitizePeerPromptLabel(peer.appLabel);
+		const safeAgentId = sanitizePeerPromptField(peer.agentId) || "unknown-agent";
+		const safeSessionKey = sanitizePeerPromptField(peer.sessionKey);
+		const sameProjectLabel = req.project && peer.project === req.project ? ", this project" : "";
+		const projectLabel = sameProjectLabel;
+		const sessionLabel = safeSessionKey ? ` session=${safeSessionKey}` : "";
+		lines.push(`- ${app}: ${safeAgentId}${sessionLabel}${projectLabel}, seen ${formatLastSeenShort(peer.lastSeenAt)}.`);
+	}
+	if (peers.length > PEER_VISIBILITY_LIST_LIMIT) {
+		lines.push(
+			`- ${peers.length - PEER_VISIBILITY_LIST_LIMIT} more active ${pluralizeSession(peers.length - PEER_VISIBILITY_LIST_LIMIT)} omitted.`,
+		);
+	}
+
+	lines.push(
+		"When Signet cross-agent MCP tools are available, use `agent_peers` for the full live list and `agent_message_send` or `agent_message_inbox` when coordination would help. Use memory or transcript recall for older sessions.",
+	);
+	return `${lines.join("\n")}\n`;
 }
 
 export function buildSignetSystemPrompt(): string {
@@ -388,6 +535,7 @@ export interface SessionStartRequest {
 	agentId?: string;
 	context?: string;
 	sessionKey?: string;
+	sessionId?: string;
 	runtimePath?: "plugin" | "legacy";
 }
 
@@ -431,6 +579,7 @@ export interface UserPromptSubmitRequest {
 	userPrompt?: string;
 	lastAssistantMessage?: string;
 	sessionKey?: string;
+	sessionId?: string;
 	transcriptPath?: string;
 	transcript?: string;
 	runtimePath?: "plugin" | "legacy";
@@ -1858,31 +2007,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	});
 	injectParts.push(`\n# Current Date & Time\n${now} (${tz})\n`);
 
-	if (req.project) {
-		const peerSessions = listAgentPresence({
-			agentId: resolveAgentId(req),
-			sessionKey: req.sessionKey,
-			project: req.project,
-			includeSelf: false,
-			limit: 6,
-		});
-		if (peerSessions.length > 0) {
-			injectParts.push("\n## Active Peer Sessions\n");
-			injectParts.push("Other Signet agent sessions are active right now:");
-			for (const peer of peerSessions) {
-				const safeAgentId = sanitizePeerPromptField(peer.agentId) || "unknown-agent";
-				const safeHarness = sanitizePeerPromptField(peer.harness) || "unknown-harness";
-				const safeSessionKey = sanitizePeerPromptField(peer.sessionKey);
-				const safeProject = sanitizePeerPromptField(peer.project);
-				const sessionLabel = safeSessionKey ? ` session=${safeSessionKey}` : "";
-				const projectLabel = safeProject ? ` project=${safeProject}` : "";
-				injectParts.push(
-					`- ${safeAgentId} (${safeHarness})${projectLabel}${sessionLabel} [seen ${formatLastSeenShort(peer.lastSeenAt)}]`,
-				);
-			}
-			if (harnessSupportsNamedCrossAgentTools(req.harness)) {
-				injectParts.push("Use `agent_message_send` to ask for help and `agent_message_inbox` to read replies.");
-			}
+	{
+		const peerSection = buildPeerSessionVisibilitySection(req, resolveAgentId(req));
+		if (peerSection) {
+			injectParts.push("");
+			injectParts.push(peerSection.trimEnd());
 		}
 	}
 
@@ -2525,6 +2654,7 @@ type UserPromptSubmitDeps = {
 	readonly searchTemporalFallback: typeof searchTemporalFallback;
 	readonly searchTranscriptFallback: typeof searchTranscriptFallback;
 	readonly trackFtsHits: typeof trackFtsHits;
+	readonly listAgentPresence: typeof listAgentPresence;
 };
 
 const PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS = 1000;
@@ -2571,6 +2701,7 @@ const DEFAULT_USER_PROMPT_SUBMIT_DEPS: UserPromptSubmitDeps = {
 	searchTemporalFallback,
 	searchTranscriptFallback,
 	trackFtsHits,
+	listAgentPresence,
 };
 
 export async function handleUserPromptSubmit(
@@ -2721,7 +2852,8 @@ export async function handleUserPromptSubmit(
 		dateStyle: "full",
 		timeStyle: "short",
 	});
-	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n`;
+	const peerSection = buildPeerSessionVisibilitySection(req, agentId, deps.listAgentPresence);
+	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n${peerSection ? `\n${peerSection}` : ""}`;
 	const expiryWarning = req.sessionKey ? deps.getExpiryWarning(req.sessionKey) : null;
 	const warnings = expiryWarning ? [expiryWarning] : undefined;
 	const pluginContext = buildPluginPromptContributionSection("user-prompt-submit", deps.logger);

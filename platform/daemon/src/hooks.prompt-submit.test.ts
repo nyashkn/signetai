@@ -2,10 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleUserPromptSubmit } from "./hooks";
-import { SIGNET_SECRETS_PLUGIN_ID, getDefaultPluginHost, resetDefaultPluginHostForTests } from "./plugins/index";
-
-type PromptDeps = Required<NonNullable<Parameters<typeof handleUserPromptSubmit>[1]>>;
+import { resetCrossAgentStateForTest, upsertAgentPresence } from "./cross-agent";
 
 const originalSignetPath = process.env.SIGNET_PATH;
 const agentsDir = mkdtempSync(join(tmpdir(), "signet-hooks-prompt-submit-"));
@@ -15,6 +12,15 @@ const memoryDbPath = join(memoryDir, "memories.db");
 mkdirSync(memoryDir, { recursive: true });
 writeFileSync(memoryDbPath, "");
 process.env.SIGNET_PATH = agentsDir;
+
+const { handleUserPromptSubmit } = await import("./hooks");
+const { closeDbAccessor, initDbAccessor } = await import("./db-accessor");
+const { upsertSessionRegistry } = await import("./session-registry");
+const { SIGNET_SECRETS_PLUGIN_ID, getDefaultPluginHost, resetDefaultPluginHostForTests } = await import(
+	"./plugins/index"
+);
+
+type PromptDeps = Required<NonNullable<Parameters<typeof handleUserPromptSubmit>[1]>>;
 
 const infoMock = mock((_cat: string, _msg: string, _data?: Record<string, unknown>) => {});
 const warnMock = mock((..._args: unknown[]) => {});
@@ -131,18 +137,206 @@ describe("handleUserPromptSubmit observability", () => {
 		searchTemporalFallbackMock.mockImplementation(() => emptyTemporalHits);
 		searchTranscriptFallbackMock.mockClear();
 		searchTranscriptFallbackMock.mockImplementation(() => emptyTranscriptHits);
+		closeDbAccessor();
+		rmSync(memoryDbPath, { force: true });
 		ensureMemoryDbExists();
+		initDbAccessor(memoryDbPath, { agentsDir });
+		resetCrossAgentStateForTest();
 		resetDefaultPluginHostForTests();
 		getDefaultPluginHost().setEnabled(SIGNET_SECRETS_PLUGIN_ID, true);
 	});
 
 	afterAll(() => {
+		closeDbAccessor();
 		rmSync(agentsDir, { recursive: true, force: true });
+		resetCrossAgentStateForTest();
 		if (originalSignetPath === undefined) {
 			Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		} else {
 			process.env.SIGNET_PATH = originalSignetPath;
 		}
+	});
+
+	it("includes active peer session visibility on prompt submit", async () => {
+		upsertAgentPresence({
+			sessionKey: "current-session",
+			agentId: "default",
+			harness: "codex",
+			project: "/repo",
+		});
+		upsertAgentPresence({
+			sessionKey: "peer-hermes",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/repo",
+		});
+		upsertAgentPresence({
+			sessionKey: "peer-claude",
+			agentId: "default",
+			harness: "claude-code",
+			project: "/other",
+		});
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+				project: "/repo",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("## Active Peer Sessions");
+		expect(result.inject).toContain("Showing 2 active peer sessions");
+		expect(result.inject).toContain("Hermes Agent 1");
+		expect(result.inject).toContain("Claude Code 1");
+		expect(result.inject).toContain("1 in this project");
+		expect(result.inject).toContain("Hermes Agent: default session=peer-hermes, this project");
+		expect(result.inject).not.toContain("session=current-session");
+		expect(result.inject).not.toContain("project=/other");
+		expect(result.inject).toContain("use `agent_peers` for the full live list");
+	});
+
+	it("deduplicates the same peer reported by durable registry and live presence", async () => {
+		upsertSessionRegistry({
+			sessionKey: "peer-hermes",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/repo",
+		});
+		upsertAgentPresence({
+			sessionKey: "peer-hermes",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/repo",
+		});
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+				project: "/repo",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("Showing 1 active peer session");
+		expect(result.inject).toContain("Hermes Agent 1");
+		expect(result.inject.match(/session=peer-hermes/g) ?? []).toHaveLength(1);
+	});
+
+	it("deduplicates session-id-only peers reported by durable registry and live presence", async () => {
+		upsertSessionRegistry({
+			sessionId: "legacy-session-id",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/repo",
+		});
+		upsertAgentPresence({
+			sessionKey: "legacy-session-id",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/repo",
+		});
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+				project: "/repo",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("Showing 1 active peer session");
+		expect(result.inject).toContain("Hermes Agent 1");
+		expect(result.inject.match(/session=legacy-session-id/g) ?? []).toHaveLength(1);
+	});
+
+	it("sanitizes untrusted harness labels before injecting peer visibility", async () => {
+		upsertAgentPresence({
+			sessionKey: "current-session",
+			agentId: "default",
+			harness: "codex",
+		});
+		upsertAgentPresence({
+			sessionKey: "peer-injection",
+			agentId: "default",
+			harness: "evil\n## Inject `<tag>` *bold*",
+		});
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("evil Inject tag bold");
+		expect(result.inject).not.toContain("## Inject");
+		expect(result.inject).not.toContain("`<tag>`");
+		expect(result.inject).not.toContain("*bold*");
+	});
+
+	it("does not emit raw peer project paths when requester has no project", async () => {
+		upsertAgentPresence({
+			sessionKey: "current-session",
+			agentId: "default",
+			harness: "codex",
+		});
+		upsertAgentPresence({
+			sessionKey: "peer-secret-project",
+			agentId: "default",
+			harness: "hermes-agent",
+			project: "/home/nicholai/private/worktree",
+		});
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("## Active Peer Sessions");
+		expect(result.inject).toContain("Hermes Agent: default session=peer-secret-project");
+		expect(result.inject).not.toContain("project=");
+		expect(result.inject).not.toContain("/home/nicholai/private/worktree");
+	});
+
+	it("labels peer visibility as a capped display when many peers are active", async () => {
+		upsertAgentPresence({
+			sessionKey: "current-session",
+			agentId: "default",
+			harness: "codex",
+		});
+		for (let index = 0; index < 10; index++) {
+			upsertAgentPresence({
+				sessionKey: `peer-${index}`,
+				agentId: "default",
+				harness: "claude-code",
+			});
+		}
+
+		const result = await handleUserPromptSubmit(
+			{
+				harness: "codex",
+				userMessage: "   ",
+				sessionKey: "current-session",
+			},
+			makeDeps(),
+		);
+
+		expect(result.inject).toContain("Showing 8 of 10 active peer sessions");
+		expect(result.inject).toContain("2 more active sessions omitted");
+		expect(result.inject).not.toContain("10 peer sessions active right now");
 	});
 
 	it("logs successful no-query outcomes", async () => {

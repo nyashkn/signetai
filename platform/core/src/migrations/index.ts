@@ -69,6 +69,7 @@ import { up as entityAttributeGroupKey } from "./060-entity-attribute-group-key"
 import { up as memoryArtifactSourceMtime } from "./061-memory-artifact-source-mtime";
 import { up as memoryArtifactSoftDelete } from "./062-memory-artifact-soft-delete";
 import { up as contentOnlyMemoriesFtsUpdate } from "./063-content-only-memories-fts-update";
+import { up as sessionRegistry } from "./064-session-registry";
 
 // -- Public interface consumed by Database.init() --
 
@@ -596,6 +597,14 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 63,
 		name: "content-only-memories-fts-update",
 		up: contentOnlyMemoriesFtsUpdate,
+	},
+	{
+		version: 64,
+		name: "session-registry",
+		up: sessionRegistry,
+		artifacts: {
+			tables: ["session_registry"],
+		},
 	},
 ];
 
