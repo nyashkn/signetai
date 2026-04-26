@@ -95,6 +95,8 @@ let kbDbKind = $state<"sqlite" | "postgres">("sqlite");
 let kbDbTable = $state("");
 // biome-ignore lint/style/useConst: bind:value mutates $state.
 let kbDbPrimaryKey = $state("");
+// biome-ignore lint/style/useConst: bind:value mutates $state.
+let kbDbPollIntervalMs = $state("60000");
 let kbCodebasePath = $state("");
 let kbImportBusy = $state(false);
 let kbImportMessage = $state<string | null>(null);
@@ -375,7 +377,11 @@ async function connectDatabaseKnowledgeBase(): Promise<void> {
 			uri: kbDbUri.trim(),
 			name: kbImportName.trim() || undefined,
 			kind: kbDbKind,
-			config: { table: kbDbTable.trim() || undefined, primaryKey: kbDbPrimaryKey.trim() || undefined },
+			config: {
+				table: kbDbTable.trim() || undefined,
+				primaryKey: kbDbPrimaryKey.trim() || undefined,
+				pollIntervalMs: Number.parseInt(kbDbPollIntervalMs, 10) || 60_000,
+			},
 			mapping: buildKnowledgeBaseMapping(),
 		});
 		kbImportMessage = "Registered database source for polling.";
@@ -508,7 +514,7 @@ onMount(() => {
 					bind:value={kbRelationshipMappings}
 				></textarea>
 
-				<div class="grid gap-2 lg:grid-cols-[120px_1fr_180px_180px_auto]">
+				<div class="grid gap-2 lg:grid-cols-[120px_1fr_180px_180px_150px_auto]">
 					<Select.Root type="single" value={kbDbKind} onValueChange={(value) => { kbDbKind = value === "postgres" ? "postgres" : "sqlite"; }}>
 						<Select.Trigger class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]">{kbDbKind}</Select.Trigger>
 						<Select.Content class="border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)]">
@@ -519,6 +525,7 @@ onMount(() => {
 					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Database URI or SQLite path" bind:value={kbDbUri} />
 					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Table/view" bind:value={kbDbTable} />
 					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Primary key" bind:value={kbDbPrimaryKey} />
+					<Input class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]" placeholder="Poll ms" bind:value={kbDbPollIntervalMs} />
 					<Button class="sig-label" disabled={kbImportBusy || !kbDbUri.trim()} onclick={connectDatabaseKnowledgeBase}>Poll DB</Button>
 				</div>
 

@@ -1,8 +1,21 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseKnowledgeSource, projectionForRow, resolveWorkspaceDefaultAgentIds } from "./knowledge-bases";
+import { runMigrations } from "../../core/src/migrations";
+import type { WriteDb } from "./db-accessor";
+import {
+	createKnowledgeBase,
+	parseKnowledgeSource,
+	projectionForRow,
+	resolveWorkspaceDefaultAgentIds,
+	setKnowledgeBasePolicy,
+} from "./knowledge-bases";
+
+function asWriteDb(db: Database): WriteDb {
+	return db as unknown as WriteDb;
+}
 
 describe("knowledge base ingestion helpers", () => {
 	test("parses CSV rows into structured source records", () => {
@@ -41,5 +54,42 @@ describe("knowledge base ingestion helpers", () => {
 		writeFileSync(join(dir, "agent.yaml"), "agent:\n  name: ant\n");
 
 		expect(resolveWorkspaceDefaultAgentIds(dir)).toEqual(["ant", "default"]);
+	});
+
+	test("does not overwrite existing per-agent policy on knowledge base updates", () => {
+		const db = new Database(":memory:");
+		try {
+			runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+			const now = "2026-04-26T19:30:00.000Z";
+			const id = createKnowledgeBase(asWriteDb(db), {
+				id: "kb-1",
+				name: "docs",
+				kind: "json",
+				sourceUri: "inline",
+				createdByAgentId: "default",
+				defaultAgentIds: ["default"],
+				now,
+			});
+			setKnowledgeBasePolicy(asWriteDb(db), id, "default", {
+				allowed: false,
+				enabled: false,
+				now: "2026-04-26T19:31:00.000Z",
+			});
+			createKnowledgeBase(asWriteDb(db), {
+				id: "ignored",
+				name: "docs",
+				kind: "json",
+				sourceUri: "inline",
+				createdByAgentId: "default",
+				defaultAgentIds: ["default"],
+				now: "2026-04-26T19:32:00.000Z",
+			});
+			const policy = db
+				.prepare("SELECT allowed, enabled FROM knowledge_base_agents WHERE knowledge_base_id = ? AND agent_id = ?")
+				.get(id, "default") as { allowed: number; enabled: number };
+			expect(policy).toEqual({ allowed: 0, enabled: 0 });
+		} finally {
+			db.close();
+		}
 	});
 });

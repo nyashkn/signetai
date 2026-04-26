@@ -1221,6 +1221,7 @@ describe("buildAgentScopeClause regression tests", () => {
 		expect(result.sql).toContain("m.agent_id = ?");
 		expect(result.sql).toContain("knowledge_base_records");
 		expect(result.sql).toContain("knowledge_base_agents");
+		expect(result.sql).toContain("kbr.status = 'active'");
 		expect(result.sql).toContain("m.visibility != 'archived'");
 		expect(result.args).toEqual(["agent-x", "agent-x"]);
 	});

@@ -111,6 +111,7 @@ export function buildAgentScopeClause(
 		JOIN knowledge_base_agents kba
 		  ON kba.knowledge_base_id = kbr.knowledge_base_id
 		WHERE kbr.memory_id = m.id
+		  AND kbr.status = 'active'
 		  AND kba.agent_id = ?
 		  AND kba.allowed = 1
 		  AND kba.enabled = 1

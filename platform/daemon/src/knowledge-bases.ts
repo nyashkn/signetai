@@ -180,7 +180,10 @@ export function createKnowledgeBase(
 	}
 
 	for (const agentId of input.defaultAgentIds) {
-		setKnowledgeBasePolicy(db, kbId, agentId, { allowed: true, enabled: true, now: input.now });
+		const policy = db
+			.prepare("SELECT 1 FROM knowledge_base_agents WHERE knowledge_base_id = ? AND agent_id = ? LIMIT 1")
+			.get(kbId, agentId);
+		if (!policy) setKnowledgeBasePolicy(db, kbId, agentId, { allowed: true, enabled: true, now: input.now });
 	}
 	return kbId;
 }

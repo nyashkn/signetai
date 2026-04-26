@@ -222,8 +222,13 @@ function sourceCanWatch(source: KnowledgeBaseSourceRecord): boolean {
 	return source.sourceConfig.watch !== false && typeof source.sourceUri === "string" && existsSync(source.sourceUri);
 }
 
+function sourceCanPoll(source: KnowledgeBaseSourceRecord): boolean {
+	return source.kind === "sqlite" || source.kind === "postgres";
+}
+
 export function startKnowledgeBaseSync(): KnowledgeBaseSyncHandle {
 	const watchers = new Map<string, { readonly watcher: ReturnType<typeof watch>; readonly clear: () => void }>();
+	const pollers = new Map<string, { readonly timer: ReturnType<typeof setInterval>; readonly intervalMs: number }>();
 	const watchSource = (source: KnowledgeBaseSourceRecord): void => {
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const schedule = (): void => {
@@ -249,12 +254,41 @@ export function startKnowledgeBaseSync(): KnowledgeBaseSyncHandle {
 		watchers.set(source.id, { watcher, clear: () => (timer ? clearTimeout(timer) : undefined) });
 	};
 
+	const pollSource = (source: KnowledgeBaseSourceRecord): void => {
+		let polling = false;
+		const intervalMs = numberConfig(source, "pollIntervalMs", 60_000);
+		const timer = setInterval(() => {
+			if (polling) return;
+			polling = true;
+			indexKnowledgeBaseSource(source.id)
+				.catch((err) => {
+					logger.warn("watcher", "Knowledge base database polling failed", {
+						id: source.id,
+						name: source.name,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				})
+				.finally(() => {
+					polling = false;
+				});
+		}, intervalMs);
+		timer.unref?.();
+		pollers.set(source.id, { timer, intervalMs });
+	};
+
 	const closeWatcher = async (id: string): Promise<void> => {
 		const item = watchers.get(id);
 		if (!item) return;
 		item.clear();
 		await item.watcher.close();
 		watchers.delete(id);
+	};
+
+	const closePoller = (id: string): void => {
+		const item = pollers.get(id);
+		if (!item) return;
+		clearInterval(item.timer);
+		pollers.delete(id);
 	};
 
 	const refresh = async (): Promise<number> => {
@@ -269,32 +303,21 @@ export function startKnowledgeBaseSync(): KnowledgeBaseSyncHandle {
 			watchSource(source);
 			added++;
 		}
+		const pollable = new Map(sources.filter(sourceCanPoll).map((source) => [source.id, source]));
+		for (const id of [...pollers.keys()]) {
+			const source = pollable.get(id);
+			if (!source || numberConfig(source, "pollIntervalMs", 60_000) !== pollers.get(id)?.intervalMs) closePoller(id);
+		}
+		for (const source of pollable.values()) {
+			if (pollers.has(source.id)) continue;
+			pollSource(source);
+			added++;
+		}
 		return added;
 	};
 
 	void refresh();
 	activeRefresh = refresh;
-
-	let polling = false;
-	const pollTimer = setInterval(() => {
-		if (polling) return;
-		polling = true;
-		const sources = getDbAccessor().withReadDb((db) => listActiveKnowledgeBaseSources(db));
-		Promise.all(
-			sources
-				.filter((source) => source.kind === "sqlite" || source.kind === "postgres")
-				.map((source) => indexKnowledgeBaseSource(source.id)),
-		)
-			.catch((err) => {
-				logger.warn("watcher", "Knowledge base database polling failed", {
-					error: err instanceof Error ? err.message : String(err),
-				});
-			})
-			.finally(() => {
-				polling = false;
-			});
-	}, 60_000);
-	pollTimer.unref?.();
 
 	return {
 		async syncExisting(): Promise<number> {
@@ -316,8 +339,8 @@ export function startKnowledgeBaseSync(): KnowledgeBaseSyncHandle {
 		refresh,
 		async close(): Promise<void> {
 			if (activeRefresh === refresh) activeRefresh = null;
-			clearInterval(pollTimer);
 			await Promise.all([...watchers.keys()].map((id) => closeWatcher(id)));
+			for (const id of [...pollers.keys()]) closePoller(id);
 		},
 	};
 }

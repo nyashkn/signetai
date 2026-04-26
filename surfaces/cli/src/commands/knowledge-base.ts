@@ -115,6 +115,7 @@ export function registerKnowledgeBaseCommands(program: Command, deps: KnowledgeB
 		.option("--uri <uri>", "Database URI or file path")
 		.option("--table <table>", "Table or view to poll")
 		.option("--primary-key <field>", "Stable primary key field")
+		.option("--poll-interval-ms <ms>", "Polling interval in milliseconds")
 		.option("--query <sql>", "Read-only query override")
 		.option("--config <json>", "Connection config JSON")
 		.option("--mapping <json>", "Inline mapping JSON")
@@ -143,7 +144,13 @@ export function registerKnowledgeBaseCommands(program: Command, deps: KnowledgeB
 				kind,
 				name: options.name ?? options.uri ?? kind,
 				uri: options.uri,
-				config: { ...config, table: options.table, primaryKey: options.primaryKey, query: options.query },
+				config: {
+					...config,
+					table: options.table,
+					primaryKey: options.primaryKey,
+					pollIntervalMs: options.pollIntervalMs ? Number.parseInt(options.pollIntervalMs, 10) : undefined,
+					query: options.query,
+				},
 				mapping,
 			});
 			if (options.json) console.log(JSON.stringify(data, null, 2));

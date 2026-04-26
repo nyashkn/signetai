@@ -132,19 +132,24 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
 		if (!uri) return c.json({ error: "uri is required" }, 400);
 		const agentId = stringValue(body.agentId) ?? resolveWorkspaceDefaultAgentIds(AGENTS_DIR)[0] ?? "default";
 		const now = new Date().toISOString();
+		const config = {
+			...(toRecord(body.config) ?? {}),
+			pollIntervalMs: numberValue(body.pollIntervalMs, numberValue(toRecord(body.config)?.pollIntervalMs, 60_000)),
+		};
 		const id = getDbAccessor().withWriteTx((db) =>
 			createKnowledgeBase(db, {
 				id: crypto.randomUUID(),
 				name,
 				kind,
 				sourceUri: uri,
-				sourceConfig: body.config ?? {},
+				sourceConfig: config,
 				mapping: mappingValue(body.mapping),
 				createdByAgentId: agentId,
 				defaultAgentIds: resolveWorkspaceDefaultAgentIds(AGENTS_DIR),
 				now,
 			}),
 		);
+		await refreshKnowledgeBaseSyncSources().catch(() => 0);
 		const result = await indexKnowledgeBaseSource(id).catch((err) => ({
 			imported: 0,
 			skipped: 0,

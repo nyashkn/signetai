@@ -206,6 +206,20 @@ function persistMappedRelationships(
 	return count;
 }
 
+function retireKnowledgeBaseMemory(db: WriteDb, memoryId: string | null | undefined, now: string): void {
+	if (!memoryId) return;
+	db.prepare(
+		`UPDATE memories
+		 SET is_deleted = 1,
+		     visibility = 'archived',
+		     updated_at = ?
+		 WHERE id = ?`,
+	).run(now, memoryId);
+	db.prepare("DELETE FROM memory_hints WHERE memory_id = ?").run(memoryId);
+	db.prepare("DELETE FROM embeddings WHERE source_type = 'memory' AND source_id = ?").run(memoryId);
+	syncVecDeleteBySourceId(db, "memory", memoryId);
+}
+
 async function storeEmbedding(memoryId: string, contentHash: string, content: string): Promise<boolean> {
 	try {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
@@ -259,6 +273,7 @@ export async function ingestKnowledgeBaseRows(input: KnowledgeBaseIngestInput): 
 					)
 					.get(input.knowledgeBaseId, sourceKey) as { memory_id: string | null; source_hash: string } | undefined;
 				if (existing?.source_hash === sourceHash && existing.memory_id) return false;
+				if (existing?.memory_id) retireKnowledgeBaseMemory(db, existing.memory_id, now);
 
 				txIngestEnvelope(db, {
 					id: memoryId,
@@ -370,6 +385,10 @@ export function tombstoneMissingKnowledgeBaseRecords(
 		let changed = 0;
 		for (const row of rows) {
 			if (activeSourceKeys.has(row.source_key)) continue;
+			const memory = db
+				.prepare("SELECT memory_id FROM knowledge_base_records WHERE knowledge_base_id = ? AND source_key = ? LIMIT 1")
+				.get(knowledgeBaseId, row.source_key) as { memory_id: string | null } | undefined;
+			retireKnowledgeBaseMemory(db, memory?.memory_id, now);
 			db.prepare(
 				"UPDATE knowledge_base_records SET status = 'tombstoned', updated_at = ? WHERE knowledge_base_id = ? AND source_key = ?",
 			).run(now, knowledgeBaseId, row.source_key);
