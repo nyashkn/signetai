@@ -69,6 +69,7 @@ import { up as entityAttributeGroupKey } from "./060-entity-attribute-group-key"
 import { up as memoryArtifactSourceMtime } from "./061-memory-artifact-source-mtime";
 import { up as memoryArtifactSoftDelete } from "./062-memory-artifact-soft-delete";
 import { up as contentOnlyMemoriesFtsUpdate } from "./063-content-only-memories-fts-update";
+import { up as knowledgeBases } from "./064-knowledge-bases";
 
 // -- Public interface consumed by Database.init() --
 
@@ -596,6 +597,18 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 63,
 		name: "content-only-memories-fts-update",
 		up: contentOnlyMemoriesFtsUpdate,
+	},
+	{
+		version: 64,
+		name: "knowledge-bases",
+		up: knowledgeBases,
+		artifacts: {
+			tables: ["knowledge_bases", "knowledge_base_agents", "knowledge_base_records"],
+			columns: [
+				{ table: "memories", column: "knowledge_base_id" },
+				{ table: "memories", column: "knowledge_base_record_id" },
+			],
+		},
 	},
 ];
 

@@ -7,7 +7,7 @@
  */
 
 import type { WriteDb } from "./db-accessor";
-import { vectorToBlob, syncVecInsert, syncVecDeleteBySourceId, syncVecDeleteBySourceExceptHash } from "./db-helpers";
+import { syncVecDeleteBySourceExceptHash, syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +33,8 @@ export interface IngestEnvelope {
 	sourceType: string;
 	sourceId: string | null;
 	scope?: string | null;
+	knowledgeBaseId?: string | null;
+	knowledgeBaseRecordId?: string | null;
 	agentId?: string;
 	visibility?: "global" | "private" | "archived";
 	createdAt: string;
@@ -218,8 +220,9 @@ export function txIngestEnvelope(db: WriteDb, mem: IngestEnvelope): string {
 		 (id, content, normalized_content, content_hash, who, why, project,
 		  importance, type, tags, pinned, is_deleted, extraction_status,
 		  embedding_model, extraction_model, created_at, updated_at, updated_by,
-		  source_type, source_id, scope, agent_id, visibility)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  source_type, source_id, scope, knowledge_base_id, knowledge_base_record_id,
+		  agent_id, visibility)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		mem.id,
 		mem.content,
@@ -242,6 +245,8 @@ export function txIngestEnvelope(db: WriteDb, mem: IngestEnvelope): string {
 		mem.sourceType,
 		mem.sourceId,
 		mem.scope ?? null,
+		mem.knowledgeBaseId ?? null,
+		mem.knowledgeBaseRecordId ?? null,
 		mem.agentId ?? "default",
 		mem.visibility ?? "global",
 	);

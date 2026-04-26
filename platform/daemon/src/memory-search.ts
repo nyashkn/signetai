@@ -105,22 +105,37 @@ export function buildAgentScopeClause(
 	readPolicy: string,
 	policyGroup: string | null,
 ): { sql: string; args: unknown[] } {
+	const kbAccess = `EXISTS (
+		SELECT 1
+		FROM knowledge_base_records kbr
+		JOIN knowledge_base_agents kba
+		  ON kba.knowledge_base_id = kbr.knowledge_base_id
+		WHERE kbr.memory_id = m.id
+		  AND kba.agent_id = ?
+		  AND kba.allowed = 1
+		  AND kba.enabled = 1
+	)`;
+	const notKb = "NOT EXISTS (SELECT 1 FROM knowledge_base_records kbr WHERE kbr.memory_id = m.id)";
+	const close = `) AND m.visibility != 'archived'`;
+
 	if (readPolicy === "shared") {
 		return {
-			sql: " AND (m.visibility = 'global' OR m.agent_id = ?) AND m.visibility != 'archived'",
-			args: [agentId],
+			sql: ` AND (((m.visibility = 'global' OR m.agent_id = ?) AND ${notKb}) OR ${kbAccess}${close}`,
+			args: [agentId, agentId],
 		};
 	}
 	if (readPolicy === "group" && policyGroup) {
 		return {
-			sql: " AND ((m.visibility = 'global' AND m.agent_id IN (SELECT id FROM agents WHERE policy_group = ?)) OR m.agent_id = ?) AND m.visibility != 'archived'",
-			args: [policyGroup, agentId],
+			sql: ` AND ((((m.visibility = 'global' AND m.agent_id IN (SELECT id FROM agents WHERE policy_group = ?)) OR m.agent_id = ?) AND ${notKb}) OR ${kbAccess}${close}`,
+			args: [policyGroup, agentId, agentId],
 		};
 	}
-	// 'isolated', 'group' without policyGroup, or unknown — own memories only
+	// 'isolated', 'group' without policyGroup, or unknown — own memories only.
+	// Knowledge-base records are governed by the per-agent KB allow/enable
+	// policy instead of leaking through owner visibility.
 	return {
-		sql: " AND m.agent_id = ? AND m.visibility != 'archived'",
-		args: [agentId],
+		sql: ` AND ((m.agent_id = ? AND ${notKb}) OR ${kbAccess}${close}`,
+		args: [agentId, agentId],
 	};
 }
 
@@ -851,6 +866,40 @@ function cosineSimilarity(query: Float32Array, memory: Float32Array): number {
 	return Math.max(0, Math.min(1, dot / denom));
 }
 
+function filterKnowledgeBaseCandidates(
+	scored: Array<{ id: string; score: number; source: string }>,
+	agentId: string,
+): Array<{ id: string; score: number; source: string }> {
+	if (scored.length === 0) return scored;
+	try {
+		const ids = scored.map((row) => row.id);
+		const placeholders = ids.map(() => "?").join(", ");
+		const blocked = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT kbr.memory_id AS id
+					 FROM knowledge_base_records kbr
+					 WHERE kbr.memory_id IN (${placeholders})
+					   AND NOT EXISTS (
+					     SELECT 1
+					     FROM knowledge_base_agents kba
+					     WHERE kba.knowledge_base_id = kbr.knowledge_base_id
+					       AND kba.agent_id = ?
+					       AND kba.allowed = 1
+					       AND kba.enabled = 1
+					   )`,
+					)
+					.all(...ids, agentId) as Array<{ id: string }>,
+		);
+		if (blocked.length === 0) return scored;
+		const blockedIds = new Set(blocked.map((row) => row.id));
+		return scored.filter((row) => !blockedIds.has(row.id));
+	} catch {
+		return scored;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Main search orchestration
 // ---------------------------------------------------------------------------
@@ -935,25 +984,14 @@ export async function hybridRecall(
 	if (cfg.pipelineV2.hints?.enabled) {
 		try {
 			getDbAccessor().withReadDb((db) => {
-				const sql = scoped
-					? `SELECT h.memory_id AS id, bm25(memory_hints_fts) AS raw_score
+				const sql = `SELECT h.memory_id AS id, bm25(memory_hints_fts) AS raw_score
 					   FROM memory_hints_fts
 					   JOIN memory_hints h ON memory_hints_fts.rowid = h.rowid
 					   JOIN memories m ON m.id = h.memory_id
-					   WHERE memory_hints_fts MATCH ? AND h.agent_id = ? AND m.scope = ?
-					   ORDER BY raw_score LIMIT ?`
-					: `SELECT h.memory_id AS id, bm25(memory_hints_fts) AS raw_score
-					   FROM memory_hints_fts
-					   JOIN memory_hints h ON memory_hints_fts.rowid = h.rowid
-					   WHERE memory_hints_fts MATCH ? AND h.agent_id = ?
+					   WHERE memory_hints_fts MATCH ?${filter.sql}
 					   ORDER BY raw_score LIMIT ?`;
 
-				const agentId = params.agentId ?? "default";
-				const args = scoped
-					? [keywordQuery, agentId, params.scope, cfg.search.top_k]
-					: [keywordQuery, agentId, cfg.search.top_k];
-
-				const rows = (db.prepare(sql) as any).all(...args) as Array<{
+				const rows = (db.prepare(sql) as any).all(keywordQuery, ...filter.args, cfg.search.top_k) as Array<{
 					id: string;
 					raw_score: number;
 				}>;
@@ -1605,6 +1643,8 @@ export async function hybridRecall(
 	// Over-fetch before hydration when scoped. Vector search can't
 	// pre-filter by scope, so out-of-scope IDs get dropped at
 	// hydration. 3x compensates for the expected discard rate.
+	scored = filterKnowledgeBaseCandidates(scored, params.agentId ?? "default");
+
 	const preHydrate = scoped ? limit * 3 : limit;
 	const topIds = scored.slice(0, preHydrate).map((s) => s.id);
 	const recallTruncate = cfg.pipelineV2.guardrails.recallTruncateChars;

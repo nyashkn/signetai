@@ -1218,19 +1218,24 @@ describe("transcriptExcerpt", () => {
 describe("buildAgentScopeClause regression tests", () => {
 	it("falls back to isolated scope when policy is 'group' but policyGroup is null", () => {
 		const result = buildAgentScopeClause("agent-x", "group", null);
-		expect(result.sql).toBe(" AND m.agent_id = ? AND m.visibility != 'archived'");
-		expect(result.args).toEqual(["agent-x"]);
+		expect(result.sql).toContain("m.agent_id = ?");
+		expect(result.sql).toContain("knowledge_base_records");
+		expect(result.sql).toContain("knowledge_base_agents");
+		expect(result.sql).toContain("m.visibility != 'archived'");
+		expect(result.args).toEqual(["agent-x", "agent-x"]);
 	});
 
 	it("uses group scope when both readPolicy and policyGroup are provided", () => {
 		const result = buildAgentScopeClause("agent-x", "group", "team-a");
 		expect(result.sql).toContain("policy_group = ?");
-		expect(result.args).toEqual(["team-a", "agent-x"]);
+		expect(result.sql).toContain("knowledge_base_agents");
+		expect(result.args).toEqual(["team-a", "agent-x", "agent-x"]);
 	});
 
 	it("uses shared scope for readPolicy 'shared'", () => {
 		const result = buildAgentScopeClause("agent-x", "shared", null);
 		expect(result.sql).toContain("m.visibility = 'global'");
-		expect(result.args).toEqual(["agent-x"]);
+		expect(result.sql).toContain("knowledge_base_agents");
+		expect(result.args).toEqual(["agent-x", "agent-x"]);
 	});
 });

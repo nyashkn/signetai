@@ -2959,3 +2959,58 @@ export async function getMcpServerAnalytics(
 	if (!response.ok) throw new Error("Failed to fetch server analytics");
 	return response.json();
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge Bases
+// ---------------------------------------------------------------------------
+
+export interface KnowledgeBaseSummary {
+	id: string;
+	name: string;
+	kind: string;
+	sourceUri: string | null;
+	status: string;
+	createdByAgentId: string;
+	lastSyncedAt: string | null;
+	lastError: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface KnowledgeBaseImportResult {
+	id: string;
+	name: string;
+	kind: string;
+	imported: number;
+	skipped: number;
+	embedded: number;
+	attributes: number;
+	errors: string[];
+}
+
+export async function getKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
+	const response = await fetch(`${API_BASE}/api/knowledge-bases`);
+	if (!response.ok) throw new Error("Failed to fetch knowledge bases");
+	const data = await response.json();
+	return Array.isArray(data.items) ? data.items : [];
+}
+
+export async function importKnowledgeBase(input: {
+	path?: string;
+	content?: string;
+	filename?: string;
+	name?: string;
+	kind?: string;
+	agentId?: string;
+}): Promise<KnowledgeBaseImportResult> {
+	const response = await fetch(`${API_BASE}/api/knowledge-bases/import`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	if (!response.ok) {
+		const text = await response.text();
+		throw new Error(text || "Failed to import knowledge base");
+	}
+	return response.json();
+}

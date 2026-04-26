@@ -3,6 +3,7 @@ import {
 	type EntityHealth,
 	type KnowledgeAspectWithCounts,
 	type KnowledgeAttribute,
+	type KnowledgeBaseSummary,
 	type KnowledgeDependencyEdge,
 	type KnowledgeEntityDetail,
 	type KnowledgeEntityListItem,
@@ -13,6 +14,7 @@ import {
 	type TraversalStatusSnapshot,
 	getKnowledgeAspects,
 	getKnowledgeAttributes,
+	getKnowledgeBases,
 	getKnowledgeDependencies,
 	getKnowledgeEntities,
 	getKnowledgeEntity,
@@ -22,6 +24,7 @@ import {
 	getPredictorEntitySlices,
 	getPredictorProjectSlices,
 	getPredictorTrainingRuns,
+	importKnowledgeBase,
 	pinKnowledgeEntity,
 	unpinKnowledgeEntity,
 } from "$lib/api";
@@ -48,7 +51,9 @@ import { onMount } from "svelte";
 
 const ENTITY_TYPES = ["all", "project", "person", "system", "tool", "concept", "skill", "task"] as const;
 
+// biome-ignore lint/style/useConst: Svelte bind:value mutates $state.
 let query = $state("");
+// biome-ignore lint/style/useConst: Select onValueChange mutates $state.
 let typeFilter = $state("all");
 let loadingEntities = $state(true);
 let loadingDetail = $state(false);
@@ -63,6 +68,11 @@ let predictorByProject = $state<PredictorProjectSlice[]>([]);
 let trainingRuns = $state<PredictorTrainingRun[]>([]);
 let entityHealth = $state<EntityHealth[]>([]);
 let pinBusyEntityId = $state<string | null>(null);
+let knowledgeBases = $state<KnowledgeBaseSummary[]>([]);
+let kbImportPath = $state("");
+let kbImportName = $state("");
+let kbImportBusy = $state(false);
+let kbImportMessage = $state<string | null>(null);
 
 let selectedEntityId = $state<string | null>(null);
 let selectedAspectId = $state<string | null>(null);
@@ -72,8 +82,10 @@ let attributes = $state<KnowledgeAttribute[]>([]);
 let dependencies = $state<KnowledgeDependencyEdge[]>([]);
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
+// biome-ignore lint/style/useConst: Popover binding mutates $state.
 let sincePickerOpen = $state(false);
 const defaultSinceDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+// biome-ignore lint/style/useConst: Calendar selection mutates $state.
 let predictorSince = $state(defaultSinceDate.toISOString().slice(0, 10));
 
 function metricClass(kind: "default" | "warning" | "accent" = "default"): string {
@@ -252,6 +264,28 @@ async function togglePin(entityId: string, pinned: boolean): Promise<void> {
 	}
 }
 
+async function importKnowledgeBaseFromPath(): Promise<void> {
+	const path = kbImportPath.trim();
+	if (!path || kbImportBusy) return;
+	kbImportBusy = true;
+	kbImportMessage = null;
+	try {
+		const result = await importKnowledgeBase({
+			path,
+			name: kbImportName.trim() || undefined,
+		});
+		kbImportMessage = `Imported ${result.imported} records, ${result.attributes} attributes.`;
+		kbImportPath = "";
+		kbImportName = "";
+		knowledgeBases = await getKnowledgeBases().catch(() => knowledgeBases);
+		void loadEntities();
+	} catch (error) {
+		kbImportMessage = error instanceof Error ? error.message : String(error);
+	} finally {
+		kbImportBusy = false;
+	}
+}
+
 async function loadTraversal(): Promise<void> {
 	loadingTraversal = true;
 	traversal = await getKnowledgeTraversalStatus();
@@ -298,6 +332,49 @@ onMount(() => {
 		/>
 	</PageBanner>
 	<div class="flex flex-col flex-1 min-h-0 overflow-auto gap-3 p-3 bg-[var(--sig-bg)]">
+		<Card.Root class="border-[var(--sig-border)] bg-[var(--sig-surface)]">
+			<Card.Header class="border-b border-[var(--sig-border)] pb-3">
+				<Card.Title class="sig-heading flex items-center gap-2">
+					<Network class="size-4" />
+					Knowledge Bases
+				</Card.Title>
+				<Card.Description class="sig-label text-[var(--sig-text-muted)]">
+					Import CSV, JSON, and file-backed sources as first-class scoped knowledge.
+				</Card.Description>
+			</Card.Header>
+			<Card.Content class="space-y-3 p-3">
+				<div class="grid gap-2 lg:grid-cols-[1fr_220px_auto]">
+					<Input
+						class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]"
+						placeholder="/path/to/source.csv or .json"
+						bind:value={kbImportPath}
+					/>
+					<Input
+						class="sig-label border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] text-[var(--sig-text-bright)]"
+						placeholder="Name"
+						bind:value={kbImportName}
+					/>
+					<Button class="sig-label" disabled={kbImportBusy || !kbImportPath.trim()} onclick={importKnowledgeBaseFromPath}>
+						{kbImportBusy ? "Importing..." : "Import"}
+					</Button>
+				</div>
+				{#if kbImportMessage}
+					<p class="sig-label text-[var(--sig-text-muted)]">{kbImportMessage}</p>
+				{/if}
+				<div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+					{#each knowledgeBases as kb}
+						<div class="rounded-md border border-[var(--sig-border)] bg-[var(--sig-surface-raised)] p-3">
+							<div class="sig-heading text-[var(--sig-text-bright)]">{kb.name}</div>
+							<div class="sig-label text-[var(--sig-text-muted)]">{kb.kind} · {kb.status}</div>
+							{#if kb.sourceUri}
+								<div class="sig-label truncate text-[var(--sig-text-muted)]">{kb.sourceUri}</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			</Card.Content>
+		</Card.Root>
+
 		<Card.Root class="border-[var(--sig-border)] bg-[var(--sig-surface)]">
 			<Card.Header class="border-b border-[var(--sig-border)] pb-3">
 				<Card.Title class="sig-heading flex items-center gap-2">
