@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-04-29
-- Bug fixes: make transcript backfill idempotent; prevent OOM crash-loop in transcript backfill.
+- Bug fixes: harden desktop release builds; make transcript backfill idempotent; prevent OOM crash-loop in transcript backfill.
 
 ### 2026-04-26
 - Features: store transcripts as canonical jsonl.
@@ -35,6 +35,22 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: dedupe summary fact hash collisions; suppress OpenCode notifications for extraction sessions; skip unchanged artifact reindex on cold start; make writeImmutableArtifact idempotent for job retries.
 
 ## Release Ledger
+
+## [0.109.6] - 2026-04-29
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.109.5..v0.109.6`.
+
+No notable changes were captured from conventional commit subjects for this release.
+
+## [0.109.5] - 2026-04-29
+
+Release summary: 1 bug fix.
+Tag range: `v0.109.4..v0.109.5`.
+
+### Bug Fixes
+
+- **ci**: harden desktop release builds
 
 ## [0.109.4] - 2026-04-29
 
