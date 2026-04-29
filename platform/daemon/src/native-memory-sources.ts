@@ -3,7 +3,6 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { watch } from "chokidar";
 import { resolveDaemonAgentId } from "./agent-id";
 import { yieldEvery } from "./async-yield";
 import { getDbAccessor } from "./db-accessor";
@@ -33,7 +32,11 @@ export interface NativeMemoryBridgeOptions {
 	readonly pollIntervalMs?: number;
 }
 
-const indexed = new Map<string, string>();
+interface IndexedNativeMemory {
+	readonly contentHash: string;
+}
+
+const indexed = new Map<string, IndexedNativeMemory>();
 
 function codexRoot(): string {
 	return join(homedir(), ".codex");
@@ -132,6 +135,14 @@ function fingerprintKey(source: NativeMemorySource, filePath: string, agentId: s
 	return `${agentId}:${source.harness}:${filePath}`;
 }
 
+function sourceStateKey(source: NativeMemorySource, agentId: string): string {
+	return `${agentId}:${source.harness}:${source.root.replace(/\\/g, "/").replace(/\/$/, "")}`;
+}
+
+function contentFingerprint(content: string): string {
+	return createHash("sha256").update(content).digest("hex");
+}
+
 function nativeArtifactRowExists(filePath: string, agentId: string): boolean {
 	const sourcePath = filePath.replace(/\\/g, "/");
 	try {
@@ -174,8 +185,9 @@ export async function indexNativeMemoryFile(
 	if (!content.trim()) return false;
 
 	const key = fingerprintKey(source, filePath, agentId);
-	const fingerprint = `${mtimeMs}:${createHash("sha256").update(content).digest("hex")}`;
-	if (indexed.get(key) === fingerprint) {
+	const hash = contentFingerprint(content);
+	const cached = indexed.get(key);
+	if (cached?.contentHash === hash) {
 		if (nativeArtifactRowExists(filePath, agentId)) return false;
 		indexed.delete(key);
 	}
@@ -189,7 +201,7 @@ export async function indexNativeMemoryFile(
 			content,
 			sourceMtimeMs: mtimeMs,
 		});
-		indexed.set(key, fingerprint);
+		indexed.set(key, { contentHash: hash });
 		logger.info("watcher", "Indexed native memory artifact", {
 			harness: source.harness,
 			kind: pattern.kind,
@@ -220,37 +232,29 @@ export function startNativeMemoryBridge(
 	options: NativeMemoryBridgeOptions = {},
 ): NativeMemoryBridgeHandle {
 	const agentId = resolveBridgeAgentId(options.agentId);
-	const watchers = sources.map((source) => {
-		const patterns = source.files.map((file) => join(source.root, file.glob));
-		const watcher = watch(patterns, {
-			ignoreInitial: true,
-			persistent: true,
-		});
-		watcher.on("add", (path) => void indexNativeMemoryFile(source, path, agentId));
-		watcher.on("change", (path) => void indexNativeMemoryFile(source, path, agentId));
-		watcher.on("unlink", (path) => {
-			try {
-				removeNativeMemoryFile(source, path, agentId);
-			} catch (err) {
-				logger.warn("watcher", "Failed removing native memory artifact index row", {
-					harness: source.harness,
-					path,
-					error: err instanceof Error ? err.message : String(err),
-				});
-			}
-		});
-		return { source, watcher };
-	});
+	const known = new Map<string, Set<string>>();
 
 	const syncExisting = async (): Promise<number> => {
 		let count = 0;
 		const yielder = yieldEvery(20);
 		for (const source of sources) {
-			if (!existsSync(source.root)) continue;
-			for await (const file of walkMarkdownFiles(source.root)) {
-				if (await indexNativeMemoryFile(source, file, agentId)) count++;
-				await yielder();
+			const key = sourceStateKey(source, agentId);
+			const current = new Set<string>();
+			if (existsSync(source.root)) {
+				for await (const file of walkMarkdownFiles(source.root)) {
+					if (!matchesPattern(source, file)) continue;
+					current.add(file);
+					if (await indexNativeMemoryFile(source, file, agentId)) count++;
+					await yielder();
+				}
 			}
+			const previous = known.get(key);
+			if (previous) {
+				for (const file of previous) {
+					if (!current.has(file)) removeNativeMemoryFile(source, file, agentId);
+				}
+			}
+			known.set(key, current);
 		}
 		return count;
 	};
@@ -278,7 +282,6 @@ export function startNativeMemoryBridge(
 		syncExisting,
 		async close(): Promise<void> {
 			if (pollTimer) clearInterval(pollTimer);
-			await Promise.all(watchers.map(({ watcher }) => watcher.close()));
 		},
 	};
 }

@@ -255,6 +255,29 @@ describe("native memory sources", () => {
 		expect(count).toBe(1);
 	});
 
+	it("reindexes same-size native files when content changes", async () => {
+		const root = join(dir, ".codex");
+		mkdirSync(join(root, "memories"), { recursive: true });
+		const source = codexNativeMemorySource(root);
+		const file = join(root, "memories", "memory_summary.md");
+		const stamp = new Date("2026-04-22T12:00:00Z");
+		writeFileSync(file, "Codex remembered alpha state.\n");
+		utimesSync(file, stamp, stamp);
+
+		expect(await indexNativeMemoryFile(source, file, "agent-native")).toBe(true);
+		writeFileSync(file, "Codex remembered bravo state.\n");
+		utimesSync(file, stamp, stamp);
+
+		expect(await indexNativeMemoryFile(source, file, "agent-native")).toBe(true);
+		const row = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT content FROM memory_artifacts WHERE agent_id = ? AND source_path = ?")
+					.get("agent-native", file) as { content: string },
+		);
+		expect(row.content).toContain("bravo state");
+	});
+
 	it("indexes native memories when the source root is created after bridge startup", async () => {
 		const root = join(dir, ".codex");
 		const handle = startNativeMemoryBridge([codexNativeMemorySource(root)], {
@@ -278,6 +301,104 @@ describe("native memory sources", () => {
 				}
 			}
 			expect(indexed).toBe(true);
+		} finally {
+			await handle.close();
+		}
+	});
+
+	it("soft-deletes removed native memories during bridge sync", async () => {
+		const root = join(dir, ".codex");
+		const file = join(root, "memories", "memory_summary.md");
+		mkdirSync(join(root, "memories"), { recursive: true });
+		writeFileSync(file, "Codex remembered a native memory that will disappear.\n");
+
+		const handle = startNativeMemoryBridge([codexNativeMemorySource(root)], {
+			agentId: "agent-native",
+			pollIntervalMs: 0,
+		});
+		try {
+			expect(await handle.syncExisting()).toBe(1);
+			rmSync(file);
+			expect(await handle.syncExisting()).toBe(0);
+
+			const row = getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT is_deleted, deleted_at FROM memory_artifacts WHERE agent_id = ? AND source_path = ?")
+						.get("agent-native", file) as {
+						is_deleted: number;
+						deleted_at: string | null;
+					},
+			);
+			expect(row.is_deleted).toBe(1);
+			expect(row.deleted_at).toBeTruthy();
+		} finally {
+			await handle.close();
+		}
+	});
+
+	it("soft-deletes known native memories when their source root is removed", async () => {
+		const root = join(dir, ".codex");
+		const file = join(root, "memories", "memory_summary.md");
+		mkdirSync(join(root, "memories"), { recursive: true });
+		writeFileSync(file, "Codex remembered a native root that will disappear.\n");
+
+		const handle = startNativeMemoryBridge([codexNativeMemorySource(root)], {
+			agentId: "agent-native",
+			pollIntervalMs: 0,
+		});
+		try {
+			expect(await handle.syncExisting()).toBe(1);
+			rmSync(root, { recursive: true, force: true });
+			expect(await handle.syncExisting()).toBe(0);
+
+			const row = getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT is_deleted, deleted_at FROM memory_artifacts WHERE agent_id = ? AND source_path = ?")
+						.get("agent-native", file) as {
+						is_deleted: number;
+						deleted_at: string | null;
+					},
+			);
+			expect(row.is_deleted).toBe(1);
+			expect(row.deleted_at).toBeTruthy();
+		} finally {
+			await handle.close();
+		}
+	});
+
+	it("keeps known native memory state isolated by source root", async () => {
+		const rootA = join(dir, ".codex-a");
+		const rootB = join(dir, ".codex-b");
+		const fileA = join(rootA, "memories", "memory_summary.md");
+		const fileB = join(rootB, "memories", "memory_summary.md");
+		mkdirSync(join(rootA, "memories"), { recursive: true });
+		mkdirSync(join(rootB, "memories"), { recursive: true });
+		writeFileSync(fileA, "Codex remembered source A.\n");
+		writeFileSync(fileB, "Codex remembered source B.\n");
+
+		const handle = startNativeMemoryBridge([codexNativeMemorySource(rootA), codexNativeMemorySource(rootB)], {
+			agentId: "agent-native",
+			pollIntervalMs: 0,
+		});
+		try {
+			expect(await handle.syncExisting()).toBe(2);
+			expect(await handle.syncExisting()).toBe(0);
+
+			const rows = getDbAccessor().withReadDb(
+				(db) =>
+					db
+						.prepare("SELECT source_path, is_deleted FROM memory_artifacts WHERE agent_id = ? ORDER BY source_path")
+						.all("agent-native") as Array<{
+						source_path: string;
+						is_deleted: number;
+					}>,
+			);
+			expect(rows).toEqual([
+				{ source_path: fileA, is_deleted: 0 },
+				{ source_path: fileB, is_deleted: 0 },
+			]);
 		} finally {
 			await handle.close();
 		}
