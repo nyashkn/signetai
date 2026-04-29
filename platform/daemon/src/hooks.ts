@@ -101,9 +101,9 @@ import { searchTemporalFallback } from "./temporal-fallback";
 import { writeTranscriptAudit } from "./transcript-audit";
 import {
 	appendCanonicalTranscriptTurns,
-	appendCanonicalTranscriptSnapshot,
 	canonicalTranscriptRelativePath,
 	inferTranscriptSourceFormat,
+	writeCanonicalTranscriptSnapshot,
 } from "./transcript-jsonl";
 import { getUpdateSummary } from "./update-system";
 
@@ -141,7 +141,7 @@ async function writeCanonicalTranscriptFromSnapshot(params: {
 	readonly transcriptPath?: string;
 }): Promise<void> {
 	await ensureCanonicalTranscriptHistory(getAgentsDir(), params.agentId);
-	await appendCanonicalTranscriptSnapshot({
+	await writeCanonicalTranscriptSnapshot({
 		basePath: getAgentsDir(),
 		agentId: params.agentId,
 		harness: params.harness,

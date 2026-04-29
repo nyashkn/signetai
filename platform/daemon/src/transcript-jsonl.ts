@@ -192,6 +192,61 @@ function readTailRecords(path: string): CanonicalTranscriptRecord[] {
 	}
 }
 
+function readField(value: unknown, key: string): unknown {
+	if (typeof value !== "object" || value === null) return undefined;
+	return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+function readStringField(value: unknown, key: string): string | null {
+	const field = readField(value, key);
+	return typeof field === "string" ? field : null;
+}
+
+function parsedLineMatchesSession(line: string, input: TranscriptIdentity): boolean {
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (readStringField(parsed, "schema") !== "signet.transcript.v1") return false;
+		if (readStringField(parsed, "agent_id") !== (input.agentId.trim() || "default")) return false;
+		if (readStringField(parsed, "harness") !== sanitizeHarnessPath(input.harness)) return false;
+
+		const sessionKey = input.sessionKey?.trim() || null;
+		const sessionId = input.sessionId?.trim() || null;
+		const recordSessionKey = readStringField(parsed, "session_key");
+		const recordSessionId = readStringField(parsed, "session_id");
+		if (sessionId !== null) {
+			return (
+				recordSessionId === sessionId ||
+				(sessionKey !== null && recordSessionKey === sessionKey && recordSessionId === sessionKey)
+			);
+		}
+		return sessionKey !== null && recordSessionKey === sessionKey;
+	} catch {
+		return false;
+	}
+}
+
+function fileContainsSession(path: string, input: TranscriptIdentity): boolean {
+	if (!existsSync(path)) return false;
+	const fd = openSync(path, "r");
+	const buffer = Buffer.alloc(64 * 1024);
+	let carry = "";
+	try {
+		while (true) {
+			const bytes = readSync(fd, buffer, 0, buffer.length, null);
+			if (bytes <= 0) break;
+			const parts = `${carry}${buffer.toString("utf8", 0, bytes)}`.split(/\r?\n/);
+			carry = parts.pop() ?? "";
+			for (const part of parts) {
+				const line = part.trim();
+				if (line.length > 0 && parsedLineMatchesSession(line, input)) return true;
+			}
+		}
+		return carry.trim().length > 0 && parsedLineMatchesSession(carry.trim(), input);
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function writeRecords(path: string, records: readonly CanonicalTranscriptRecord[]): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
@@ -281,12 +336,12 @@ function releaseTranscriptFileLock(lockPath: string, token: string): void {
 	rmSync(lockPath, { recursive: true, force: true });
 }
 
-async function withTranscriptFileLock<T>(path: string, write: () => T): Promise<T> {
+async function withTranscriptFileLock<T>(path: string, write: () => T | Promise<T>): Promise<T> {
 	mkdirSync(dirname(path), { recursive: true });
 	const lock = await acquireTranscriptFileLock(path);
 
 	try {
-		return write();
+		return await write();
 	} finally {
 		releaseTranscriptFileLock(lock.lockPath, lock.token);
 	}
@@ -385,6 +440,27 @@ export function appendCanonicalTranscriptSnapshot(
 	const turns = transcriptTextToTurns(input.transcript);
 	if (turns.length === 0) return Promise.resolve(null);
 	return appendCanonicalTranscriptTurns({ ...input, turns });
+}
+
+export function appendCanonicalTranscriptSnapshotIfMissing(
+	input: TranscriptIdentity & { readonly transcript: string },
+): Promise<string | null> {
+	const turns = transcriptTextToTurns(input.transcript);
+	if (turns.length === 0) return Promise.resolve(null);
+	const path = canonicalTranscriptPath(input.basePath, input.harness);
+	return withTranscriptFileLock(path, () => {
+		if (fileContainsSession(path, input)) return path;
+		const next = turns
+			.map((turn, index) => makeRecord(input, turn, index + 1))
+			.filter((record): record is CanonicalTranscriptRecord => record !== null);
+		if (next.length === 0) return null;
+		appendRecords(path, next);
+		sessionSeqCache.set(
+			sessionSeqCacheKey(input),
+			next.reduce((max, record) => Math.max(max, record.seq), 0),
+		);
+		return path;
+	});
 }
 
 export function inferTranscriptSourceFormat(raw: string): TranscriptSourceFormat {

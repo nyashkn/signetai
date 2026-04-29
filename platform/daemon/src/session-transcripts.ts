@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { extractAnchorTerms } from "./anchor-terms";
 import { getDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
 import { sanitizeFtsQuery } from "./memory-search";
-import { appendCanonicalTranscriptSnapshot } from "./transcript-jsonl";
+import { appendCanonicalTranscriptSnapshotIfMissing } from "./transcript-jsonl";
 
 interface TranscriptRow {
 	readonly session_key: string;
@@ -16,6 +16,7 @@ interface TranscriptRow {
 }
 
 interface StoredTranscriptBackfillRow {
+	readonly rowid: number;
 	readonly session_key: string;
 	readonly content: string;
 	readonly harness: string | null;
@@ -78,15 +79,14 @@ async function backfillMarkdownTranscriptArtifacts(basePath: string, agentId?: s
 	if (!existsSync(memoryDir)) return 0;
 	let failures = 0;
 	const files = readdirSync(memoryDir).filter((name) => name.endsWith("--transcript.md"));
-	for (let i = 0; i < files.length; i++) {
-		const name = files[i]!;
+	for (const [i, name] of files.entries()) {
 		const path = join(memoryDir, name);
 		try {
 			const parsed = parseArtifactFrontmatter(readFileSync(path, "utf8"));
 			if (!parsed || parsed.frontmatter.kind !== "transcript") continue;
 			const rowAgentId = parsed.frontmatter.agent_id || "default";
 			if (agentId && rowAgentId !== agentId) continue;
-			await appendCanonicalTranscriptSnapshot({
+			await appendCanonicalTranscriptSnapshotIfMissing({
 				basePath,
 				agentId: rowAgentId,
 				harness: parsed.frontmatter.harness || "unknown",
@@ -114,23 +114,32 @@ async function backfillDatabaseTranscripts(basePath: string, agentId?: string): 
 	if (!tableExists("session_transcripts")) return true;
 	const PAGE_SIZE = 100;
 	try {
-		let offset = 0;
+		let lastRowid = 0;
+		const scopedAgentId = agentId?.trim() || null;
 		while (true) {
 			const rows = getDbAccessor().withReadDb((db) => {
-				const cols = db
-					.prepare("PRAGMA table_info(session_transcripts)")
-					.all() as ReadonlyArray<Record<string, unknown>>;
+				const cols = db.prepare("PRAGMA table_info(session_transcripts)").all() as ReadonlyArray<
+					Record<string, unknown>
+				>;
 				const hasUpdated = cols.some((col) => col.name === "updated_at");
-				const sql = hasUpdated
-					? "SELECT session_key, content, harness, project, agent_id, created_at, updated_at FROM session_transcripts LIMIT ? OFFSET ?"
-					: "SELECT session_key, content, harness, project, agent_id, created_at, NULL AS updated_at FROM session_transcripts LIMIT ? OFFSET ?";
-				return db.prepare(sql).all(PAGE_SIZE, offset) as StoredTranscriptBackfillRow[];
+				const select = hasUpdated
+					? "SELECT rowid, session_key, content, harness, project, agent_id, created_at, updated_at FROM session_transcripts"
+					: "SELECT rowid, session_key, content, harness, project, agent_id, created_at, NULL AS updated_at FROM session_transcripts";
+				const where = scopedAgentId
+					? "WHERE rowid > ? AND COALESCE(NULLIF(TRIM(agent_id), ''), 'default') = ?"
+					: "WHERE rowid > ?";
+				const sql = `${select}
+					${where}
+					ORDER BY rowid
+					LIMIT ?`;
+				const args: unknown[] = scopedAgentId ? [lastRowid, scopedAgentId, PAGE_SIZE] : [lastRowid, PAGE_SIZE];
+				return db.prepare(sql).all(...args) as StoredTranscriptBackfillRow[];
 			});
 			if (rows.length === 0) break;
 			for (const row of rows) {
 				const rowAgentId = row.agent_id?.trim() || "default";
 				if (agentId && rowAgentId !== agentId) continue;
-				await appendCanonicalTranscriptSnapshot({
+				await appendCanonicalTranscriptSnapshotIfMissing({
 					basePath,
 					agentId: rowAgentId,
 					harness: row.harness?.trim() || "unknown",
@@ -141,7 +150,7 @@ async function backfillDatabaseTranscripts(basePath: string, agentId?: string): 
 					transcript: row.content,
 				});
 			}
-			offset += PAGE_SIZE;
+			lastRowid = rows.reduce((max, row) => Math.max(max, row.rowid), lastRowid);
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
 	} catch (error) {
@@ -154,6 +163,36 @@ async function backfillDatabaseTranscripts(basePath: string, agentId?: string): 
 }
 
 const BACKFILL_MARKER = ".canonical-transcript-backfill-v1";
+const ALL_AGENT_MARKER = "__all__";
+
+function markerAgentId(agentId?: string): string {
+	return agentId?.trim() || ALL_AGENT_MARKER;
+}
+
+function markerScope(agentId?: string): string {
+	return (
+		markerAgentId(agentId)
+			.replace(/[^a-zA-Z0-9._-]+/g, "-")
+			.replace(/^-+|-+$/g, "") || "default"
+	);
+}
+
+function markerPath(basePath: string, agentId?: string): string {
+	return join(basePath, "memory", `${BACKFILL_MARKER}-${markerScope(agentId)}.json`);
+}
+
+function markerComplete(path: string, agentId?: string): boolean {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (typeof parsed !== "object" || parsed === null) return false;
+		const version = Object.getOwnPropertyDescriptor(parsed, "version")?.value;
+		const markerAgent = Object.getOwnPropertyDescriptor(parsed, "agent_id")?.value;
+		const completedAt = Object.getOwnPropertyDescriptor(parsed, "completed_at")?.value;
+		return version === 1 && markerAgent === markerAgentId(agentId) && typeof completedAt === "string";
+	} catch {
+		return false;
+	}
+}
 
 export async function ensureCanonicalTranscriptHistory(basePath: string, agentId?: string): Promise<void> {
 	const key = `${basePath}:${agentId ?? "*"}`;
@@ -161,31 +200,8 @@ export async function ensureCanonicalTranscriptHistory(basePath: string, agentId
 
 	// Persistent marker survives daemon restarts — skip backfill if
 	// a previous lifecycle already completed it.
-	const markerPath = join(basePath, "memory", BACKFILL_MARKER);
-	if (existsSync(markerPath)) {
-		canonicalBackfills.add(key);
-		return;
-	}
-
-	// If any JSONL file already has substantial data, the backfill
-	// happened in a prior lifecycle that crashed before writing the
-	// marker.  Re-running the backfill would duplicate records and
-	// balloon the file, so write the marker and skip.
-	const memDir = join(basePath, "memory");
-	const alreadyPopulated = existsSync(memDir) && readdirSync(memDir).some((entry) => {
-		const jsonlPath = join(memDir, entry, "transcripts", "transcript.jsonl");
-		try {
-			return statSync(jsonlPath).size > 1024 * 1024;
-		} catch {
-			return false;
-		}
-	});
-	if (alreadyPopulated) {
-		logger.info("transcripts", "Canonical JSONL already populated; skipping backfill", {
-			agentId: agentId ?? "*",
-			basePath,
-		});
-		writeMarker(markerPath, agentId);
+	const path = markerPath(basePath, agentId);
+	if (existsSync(path) && markerComplete(path, agentId)) {
 		canonicalBackfills.add(key);
 		return;
 	}
@@ -202,21 +218,25 @@ export async function ensureCanonicalTranscriptHistory(basePath: string, agentId
 		return;
 	}
 
-	writeMarker(markerPath, agentId);
-	canonicalBackfills.add(key);
+	if (writeMarker(path, agentId)) {
+		canonicalBackfills.add(key);
+	}
 }
 
-function writeMarker(markerPath: string, agentId?: string): void {
+function writeMarker(path: string, agentId?: string): boolean {
 	try {
+		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(
-			markerPath,
-			JSON.stringify({ completed_at: new Date().toISOString(), agent_id: agentId ?? "*" }),
+			path,
+			JSON.stringify({ version: 1, completed_at: new Date().toISOString(), agent_id: markerAgentId(agentId) }),
 			"utf8",
 		);
+		return true;
 	} catch (error) {
 		logger.warn("transcripts", "Failed to write backfill marker", {
 			error: error instanceof Error ? error.message : String(error),
 		});
+		return false;
 	}
 }
 
