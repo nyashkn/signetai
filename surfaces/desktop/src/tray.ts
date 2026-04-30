@@ -1,5 +1,5 @@
 import { type DaemonState, type RecentMemory, type TrayUpdate, buildTrayUpdate } from "@signet/tray";
-import { BrowserWindow, Menu, type MenuItemConstructorOptions, Tray, app, nativeImage } from "electron";
+import { BrowserWindow, Menu, type MenuItemConstructorOptions, Tray, app, nativeImage, shell } from "electron";
 import type { DaemonManager } from "./daemon-manager.js";
 import { iconPath, preloadPath } from "./paths.js";
 
@@ -177,7 +177,7 @@ export class DesktopTray {
 				? `Signet v${update.version ?? "unknown"} — Running`
 				: update.kind === "error"
 					? `Signet — Error: ${update.message ?? "unknown"}`
-					: "Signet — Stopped",
+					: "Signet — Run: signet daemon start",
 		);
 		if (process.platform === "darwin") {
 			this.#tray.setTitle(
@@ -206,9 +206,7 @@ export class DesktopTray {
 			{ type: "separator" },
 			{ label: "Recent Memories", submenu: recentMenu(this.#snapshot?.recentMemories ?? []) },
 			{ type: "separator" },
-			{ label: "Start Daemon", enabled: !running, click: () => void this.#daemon.start().then(() => this.poll()) },
-			{ label: "Restart Daemon", enabled: running, click: () => void this.#daemon.restart().then(() => this.poll()) },
-			{ label: "Stop Daemon", enabled: running, click: () => void this.#daemon.stop().then(() => this.poll()) },
+			{ label: "How to start daemon…", enabled: !running, click: () => void shell.openExternal("https://signetai.sh/docs/cli") },
 			{ type: "separator" },
 			{ label: "Quit Signet", click: () => app.quit() },
 		];

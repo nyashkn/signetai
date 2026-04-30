@@ -169,8 +169,17 @@ async function showDashboardReady(): Promise<void> {
 
 async function prepareDaemonForDashboard(): Promise<void> {
 	try {
-		await daemon.ensureStarted();
-		daemonStartupError = null;
+		const status = await daemon.probe();
+		if (!status) {
+			const mismatch = daemon.getMismatch();
+			if (mismatch) {
+				daemonStartupError = `workspace-mismatch:${mismatch.expected}|${mismatch.actual}`;
+			} else {
+				daemonStartupError = "cli-not-running";
+			}
+		} else {
+			daemonStartupError = null;
+		}
 	} catch (err) {
 		daemonStartupError = errorMessage(err);
 		console.error(err);
@@ -179,7 +188,10 @@ async function prepareDaemonForDashboard(): Promise<void> {
 
 async function assertDaemonUsable(): Promise<void> {
 	try {
-		await daemon.ensureStarted();
+		const status = await daemon.probe();
+		if (!status) {
+			throw new Error("Daemon is not running");
+		}
 		daemonStartupError = null;
 	} catch (err) {
 		daemonStartupError = errorMessage(err);
@@ -188,12 +200,55 @@ async function assertDaemonUsable(): Promise<void> {
 }
 
 function loadMainWindow(win: BrowserWindow): void {
-	const url = daemonStartupError ? startupErrorUrl(daemonStartupError) : "app://signet/";
+	let url: string;
+	if (daemonStartupError === "cli-not-running") {
+		url = cliNotRunningUrl();
+	} else if (daemonStartupError?.startsWith("workspace-mismatch:")) {
+		const parts = daemonStartupError.split("|");
+		const expected = parts[0]?.replace("workspace-mismatch:", "") ?? workspace.path;
+		const actual = parts[1] ?? "unknown";
+		url = startupErrorUrl(`Expected workspace: ${expected}\nActual workspace: ${actual}`);
+	} else if (daemonStartupError) {
+		url = startupErrorUrl(daemonStartupError);
+	} else {
+		url = "app://signet/";
+	}
 	if (loadedMainWindowUrl === url) return;
 	loadedMainWindowUrl = url;
 	win.loadURL(url).catch((err) => {
 		console.error(daemonStartupError ? "Failed to load startup error" : "Failed to load dashboard", err);
 	});
+}
+
+function cliNotRunningUrl(): string {
+	return `data:text/html;charset=utf-8,${encodeURIComponent(cliNotRunningHtml())}`;
+}
+
+function cliNotRunningHtml(): string {
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Signet daemon not running</title>
+<style>
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f0f0f; color: #f2f2f2; font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
+main { max-width: 720px; padding: 40px; border: 1px solid #333; background: #151515; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+h1 { margin: 0 0 16px; font-size: 22px; letter-spacing: .08em; text-transform: uppercase; }
+p { line-height: 1.6; color: #cfcfcf; }
+code { color: #b7ff00; word-break: break-all; }
+.code-block { background: #0a0a0a; border: 1px solid #222; border-radius: 4px; padding: 12px; margin: 16px 0; overflow-x: auto; }
+.code-block code { display: block; }
+</style>
+</head>
+<body>
+<main>
+<h1>Signet daemon not running</h1>
+<p>The Signet desktop app needs the CLI daemon running. Open a terminal and run:</p>
+<div class="code-block"><code>npm i -g @signet/cli && signet daemon start</code></div>
+<p>Restart this app once the daemon is running.</p>
+</main>
+</body>
+</html>`;
 }
 
 function startupErrorUrl(message: string): string {
@@ -278,17 +333,6 @@ function registerIpc(): void {
 	});
 	ipcMain.handle("desktop:close", () => focusedWindow()?.close());
 	ipcMain.handle("desktop:isMaximized", () => focusedWindow()?.isMaximized() ?? false);
-	ipcMain.handle("desktop:startDaemon", async () => {
-		const status = await daemon.start();
-		daemonStartupError = null;
-		return status;
-	});
-	ipcMain.handle("desktop:stopDaemon", () => daemon.stop());
-	ipcMain.handle("desktop:restartDaemon", async () => {
-		const status = await daemon.restart();
-		daemonStartupError = null;
-		return status;
-	});
 	ipcMain.handle("desktop:getDaemonStatus", () => daemon.status());
 	ipcMain.handle("desktop:openDashboard", () => showDashboard());
 	ipcMain.handle("desktop:quickCapture", (_event, content: string) => quickCapture(content));
@@ -322,7 +366,6 @@ app.on("before-quit", () => {
 
 app.on("will-quit", () => {
 	tray?.stop();
-	daemon.shutdownOwned();
 });
 
 app.on("window-all-closed", () => {

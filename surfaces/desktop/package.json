@@ -12,9 +12,8 @@
     "build:dashboard": "cd ../../platform/daemon && bun run build:dashboard",
     "build:daemon": "cd ../../platform/daemon && bun run build",
     "build:main": "tsc -p tsconfig.json",
-    "stage:runtime": "node scripts/stage-runtime.mjs",
     "build": "bun run build:main",
-    "build:desktop": "bun run build:core && bun run build:tray && bun run build:daemon && bun run stage:runtime && bun run build:main && electron-builder",
+    "build:desktop": "bun run build:core && bun run build:tray && bun run build:daemon && bun run build:main && electron-builder",
     "dev": "bun run build:tray && bun run build:dashboard && bun run build:main && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "bun test"
@@ -40,8 +39,8 @@
     ],
     "extraResources": [
       {
-        "from": "resources",
-        "to": "."
+        "from": "resources/daemon/dashboard",
+        "to": "daemon/dashboard"
       },
       {
         "from": "icons",

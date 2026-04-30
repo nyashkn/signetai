@@ -11,24 +11,9 @@ export function appResourcePath(...parts: readonly string[]): string {
 	return app.isPackaged ? join(process.resourcesPath, ...parts) : join(appRoot, "resources", ...parts);
 }
 
-export function bunPath(): string {
-	const bundled = appResourcePath("runtime", process.platform === "win32" ? "bun.exe" : "bun");
-	if (existsSync(bundled)) return bundled;
-	return process.platform === "win32" ? "bun.exe" : "bun";
-}
-
-export function daemonRoot(): string {
-	const bundled = appResourcePath("daemon");
-	if (existsSync(join(bundled, "dist", "daemon.js"))) return bundled;
-	return resolve(repoRoot, "platform/daemon");
-}
-
-export function daemonEntry(): string {
-	return join(daemonRoot(), "dist", "daemon.js");
-}
-
 export function dashboardRoot(): string {
-	return join(daemonRoot(), "dashboard");
+	if (app.isPackaged) return appResourcePath("daemon", "dashboard");
+	return resolve(repoRoot, "platform/daemon", "dashboard");
 }
 
 export function dashboardIndex(): string {
