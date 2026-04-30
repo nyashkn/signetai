@@ -905,7 +905,8 @@ export async function hybridRecall(
         SELECT m.id, bm25(memories_fts) AS raw_score
         FROM memories_fts
         JOIN memories m ON memories_fts.rowid = m.rowid
-        WHERE memories_fts MATCH ?${filter.sql}
+        WHERE memories_fts MATCH ?
+          AND m.is_deleted = 0${filter.sql}
         ORDER BY raw_score
         LIMIT ?
       `) as any

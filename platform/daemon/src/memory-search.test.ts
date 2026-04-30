@@ -156,6 +156,38 @@ describe("hybridRecall", () => {
 		expect(result.results.map((row) => row.id)).toContain("mem-keyword-sync-throw");
 	});
 
+	it("excludes soft-deleted memories from BM25/FTS keyword recall", async () => {
+		const now = new Date().toISOString();
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memories (
+					id, content, type, agent_id, created_at, updated_at, updated_by, is_deleted
+				) VALUES (?, ?, 'fact', 'default', ?, ?, 'test', 1)`,
+			).run("mem-bm25-deleted", "bm25-deleted-marker should not surface", now, now);
+			db.prepare(
+				`INSERT INTO memories (
+					id, content, type, agent_id, created_at, updated_at, updated_by
+				) VALUES (?, ?, 'fact', 'default', ?, ?, 'test')`,
+			).run("mem-bm25-live", "bm25-live-marker should surface", now, now);
+		});
+
+		const result = await hybridRecall(
+			{
+				query: "bm25-deleted-marker",
+				keywordQuery: "bm25-deleted-marker",
+				limit: 5,
+				agentId: "default",
+				readPolicy: "isolated",
+			},
+			loadMemoryConfig(dir),
+			() => {
+				throw new Error("embedding unavailable");
+			},
+		);
+
+		expect(result.results.map((row) => row.id)).not.toContain("mem-bm25-deleted");
+	});
+
 	it("recalls indexed native harness memory artifacts without materializing memories", async () => {
 		const codexMemoryPath = join(dir, "codex", "memories", "MEMORY.md");
 		mkdirSync(join(dir, "codex", "memories"), { recursive: true });
