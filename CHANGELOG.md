@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-01
+- Bug fixes: harden connector install and diagnostics.
+- Docs: correct stale documentation claims; add nyashkn contributor.
+
 ### 2026-04-30
 - Bug fixes: make prompt-submit embedding timeout configurable; apply is_deleted filter to BM25 FTS path.
 
@@ -30,11 +34,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-04-23
 - Features: add GraphIQ plugin management UI and daemon API; index native harness memories; unify LLM provider plumbing.
 
-### 2026-04-22
-- Features: add desktop source install command; add GraphIQ plugin integration.
-- Bug fixes: expose preload bridge reliably; proxy dashboard API to daemon; stage desktop AppImage replacement; bind install to configured workspace; write named-agent memory heads locally.
-
 ## Release Ledger
+
+## [0.109.17] - 2026-05-01
+
+Release summary: 1 bug fix and 2 docs updates.
+Tag range: `v0.109.16..v0.109.17`.
+
+### Bug Fixes
+
+- **hermes-agent**: harden connector install and diagnostics (#614)
+
+### Docs
+
+- correct stale documentation claims (#610)
+- **readme**: add nyashkn contributor
 
 ## [0.109.16] - 2026-04-30
 
