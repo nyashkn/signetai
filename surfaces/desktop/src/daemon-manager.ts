@@ -1,9 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { type WriteStream, createWriteStream, existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { app } from "electron";
 import { type WorkspaceMismatch, healthWorkspaceMismatch } from "./daemon-workspace.js";
 import { bunPath, daemonEntry, daemonRoot } from "./paths.js";
+
+export type DaemonMode = "attached" | "bundled" | "none";
 
 export interface HealthStatus {
 	readonly version: string;
@@ -15,6 +17,7 @@ export interface HealthStatus {
 export interface DesktopDaemonStatus {
 	readonly running: boolean;
 	readonly owned: boolean;
+	readonly mode: DaemonMode;
 	readonly pid: number | null;
 	readonly version: string | null;
 	readonly uptime: number | null;
@@ -60,14 +63,20 @@ export class DaemonManager {
 	readonly #workspacePath: string;
 	#child: ChildProcess | null = null;
 	#owned = false;
+	#mode: DaemonMode = "none";
 	#startPromise: Promise<DesktopDaemonStatus> | null = null;
-	#stdout: WriteStream | null = null;
-	#stderr: WriteStream | null = null;
+	// File descriptors opened with openSync (sync fd). Closed on process exit or spawn cleanup.
+	#stdoutFd: number | null = null;
+	#stderrFd: number | null = null;
 	#lastMismatch: WorkspaceMismatch | null = null;
 
 	constructor(options: DaemonManagerOptions) {
 		this.#workspacePath = resolve(options.workspacePath);
 		process.env.SIGNET_DESKTOP_DAEMON_BASE_URL = this.baseUrl;
+	}
+
+	get daemonMode(): DaemonMode {
+		return this.#mode;
 	}
 
 	async probe(timeoutMs = 1200): Promise<HealthStatus | null> {
@@ -102,6 +111,7 @@ export class DaemonManager {
 		return {
 			running: health !== null,
 			owned: this.#owned,
+			mode: this.#mode,
 			pid: health?.pid ?? null,
 			version: health?.version ?? null,
 			uptime: health?.uptime ?? null,
@@ -112,6 +122,19 @@ export class DaemonManager {
 		};
 	}
 
+	/**
+	 * Dual-mode startup (fixes #606 spawn fd race + update drift):
+	 *
+	 * 1. Probe http://localhost:<port>/health with a short 500ms timeout.
+	 * 2. If a daemon responds → attach (skip spawn, no version check, no auto-update).
+	 *    This eliminates the update-drift restart loop: the CLI-managed daemon is
+	 *    already running its own version; we just proxy to it.
+	 * 3. If not responding → spawn the bundled daemon using fs.openSync (synchronous
+	 *    file descriptor) instead of createWriteStream (lazy fd). Node's child_process
+	 *    spawn validates stdio descriptors synchronously at call time, so the lazy
+	 *    WriteStream fd was undefined at that moment — causing the TypeError described
+	 *    in issue #606. openSync returns a real fd immediately, fixing the race.
+	 */
 	async ensureStarted(): Promise<DesktopDaemonStatus> {
 		if (this.#startPromise) return this.#startPromise;
 		this.#startPromise = this.#ensureStarted();
@@ -123,27 +146,35 @@ export class DaemonManager {
 	}
 
 	async #ensureStarted(): Promise<DesktopDaemonStatus> {
-		const raw = await this.#probeRaw();
+		// Step 1: fast probe (500ms) — prefer attach to avoid version-check/restart loop.
+		const raw = await this.#probeRaw(500);
 		const mismatch = raw ? healthWorkspaceMismatch(this.#workspacePath, raw.agentsDir) : null;
 		this.#lastMismatch = mismatch;
+
 		if (mismatch) {
 			throw new Error(
 				`Signet daemon on ${this.baseUrl} is using workspace ${mismatch.actual}, expected ${mismatch.expected}. Stop that daemon or start it with the configured workspace before opening the desktop app.`,
 			);
 		}
-		const existing = raw;
-		if (existing) {
+
+		if (raw) {
+			// Step 2: attach — daemon already running (CLI-managed or otherwise).
+			// Skip bundled spawn, version check, and auto-update entirely.
 			this.#owned = false;
+			this.#mode = "attached";
 			return this.status();
 		}
 
-		if (!this.#child) this.#spawn();
+		// Step 3: bundled fallback — spawn the daemon we ship inside the .dmg / .app.
+		// Uses fs.openSync (sync fd) instead of createWriteStream (lazy fd) to fix the
+		// TypeError: stream must have an underlying descriptor race from issue #606.
+		if (!this.#child) this.#spawnBundled();
 		for (let i = 0; i < 60; i += 1) {
 			const health = await this.probe(500);
 			if (health) return this.status();
 			await sleep(250);
 		}
-		throw new Error("Daemon failed to start within 15 seconds");
+		throw new Error("Bundled daemon failed to start within 15 seconds");
 	}
 
 	async start(): Promise<DesktopDaemonStatus> {
@@ -154,6 +185,7 @@ export class DaemonManager {
 		const health = await this.probe();
 		if (!health) {
 			this.#owned = false;
+			this.#mode = "none";
 			return this.status();
 		}
 
@@ -187,13 +219,19 @@ export class DaemonManager {
 		this.#child.kill("SIGTERM");
 		this.#child = null;
 		this.#owned = false;
+		this.#mode = "none";
+		this.#closeFds();
 	}
 
-	#closeLogs(): void {
-		this.#stdout?.end();
-		this.#stderr?.end();
-		this.#stdout = null;
-		this.#stderr = null;
+	#closeFds(): void {
+		if (this.#stdoutFd !== null) {
+			try { closeSync(this.#stdoutFd); } catch { /* ignore */ }
+			this.#stdoutFd = null;
+		}
+		if (this.#stderrFd !== null) {
+			try { closeSync(this.#stderrFd); } catch { /* ignore */ }
+			this.#stderrFd = null;
+		}
 	}
 
 	#waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
@@ -207,22 +245,38 @@ export class DaemonManager {
 		});
 	}
 
-	#spawn(): void {
+	/**
+	 * Spawn the bundled bun daemon.
+	 *
+	 * FD-race fix (issue #606): createWriteStream opens the file lazily — the
+	 * underlying fd is not available until the 'open' event fires, which happens
+	 * asynchronously. Node's child_process.spawn validates stdio descriptors
+	 * synchronously at call time, so passing a WriteStream whose fd is still
+	 * undefined produces:
+	 *   TypeError: stream must have an underlying descriptor
+	 *
+	 * Using openSync returns a real integer fd immediately. We pass that fd
+	 * directly to spawn's stdio array, which satisfies the sync validation.
+	 */
+	#spawnBundled(): void {
 		const entry = daemonEntry();
 		if (!existsSync(entry)) {
-			throw new Error(`Bundled daemon entry not found: ${entry}`);
+			throw new Error(`Bundled daemon entry not found: ${entry}. Install the .dmg or run stage:runtime first.`);
 		}
 
 		const logDir = join(app.getPath("userData"), "logs");
 		mkdirSync(logDir, { recursive: true });
-		this.#closeLogs();
-		this.#stdout = createWriteStream(join(logDir, "daemon.out.log"), { flags: "a" });
-		this.#stderr = createWriteStream(join(logDir, "daemon.err.log"), { flags: "a" });
+		this.#closeFds();
+
+		// openSync returns a real fd synchronously — no race with spawn's fd validation.
+		// See issue #606: createWriteStream causes "TypeError: stream must have an underlying descriptor"
+		this.#stdoutFd = openSync(join(logDir, "daemon.out.log"), "a");
+		this.#stderrFd = openSync(join(logDir, "daemon.err.log"), "a");
 
 		this.#child = spawn(bunPath(), [entry], {
 			cwd: daemonRoot(),
 			detached: false,
-			stdio: ["ignore", this.#stdout, this.#stderr],
+			stdio: ["ignore", this.#stdoutFd, this.#stderrFd],
 			env: {
 				...process.env,
 				SIGNET_PORT: String(this.port),
@@ -232,10 +286,12 @@ export class DaemonManager {
 			},
 		});
 		this.#owned = true;
+		this.#mode = "bundled";
 		this.#child.once("exit", () => {
 			this.#child = null;
 			this.#owned = false;
-			this.#closeLogs();
+			this.#mode = "none";
+			this.#closeFds();
 		});
 	}
 }
