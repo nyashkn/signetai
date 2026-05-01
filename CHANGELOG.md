@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-01
-- Bug fixes: harden connector install and diagnostics.
+- Bug fixes: include Hermes plugin in signetai package; harden connector install and diagnostics.
 - Docs: correct stale documentation claims; add nyashkn contributor.
 
 ### 2026-04-30
@@ -35,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: add GraphIQ plugin management UI and daemon API; index native harness memories; unify LLM provider plumbing.
 
 ## Release Ledger
+
+## [0.109.18] - 2026-05-01
+
+Release summary: 1 bug fix.
+Tag range: `v0.109.17..v0.109.18`.
+
+### Bug Fixes
+
+- **publish**: include Hermes plugin in signetai package (#616)
 
 ## [0.109.17] - 2026-05-01
 
