@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-03
+- Features: add read-only Obsidian knowledge sources.
+- Docs: correct stale documentation claims.
+
 ### 2026-05-02
 - Bug fixes: align exposed memory tools with harness guidance; sanitize generated hints; pass remember hints through; guide recall query shape.
 
@@ -30,11 +34,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: package extraction worker and test lifecycle; proxy analytics and telemetry from worker thread via IPC; reject startup promise on early worker exit and guard duplicate startPipeline; address 3 blocking review findings in extraction worker thread; bridge native harness memory artifacts; pair remote Signet MCP with lifecycle hooks.
 - Refactoring: make logger injectable in startWorker via LogSink interface.
 
-### 2026-04-24
-- Bug fixes: bundle install-graphiq.sh so graphiq install/update works; bound prompt-submit embedding latency; detect default install path; emit structured hook JSON.
-- Refactoring: replace brew/cargo install with shell script; add session auto-connect.
-
 ## Release Ledger
+
+## [0.110.0] - 2026-05-03
+
+Release summary: 1 feature and 1 docs update.
+Tag range: `v0.109.22..v0.110.0`.
+
+### Features
+
+- **sources**: add read-only Obsidian knowledge sources (#623)
+
+### Docs
+
+- correct stale documentation claims (#622)
 
 ## [0.109.22] - 2026-05-02
 
