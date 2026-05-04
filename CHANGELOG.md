@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-04
 - Features: dual-mode daemon — attach if running, bundled fallback.
-- Bug fixes: keep bundled sdk out of publish deps; surface Obsidian indexing status; resolve session-end timeout under concurrent load.
+- Bug fixes: harden startup ownership and background git defaults; keep bundled sdk out of publish deps; surface Obsidian indexing status; resolve session-end timeout under concurrent load.
 
 ### 2026-05-03
 - Features: add read-only Obsidian knowledge sources.
@@ -36,6 +36,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: reorganize monorepo layout.
 
 ## Release Ledger
+
+## [0.111.1] - 2026-05-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.111.0..v0.111.1`.
+
+### Bug Fixes
+
+- **daemon**: harden startup ownership and background git defaults (#626)
 
 ## [0.111.0] - 2026-05-04
 
