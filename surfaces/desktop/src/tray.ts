@@ -172,9 +172,11 @@ export class DesktopTray {
 		this.#lastJson = jsonText;
 
 		this.#tray.setImage(iconFor(update));
+		const mode = this.#daemon.daemonMode;
+		const modeLabel = mode === "attached" ? " (attached)" : mode === "bundled" ? " (bundled)" : "";
 		this.#tray.setToolTip(
 			update.kind === "running"
-				? `Signet v${update.version ?? "unknown"} — Running`
+				? `Signet v${update.version ?? "unknown"} — Running${modeLabel}`
 				: update.kind === "error"
 					? `Signet — Error: ${update.message ?? "unknown"}`
 					: "Signet — Stopped",
@@ -189,10 +191,15 @@ export class DesktopTray {
 
 	#menu(update: TrayUpdate): MenuItemConstructorOptions[] {
 		const running = update.kind === "running";
+		const mode = this.#daemon.daemonMode;
+		// Only allow stop/restart when we own the bundled daemon.
+		// When attached to a CLI-managed daemon, those controls belong to the CLI.
+		const ownsBundled = running && mode === "bundled";
 		return [
 			{ label: running ? `Signet v${update.version ?? "unknown"}` : "Signet", enabled: false },
 			...(running
 				? [
+						{ label: `Mode: ${mode === "attached" ? "attached to CLI" : "bundled"}`, enabled: false },
 						{ label: `Memories: ${formatCount(update.memory_count ?? 0)}`, enabled: false },
 						{ label: `Health: ${update.health_status ?? "unknown"}`, enabled: false },
 					]
@@ -207,8 +214,8 @@ export class DesktopTray {
 			{ label: "Recent Memories", submenu: recentMenu(this.#snapshot?.recentMemories ?? []) },
 			{ type: "separator" },
 			{ label: "Start Daemon", enabled: !running, click: () => void this.#daemon.start().then(() => this.poll()) },
-			{ label: "Restart Daemon", enabled: running, click: () => void this.#daemon.restart().then(() => this.poll()) },
-			{ label: "Stop Daemon", enabled: running, click: () => void this.#daemon.stop().then(() => this.poll()) },
+			{ label: "Restart Daemon", enabled: ownsBundled, click: () => void this.#daemon.restart().then(() => this.poll()) },
+			{ label: "Stop Daemon", enabled: ownsBundled, click: () => void this.#daemon.stop().then(() => this.poll()) },
 			{ type: "separator" },
 			{ label: "Quit Signet", click: () => app.quit() },
 		];
