@@ -21,6 +21,7 @@ export interface EmbeddingConfig {
 	dimensions: number;
 	base_url: string;
 	api_key?: string;
+	promptSubmitTimeoutMs?: number;
 }
 
 export interface MemorySearchConfig {
@@ -93,7 +94,7 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 		leaseTimeoutMs: 300000,
 		maxLoadPerCpu: 0.8,
 		overloadBackoffMs: 30000,
-		threadedExtraction: false,
+		threadedExtraction: true,
 	},
 	graph: {
 		enabled: true,
@@ -260,6 +261,9 @@ export const DEFAULT_PIPELINE_V2: ResolvedPipelineV2Config = {
 export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 export const DEFAULT_LLAMACPP_BASE_URL = "http://localhost:8080";
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+export const DEFAULT_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS = 1000;
+export const MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS = 1000;
+export const MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS = 300000;
 
 export interface ResolvedMemoryConfig {
 	embedding: EmbeddingConfig;
@@ -646,7 +650,7 @@ export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipel
 				300000,
 				d.worker.overloadBackoffMs,
 			),
-			threadedExtraction: workerRaw?.threadedExtraction === true,
+			threadedExtraction: workerRaw?.threadedExtraction !== false,
 		},
 
 		graph: {
@@ -1061,6 +1065,7 @@ export function loadMemoryConfig(agentsDir: string): ResolvedMemoryConfig {
 			model: "nomic-embed-text-v1.5",
 			dimensions: 768,
 			base_url: "",
+			promptSubmitTimeoutMs: DEFAULT_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
 		},
 		search: {
 			alpha: 0.7,
@@ -1087,6 +1092,13 @@ export function loadMemoryConfig(agentsDir: string): ResolvedMemoryConfig {
 				(yaml.embeddings as Record<string, unknown> | undefined) ??
 				{};
 			const srch = (yaml.search as Record<string, unknown> | undefined) ?? {};
+
+			defaults.embedding.promptSubmitTimeoutMs = clampPositive(
+				emb.promptSubmitTimeoutMs,
+				MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+				MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+				defaults.embedding.promptSubmitTimeoutMs ?? DEFAULT_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+			);
 
 			if (emb.provider === "none") {
 				defaults.embedding.provider = "none";

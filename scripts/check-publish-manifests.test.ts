@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,34 @@ function writeJson(file: string, value: unknown): void {
 }
 
 describe("check-publish-manifests", () => {
+	test("keeps threaded extraction worker in standalone daemon and meta-package builds", () => {
+		const root = join(import.meta.dir, "..");
+		const daemonBuild = readFileSync(join(root, "platform", "daemon", "build.ts"), "utf-8");
+		const metaPackageBuild = readFileSync(join(root, "dist", "signetai", "build-daemon.ts"), "utf-8");
+
+		expect(daemonBuild).toContain('entrypoint: "./src/pipeline/extraction-thread.ts"');
+		expect(daemonBuild).toContain('outfile: "./dist/extraction-thread.js"');
+		expect(metaPackageBuild).toContain('entrypoint: "../../platform/daemon/src/pipeline/extraction-thread.ts"');
+		expect(metaPackageBuild).toContain('outfile: "./dist/extraction-thread.js"');
+	});
+
+	test("keeps Hermes plugin assets in the signetai publish package", () => {
+		const root = join(import.meta.dir, "..");
+		const manifest = JSON.parse(readFileSync(join(root, "dist", "signetai", "package.json"), "utf-8")) as {
+			files?: unknown;
+			scripts?: Record<string, string>;
+		};
+
+		expect(manifest.files).toContain("hermes-plugin");
+		expect(manifest.scripts?.["copy:hermes-plugin"]).toContain(
+			"../../integrations/hermes-agent/connector/hermes-plugin",
+		);
+		expect(manifest.scripts?.prebuild).toContain("copy:hermes-plugin");
+		expect(existsSync(join(root, "integrations", "hermes-agent", "connector", "hermes-plugin", "__init__.py"))).toBe(
+			true,
+		);
+	});
+
 	test("treats manifests with publishConfig.access public as publishable", () => {
 		expect(
 			isPublishableWorkspacePackage({
@@ -116,6 +144,50 @@ describe("check-publish-manifests", () => {
 			expect(issues[0]?.field).toBe("dependencies");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps bundled Signet internals out of the OpenClaw adapter runtime manifest", () => {
+		const root = join(import.meta.dir, "..");
+		const rootPackageFile = join(root, "package.json");
+		const adapterFile = join(root, "integrations", "openclaw", "memory-adapter", "package.json");
+		const sdkFile = join(root, "libs", "sdk", "package.json");
+		const coreFile = join(root, "platform", "core", "package.json");
+
+		const rootPackage = JSON.parse(readFileSync(rootPackageFile, "utf-8")) as {
+			devDependencies?: Record<string, string>;
+			scripts?: Record<string, string>;
+		};
+		const adapter = JSON.parse(readFileSync(adapterFile, "utf-8")) as {
+			dependencies?: Record<string, string>;
+			devDependencies?: Record<string, string>;
+		};
+
+		expect(rootPackage.devDependencies?.["@signet/sdk"]).toBe("workspace:*");
+		expect(rootPackage.scripts?.["build:deps"]).toStartWith("bun run --filter '@signet/sdk' build && ");
+		expect(adapter.dependencies?.["@signet/sdk"]).toBeUndefined();
+		expect(adapter.devDependencies?.["@signet/sdk"]).toBeDefined();
+
+		const workspacePackages = collectWorkspacePackages([adapterFile, sdkFile, coreFile]);
+
+		expect(collectManifestIssues([adapterFile], workspacePackages)).toHaveLength(0);
+
+		const releaseRewrittenAdapterDir = mkdtempSync(join(tmpdir(), "signet-openclaw-release-manifest-"));
+		try {
+			const releaseRewrittenAdapterFile = join(releaseRewrittenAdapterDir, "package.json");
+			writeJson(releaseRewrittenAdapterFile, {
+				...JSON.parse(readFileSync(adapterFile, "utf-8")),
+				version: "1.2.3",
+				devDependencies: {
+					...adapter.devDependencies,
+					"@signet/core": "1.2.3",
+					"@signet/sdk": "1.2.3",
+				},
+			});
+
+			expect(collectManifestIssues([releaseRewrittenAdapterFile], workspacePackages)).toHaveLength(0);
+		} finally {
+			rmSync(releaseRewrittenAdapterDir, { recursive: true, force: true });
 		}
 	});
 

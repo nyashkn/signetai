@@ -6,14 +6,15 @@ import * as Select from "$lib/components/ui/select/index.js";
 import { st } from "$lib/stores/settings.svelte";
 
 const selectTriggerClass =
-	"font-[family-name:var(--font-mono)] text-[11px] text-[var(--sig-text)] bg-[var(--sig-bg)] border-[var(--sig-border-strong)] rounded-lg w-full h-auto min-h-[30px] px-2 py-[5px] box-border focus-visible:border-[var(--sig-accent)]";
+	"font-mono text-[11px] text-[var(--sig-text)] bg-[var(--sig-bg)] border-[var(--sig-border-strong)] rounded-lg w-full h-auto min-h-[30px] px-2 py-[5px] box-border focus-visible:border-[var(--sig-accent)]";
 const selectContentClass =
-	"font-[family-name:var(--font-mono)] text-[11px] bg-[var(--sig-bg)] text-[var(--sig-text)] border-[var(--sig-border-strong)] rounded-lg";
-const selectItemClass = "font-[family-name:var(--font-mono)] text-[11px] rounded-lg";
+	"font-mono text-[11px] bg-[var(--sig-bg)] text-[var(--sig-text)] border-[var(--sig-border-strong)] rounded-lg";
+const selectItemClass = "font-mono text-[11px] rounded-lg";
 
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 const DEFAULT_LLAMACPP_BASE_URL = "http://localhost:8080";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_PROMPT_SUBMIT_TIMEOUT_MS = 1000;
 
 const EMBEDDING_PROVIDER_OPTIONS = [
 	{ value: "native", label: "native (built-in)" },
@@ -62,6 +63,10 @@ function embeddingModelSelectValue(): string {
 	const model = st.sStr([...embPath(), "model"]);
 	if (!model) return "";
 	return embeddingModelPresets().some((preset) => preset.value === model) ? model : "__custom__";
+}
+
+function promptSubmitTimeoutMs(): number | string {
+	return st.sNum([...embPath(), "promptSubmitTimeoutMs"]) || DEFAULT_PROMPT_SUBMIT_TIMEOUT_MS;
 }
 
 function isKnownPreset(model: string): boolean {
@@ -135,7 +140,7 @@ function handleModelPresetChange(v: string | undefined): void {
 		</FormField>
 
 		{#if embeddingProvider() && embeddingProvider() !== "none"}
-			<div class="flex items-center gap-2 px-3 py-2 text-[10px] font-[family-name:var(--font-mono)] text-[var(--sig-warning,#d4a017)] bg-[color-mix(in_srgb,var(--sig-warning,#d4a017)_10%,transparent)] border border-[var(--sig-warning,#d4a017)]">
+			<div class="flex items-center gap-2 px-3 py-2 text-[10px] font-mono text-[var(--sig-warning,#d4a017)] bg-[color-mix(in_srgb,var(--sig-warning,#d4a017)_10%,transparent)] border border-[var(--sig-warning,#d4a017)]">
 				(!) Changing provider or model will re-embed your entire memory database
 			</div>
 
@@ -177,6 +182,17 @@ function handleModelPresetChange(v: string | undefined): void {
 					/>
 				</FormField>
 			{/if}
+
+			<FormField label="Prompt-submit timeout (ms)" description="Deadline for the embedding request used by automatic memory recall before prompt injection. Increase this for slower local models that need time to cold-load.">
+				<Input
+					type="number"
+					min="1000"
+					max="300000"
+					step="1000"
+					value={promptSubmitTimeoutMs()}
+					oninput={(e) => st.sSetNum([...embPath(), "promptSubmitTimeoutMs"], e.currentTarget.value)}
+				/>
+			</FormField>
 
 			{#if embeddingProvider() === "openai"}
 				<FormField label="API Key" description="Required for OpenAI. Use $secret:OPENAI_API_KEY to reference a stored secret instead of plaintext.">

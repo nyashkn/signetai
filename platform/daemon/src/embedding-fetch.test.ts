@@ -82,6 +82,34 @@ describe("fetchEmbedding", () => {
 		expect(capturedSignal?.aborted).toBe(true);
 	});
 
+	it("uses configured timeout for provider requests", async () => {
+		let capturedSignal: AbortSignal | null | undefined;
+		globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+			capturedSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		}) as unknown as typeof fetch;
+
+		const start = Date.now();
+		const result = await fetchEmbedding(
+			"hello",
+			{
+				provider: "openai",
+				model: "text-embedding-3-small",
+				dimensions: 3,
+				base_url: "http://localhost:1234/v1",
+			},
+			{ timeoutMs: 20 },
+		);
+
+		expect(result).toBeNull();
+		expect(capturedSignal?.aborted).toBe(true);
+		expect(Date.now() - start).toBeLessThan(1000);
+	});
+
 	it("routes to ollama when nativeFallbackProvider is 'ollama'", async () => {
 		let capturedUrl: string | undefined;
 		globalThis.fetch = mock((url: string | URL | Request) => {

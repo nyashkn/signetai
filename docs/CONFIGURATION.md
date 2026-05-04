@@ -90,6 +90,7 @@ embedding:
   model: nomic-embed-text
   dimensions: 768
   base_url: http://localhost:11434
+  promptSubmitTimeoutMs: 1000
 
 search:
   alpha: 0.7
@@ -109,8 +110,8 @@ memory:
     enabled: true
     shadowMode: false
     extraction:
-      provider: ollama
-      model: qwen3:4b
+      provider: llama-cpp
+      model: qwen3.5:4b
     synthesis:
       enabled: true
       provider: ollama
@@ -189,6 +190,11 @@ Vector embedding configuration for semantic memory search.
 | `dimensions` | number | `768` | Output vector dimensions |
 | `base_url` | string | `"http://localhost:11434"` | Ollama API base URL |
 | `api_key` | string | — | API key or `$secret:NAME` reference |
+| `promptSubmitTimeoutMs` | number | `1000` | Prompt-submit recall embedding timeout, range 1000-300000 ms |
+
+Increase `promptSubmitTimeoutMs` when local embedding models are slow to
+cold-load. For example, Ollama with `mxbai-embed-large` may need `10000` ms
+to avoid aborted prompt-submit recall embeddings.
 
 Recommended Ollama models:
 
@@ -501,8 +507,8 @@ memory:
     enabled: true
     shadowMode: true        # extract without writing — safe first step
     extraction:
-      provider: ollama
-      model: qwen3:4b
+      provider: llama-cpp
+      model: qwen3.5:4b
 ```
 
 
@@ -515,7 +521,7 @@ These top-level boolean fields gate major pipeline behaviors.
 | `enabled` | `true` | Master switch. Pipeline does nothing when false. |
 | `shadowMode` | `false` | Extract facts but skip writes. Useful for evaluation. |
 | `mutationsFrozen` | `false` | Allow reads; block all writes. Overrides `shadowMode`. |
-| `semanticContradictionEnabled` | `false` | Enable LLM-based semantic contradiction detection for UPDATE/DELETE proposals. |
+| `semanticContradictionEnabled` | `true` | Enable LLM-based semantic contradiction detection for UPDATE/DELETE proposals. |
 | `telemetryEnabled` | `false` | Enable anonymous telemetry reporting. |
 
 The relationship between `shadowMode` and `mutationsFrozen` matters:
@@ -530,8 +536,8 @@ Controls the LLM-based extraction stage. Supports multiple providers.
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `provider` | `"ollama"` | — | `"none"`, `"ollama"`, `"claude-code"`, `"opencode"`, `"codex"`, `"anthropic"`, `"openrouter"`, or `"command"` |
-| `model` | `"qwen3:4b"` | — | Model name for the configured provider |
+| `provider` | `"llama-cpp"` | — | `"none"`, `"llama-cpp"`, `"ollama"`, `"claude-code"`, `"opencode"`, `"codex"`, `"anthropic"`, `"openrouter"`, or `"command"` |
+| `model` | `"qwen3.5:4b"` | — | Model name for the configured provider |
 | `timeout` | `90000` | 5000-300000 ms | Extraction call timeout |
 | `minConfidence` | `0.7` | 0.0-1.0 | Confidence threshold; facts below this are dropped |
 | `structuredOutput` | `true` | — | Send JSON schema in the `format` field of LLM requests. Set `false` when the provider rejects structured output (e.g. GitHub Copilot API). The daemon also auto-detects unsupported providers at runtime and disables this transparently. |
@@ -542,6 +548,7 @@ Controls the LLM-based extraction stage. Supports multiple providers.
 
 For safety, the intended extraction setups are:
 
+- local `llama-cpp` with `qwen3.5:4b` (default)
 - `claude-code` on a Haiku model
 - `codex` on a GPT Mini model
 - local `ollama` with `nemotron-3-nano:4b` (preferred) or `qwen3:4b` (deprecated — Nemotron's superior reasoning makes Qwen3 the weaker choice going forward; expect degraded extraction quality in future updates)
@@ -648,7 +655,7 @@ handles synthesis.
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `enabled` | `true` | — | Enable background session summary generation |
-| `provider` | inherited from extraction when omitted | — | `"none"`, `"ollama"`, `"claude-code"`, `"codex"`, `"opencode"`, `"anthropic"`, or `"openrouter"` |
+| `provider` | inherited from extraction when omitted | — | `"none"`, `"llama-cpp"`, `"ollama"`, `"claude-code"`, `"codex"`, `"opencode"`, `"anthropic"`, or `"openrouter"` |
 | `model` | inherited from extraction when omitted | — | Model name for the configured provider |
 | `endpoint` | inherited from extraction when omitted | — | Optional base URL override for Ollama, OpenCode, or OpenRouter |
 | `timeout` | inherited from extraction when omitted | 5000-300000 ms | Summary generation timeout |

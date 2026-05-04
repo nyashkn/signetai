@@ -34,7 +34,7 @@ import { getDbAccessor, hasDbAccessor } from "./db-accessor";
 import { fetchEmbedding } from "./embedding-fetch";
 import { propagateMemoryStatus } from "./knowledge-graph";
 import { logger } from "./logger";
-import { loadMemoryConfig } from "./memory-config";
+import { DEFAULT_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS, loadMemoryConfig } from "./memory-config";
 import { writeMemoryHead } from "./memory-head";
 import {
 	NOISE_PURGE_REASON,
@@ -127,6 +127,12 @@ function getAgentsDir(): string {
 
 function getMemoryDbPath(): string {
 	return join(getAgentsDir(), "memory", "memories.db");
+}
+
+const deferredSessionEndWork = new Set<Promise<void>>();
+
+export async function flushDeferredSessionEndWorkForTests(): Promise<void> {
+	await Promise.allSettled([...deferredSessionEndWork]);
 }
 
 async function writeCanonicalTranscriptFromSnapshot(params: {
@@ -277,6 +283,10 @@ function harnessSupportsNamedCrossAgentTools(harness: string): boolean {
 	return harness.trim().toLowerCase() === "codex";
 }
 
+function isPiHarness(harness: string): boolean {
+	return harness.trim().toLowerCase() === "pi";
+}
+
 function sanitizePeerPromptField(value: string | undefined): string {
 	if (!value) return "";
 	return value
@@ -291,8 +301,8 @@ You have persistent memory managed by Signet.
 
 Memory Check Loop:
 - when to use: before commands, file edits, architectural choices, bug fixes, continuation work, user-preference-sensitive answers, or anything that may depend on prior decisions
-- procedure: check injected context first, then run 1-3 targeted recalls with mcp__signet__memory_search; expand session lineage with mcp__signet__lcm_expand or known entities with mcp__signet__knowledge_expand and mcp__signet__knowledge_expand_session when needed
-- pitfalls: do not treat a missing automatic memory match as proof no prior context exists; do not trust memory blindly when repo, files, or live system state can verify it; do not spam broad recalls for trivial self-contained prompts
+- procedure: check injected context first, then run 1-3 targeted recalls with mcp__signet__memory_search; shape recall queries as natural questions with an entity, event, and timeframe when possible; expand session lineage with mcp__signet__lcm_expand or known entities with mcp__signet__knowledge_expand and mcp__signet__knowledge_expand_session when needed
+- pitfalls: avoid bag-of-keywords queries; do not treat a missing automatic memory match as proof no prior context exists; do not trust memory blindly when repo, files, or live system state can verify it; do not spam broad recalls for trivial self-contained prompts; treat graph expansion as supporting context, not proof
 - verification: before acting, know what context you found, what remains unknown, and whether it is safe to proceed
 
 Memory tools:
@@ -553,6 +563,7 @@ export function appendSynthesisIndexBlock(content: string, indexBlock: string): 
 
 function buildTranscriptFallbackResponse(
 	metadataHeader: string,
+	harness: string,
 	queryTerms: string,
 	charBudget: number,
 	hits: ReadonlyArray<{
@@ -567,7 +578,7 @@ function buildTranscriptFallbackResponse(
 		content: `- [transcript ${formatTranscriptSessionLabel(hit.sessionKey)}] ${hit.excerpt} (${formatMemoryDate(hit.updatedAt)})`,
 	}));
 	const lines = selectWithBudget(rows, charBudget).map((row) => row.content);
-	const inject = buildPromptRecallInject(metadataHeader, lines, pluginContext);
+	const inject = buildPromptRecallInject(metadataHeader, lines, harness, pluginContext);
 	return {
 		inject,
 		memoryCount: lines.length,
@@ -579,6 +590,7 @@ function buildTranscriptFallbackResponse(
 
 function buildTemporalFallbackResponse(
 	metadataHeader: string,
+	harness: string,
 	queryTerms: string,
 	charBudget: number,
 	hits: ReadonlyArray<{
@@ -594,7 +606,7 @@ function buildTemporalFallbackResponse(
 		content: `- [thread ${hit.id}] ${hit.excerpt} (${formatMemoryDate(hit.latestAt)}, ${hit.threadLabel})`,
 	}));
 	const lines = selectWithBudget(rows, charBudget).map((row) => row.content);
-	const inject = buildPromptRecallInject(metadataHeader, lines, pluginContext);
+	const inject = buildPromptRecallInject(metadataHeader, lines, harness, pluginContext);
 	return {
 		inject,
 		memoryCount: lines.length,
@@ -683,17 +695,34 @@ function buildPluginPromptContributionSection(target: PluginPromptTargetV1, log:
 	}
 }
 
-function buildPromptRecallInject(metadataHeader: string, lines: ReadonlyArray<string>, pluginContext = ""): string {
+function buildPromptRecallGuidance(harness: string): string {
+	if (isPiHarness(harness)) {
+		return "Use the memories below as starting context before acting. If the task depends on prior context and anything is missing, run 1-3 targeted recalls with signet_recall. Ask natural questions with entity + event + timeframe when possible. Avoid bag-of-keywords recall queries. Treat graph expansion as supporting context, not proof.";
+	}
+	return "Use the memories below as starting context before acting. If the task depends on prior context and anything is missing, run 1-3 targeted recalls with /recall or memory_search. Ask natural questions with entity + event + timeframe when possible. Avoid bag-of-keywords recall queries. Expand with lcm_expand or knowledge_expand only when you need deeper lineage or graph context. Treat graph expansion as supporting context, not proof.";
+}
+
+function buildNoStrongMemoryMatchGuidance(harness: string): string {
+	if (isPiHarness(harness)) {
+		return "No strong automatic memory match was injected for this turn. If the request depends on prior context, preferences, project history, or unresolved work, run 1-3 targeted Signet recalls with signet_recall before executing commands, editing files, or making decisions. Ask natural questions with entity + event + timeframe when possible. Avoid bag-of-keywords recall queries. Treat graph expansion as supporting context, not proof.";
+	}
+	return "No strong automatic memory match was injected for this turn. If the request depends on prior context, preferences, project history, or unresolved work, run 1-3 targeted Signet recalls before executing commands, editing files, or making decisions. Ask natural questions with entity + event + timeframe when possible. Avoid bag-of-keywords recall queries. Treat graph expansion as supporting context, not proof.";
+}
+
+function buildDurableSaveGuidance(harness: string): string {
+	if (isPiHarness(harness)) return "If you learn something durable, save it with /remember or signet_remember.";
+	return "If you learn something durable, save it with /remember or memory_store.";
+}
+
+function buildPromptRecallInject(
+	metadataHeader: string,
+	lines: ReadonlyArray<string>,
+	harness: string,
+	pluginContext = "",
+): string {
 	// Keep formatting behavior aligned with daemon-rs
 	// `build_prompt_recall_inject()` in `platform/daemon-rs/.../routes/hooks.rs`.
-	const parts = [
-		metadataHeader.trimEnd(),
-		"",
-		"## Memory Check",
-		"",
-		"Use the memories below as starting context before acting. If the task depends on prior context and anything is missing, run 1-3 targeted recalls with /recall or memory_search, then expand with lcm_expand or knowledge_expand when needed.",
-		"",
-	];
+	const parts = [metadataHeader.trimEnd(), "", "## Memory Check", "", buildPromptRecallGuidance(harness), ""];
 	if (pluginContext.trim().length > 0) {
 		parts.push(pluginContext.trimEnd());
 		parts.push("");
@@ -702,24 +731,17 @@ function buildPromptRecallInject(metadataHeader: string, lines: ReadonlyArray<st
 	parts.push("");
 	parts.push(...lines);
 	parts.push("");
-	parts.push("If you learn something durable, save it with /remember or memory_store.");
+	parts.push(buildDurableSaveGuidance(harness));
 	return `${parts.join("\n").trimEnd()}\n`;
 }
 
-function buildNoStrongMemoryMatchInject(metadataHeader: string, pluginContext = ""): string {
-	const parts = [
-		metadataHeader.trimEnd(),
-		"",
-		"## Memory Check",
-		"",
-		"No strong automatic memory match was injected for this turn. If the request depends on prior context, preferences, project history, or unresolved work, run 1-3 targeted Signet recalls before executing commands, editing files, or making decisions.",
-		"",
-	];
+function buildNoStrongMemoryMatchInject(metadataHeader: string, harness: string, pluginContext = ""): string {
+	const parts = [metadataHeader.trimEnd(), "", "## Memory Check", "", buildNoStrongMemoryMatchGuidance(harness), ""];
 	if (pluginContext.trim().length > 0) {
 		parts.push(pluginContext.trimEnd());
 		parts.push("");
 	}
-	parts.push("If you learn something durable, save it with /remember or memory_store.");
+	parts.push(buildDurableSaveGuidance(harness));
 	return `${parts.join("\n").trimEnd()}\n`;
 }
 
@@ -2527,16 +2549,15 @@ type UserPromptSubmitDeps = {
 	readonly trackFtsHits: typeof trackFtsHits;
 };
 
-const PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS = 1000;
-
 async function fetchPromptSubmitEmbedding(
 	deps: Pick<UserPromptSubmitDeps, "fetchEmbedding" | "logger">,
 	text: string,
 	cfg: Parameters<typeof fetchEmbedding>[1],
+	timeoutMs: number,
 ): Promise<number[] | null> {
 	const controller = new AbortController();
 	let timer: ReturnType<typeof setTimeout> | null = null;
-	const request = deps.fetchEmbedding(text, cfg, { signal: controller.signal });
+	const request = deps.fetchEmbedding(text, cfg, { signal: controller.signal, timeoutMs });
 	try {
 		return await Promise.race([
 			request,
@@ -2544,7 +2565,7 @@ async function fetchPromptSubmitEmbedding(
 				timer = setTimeout(() => {
 					controller.abort();
 					resolve(null);
-				}, PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS);
+				}, timeoutMs);
 			}),
 		]);
 	} finally {
@@ -2732,7 +2753,7 @@ export async function handleUserPromptSubmit(
 			userMessage,
 			start,
 			{
-				inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext),
+				inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
 				memoryCount: 0,
 				warnings,
 			},
@@ -2747,7 +2768,7 @@ export async function handleUserPromptSubmit(
 			userMessage,
 			start,
 			{
-				inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext),
+				inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
 				memoryCount: 0,
 				warnings,
 			},
@@ -2765,6 +2786,7 @@ export async function handleUserPromptSubmit(
 		// Falls back to pipelineV2.guardrails.contextBudgetChars when not set in agent.yaml.
 		const injectBudget = submitCfg.maxInjectChars ?? cfg.pipelineV2.guardrails.contextBudgetChars;
 		const minScore = resolveUserPromptMinScore(submitCfg.minScore);
+		const embeddingTimeoutMs = cfg.embedding.promptSubmitTimeoutMs ?? DEFAULT_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS;
 		const queryTerms = vectorQuery.slice(0, 80);
 		const recallStart = Date.now();
 		let embeddingTimedOut = false;
@@ -2782,16 +2804,16 @@ export async function handleUserPromptSubmit(
 			cfg,
 			async (text, embeddingCfg) => {
 				const startEmbedding = Date.now();
-				const embedding = await fetchPromptSubmitEmbedding(deps, text, embeddingCfg);
+				const embedding = await fetchPromptSubmitEmbedding(deps, text, embeddingCfg, embeddingTimeoutMs);
 				const embeddingDuration = Date.now() - startEmbedding;
-				if (!embedding && embeddingDuration >= PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS) {
+				if (!embedding && embeddingDuration >= embeddingTimeoutMs - 5) {
 					embeddingTimedOut = true;
 					deps.logger.warn("hooks", "User prompt submit embedding timed out", {
 						harness: req.harness,
 						project: req.project,
 						sessionKey: req.sessionKey,
 						durationMs: embeddingDuration,
-						timeoutMs: PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+						timeoutMs: embeddingTimeoutMs,
 					});
 				}
 				return embedding;
@@ -2830,6 +2852,7 @@ export async function handleUserPromptSubmit(
 					start,
 					buildTemporalFallbackResponse(
 						metadataHeader,
+						req.harness,
 						queryTerms,
 						injectBudget,
 						temporalHits,
@@ -2854,6 +2877,7 @@ export async function handleUserPromptSubmit(
 					start,
 					buildTranscriptFallbackResponse(
 						metadataHeader,
+						req.harness,
 						queryTerms,
 						injectBudget,
 						transcriptHits,
@@ -2869,7 +2893,7 @@ export async function handleUserPromptSubmit(
 					userMessage,
 					start,
 					{
-						inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext),
+						inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
 						memoryCount: 0,
 						warnings,
 					},
@@ -2884,7 +2908,7 @@ export async function handleUserPromptSubmit(
 				userMessage,
 				start,
 				{
-					inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext),
+					inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
 					memoryCount: 0,
 					warnings,
 				},
@@ -2936,7 +2960,7 @@ export async function handleUserPromptSubmit(
 				userMessage,
 				start,
 				{
-					inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext),
+					inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
 					memoryCount: 0,
 					warnings,
 				},
@@ -2951,14 +2975,14 @@ export async function handleUserPromptSubmit(
 				`[signet:note] ${omitted} additional ${omitted === 1 ? "match was" : "matches were"} omitted to keep this lightweight (raise memory.guardrails.contextBudgetChars to include more).`,
 			);
 		}
-		let inject = buildPromptRecallInject(metadataHeader, lines, pluginContext);
+		let inject = buildPromptRecallInject(metadataHeader, lines, req.harness, pluginContext);
 
 		// Append agent feedback request if enabled and there are injected memories
 		const selectedIds = selected.map((s) => s.id);
 		if (feedbackEnabled && selectedIds.length > 0) {
-			const isPiHarness = req.harness === "pi";
-			const toolName = isPiHarness ? "signet_memory_feedback" : "mcp__signet__memory_feedback";
-			const instruction = isPiHarness
+			const pi = isPiHarness(req.harness);
+			const toolName = pi ? "signet_memory_feedback" : "mcp__signet__memory_feedback";
+			const instruction = pi
 				? `Rate injected memories using the ${toolName} tool. Pass a ratings map of memory ID to score (-1 to 1). 0=unused, 1=directly helpful, -1=harmful.`
 				: `Rate injected memories using the ${toolName} tool. Pass session_key "${req.sessionKey}" and a ratings map of memory ID to score (-1 to 1). 0=unused, 1=directly helpful, -1=harmful.`;
 			inject += `\n<memory-feedback>\n${instruction}\nIDs: ${selectedIds.join(", ")}\n</memory-feedback>`;
@@ -2992,7 +3016,11 @@ export async function handleUserPromptSubmit(
 		);
 	} catch (e) {
 		deps.logger.error("hooks", "User prompt submit failed", e as Error);
-		return { inject: buildNoStrongMemoryMatchInject(metadataHeader, pluginContext), memoryCount: 0, warnings };
+		return {
+			inject: buildNoStrongMemoryMatchInject(metadataHeader, req.harness, pluginContext),
+			memoryCount: 0,
+			warnings,
+		};
 	}
 }
 
@@ -3136,23 +3164,11 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 		transcript = storedTranscript;
 	}
 
-	if (rawTranscript) {
-		try {
-			writeTranscriptAudit({
-				basePath: getAgentsDir(),
-				agentId,
-				sessionId: req.sessionId?.trim() || sessionKey || "",
-				sessionKey: sessionKey ?? null,
-				rawTranscript,
-				capturedAt: endedAt,
-			});
-		} catch (error) {
-			logger.warn("hooks", "Session end transcript audit write failed", {
-				error: error instanceof Error ? error.message : String(error),
-				sessionKey,
-			});
-		}
-	}
+	// Keep retention/indexing lossless. The summary worker receives a
+	// capped copy below, but transcript artifacts and live transcript
+	// storage must preserve the full canonical transcript.
+	const retainedTranscript = transcript;
+
 	// Derive a stable session identity for artifact paths.  When the
 	// transcript is empty and no explicit sessionId was provided,
 	// deriveSessionEndFallbackId returns a random UUID — making this call
@@ -3162,47 +3178,180 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	// (b) very short (1–499 char) transcripts do write a transcript
 	// artifact with a non-deterministic path, but the summary job is
 	// still skipped, limiting blast radius.
-	const sessionId = req.sessionId?.trim() || deriveSessionEndFallbackId(sessionKey, req.transcriptPath, transcript);
+	const sessionId =
+		req.sessionId?.trim() || deriveSessionEndFallbackId(sessionKey, req.transcriptPath, retainedTranscript);
 
-	// Lossless retention: write transcript immediately regardless of length
-	// or whether the summary worker succeeds later.
-	if (transcript && sessionKey) {
+	// Lossless retention: keep the live transcript snapshot available to
+	// subsequent hook calls before returning. The heavier canonical JSONL
+	// rewrite/indexing work is deferred below so the session-end response
+	// is not held open by large transcript rewrites.
+	if (retainedTranscript && sessionKey) {
 		try {
-			upsertSessionTranscript(sessionKey, transcript, req.harness, req.cwd ?? null, agentId);
-			await writeCanonicalTranscriptFromSnapshot({
-				agentId,
-				harness: req.harness,
-				sessionKey,
-				sessionId,
-				project: req.cwd ?? null,
-				rawTranscript,
-				transcript,
-				capturedAt: endedAt,
-				transcriptPath: req.transcriptPath,
-			});
+			upsertSessionTranscript(sessionKey, retainedTranscript, req.harness, req.cwd ?? null, agentId);
 		} catch (e) {
-			logger.warn("hooks", "Transcript write failed (non-fatal)", {
+			logger.warn("hooks", "Live transcript retention failed (non-fatal)", {
 				error: e instanceof Error ? e.message : String(e),
+			});
+		}
+	}
+
+	// Safety cap against degenerate inputs (corrupt files, etc).
+	// The summary worker handles long transcripts via chunked
+	// map-reduce summarization, so this is a last-resort guard for
+	// extraction only — not for transcript retention.
+	const MAX_TRANSCRIPT_CHARS = 100_000;
+	let summaryTranscript = retainedTranscript;
+	let truncated = false;
+	if (summaryTranscript.length > MAX_TRANSCRIPT_CHARS) {
+		logger.warn("hooks", "Transcript exceeds safety cap, truncating summary input", {
+			original: summaryTranscript.length,
+			cap: MAX_TRANSCRIPT_CHARS,
+		});
+		summaryTranscript = `${summaryTranscript.slice(0, MAX_TRANSCRIPT_CHARS)}\n[truncated]`;
+		truncated = true;
+	}
+
+	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode;
+	const hasSummaryLength = summaryTranscript.length >= 500;
+	let jobId: string | undefined;
+
+	// Queue for async processing by the summary worker instead of
+	// blocking on LLM inference. The worker produces both a dated
+	// markdown summary and atomic fact rows.
+	const noiseSession = isNoiseSession({
+		project: req.cwd ?? null,
+		sessionKey: sessionKey ?? null,
+		sessionId,
+		harness: req.harness,
+	});
+
+	if (!pipelineEnabled) {
+		logger.info("hooks", "Session end extraction skipped — pipeline disabled");
+	} else if (noiseSession) {
+		logger.debug("hooks", "Session end summary skipped for noise session", {
+			harness: req.harness,
+			project: req.cwd,
+			sessionKey,
+			sessionId,
+		});
+	} else if (hasSummaryLength) {
+		jobId = enqueueSummaryJob(getDbAccessor(), {
+			harness: req.harness,
+			transcript: summaryTranscript,
+			sessionKey,
+			sessionId,
+			project: req.cwd,
+			agentId,
+			trigger: "session_end",
+			capturedAt: endedAt,
+			endedAt,
+		});
+
+		logger.info("hooks", "Session end queued for summary", {
+			jobId,
+			feedbackTelemetry: getFeedbackTelemetry(),
+		});
+		logger.info("hooks", "Session end transcript queued", {
+			harness: req.harness,
+			project: req.cwd,
+			sessionKey,
+			transcriptPath: req.transcriptPath,
+			transcriptChars: summaryTranscript.length,
+			truncated,
+			preview: summaryTranscript.slice(0, 500),
+		});
+	}
+
+	setImmediate(() => {
+		const work = deferSessionEndWork({
+			transcript: retainedTranscript,
+			rawTranscript,
+			sessionKey,
+			sessionId,
+			agentId,
+			harness: req.harness,
+			cwd: req.cwd ?? null,
+			endedAt,
+			transcriptPath: req.transcriptPath,
+			memoryCfg,
+		}).catch((error) => {
+			logger.warn("hooks", "Deferred session-end work failed", {
+				error: error instanceof Error ? error.message : String(error),
+				sessionKey,
+			});
+		});
+		deferredSessionEndWork.add(work);
+		void work.finally(() => {
+			deferredSessionEndWork.delete(work);
+		});
+	});
+
+	return { memoriesSaved: 0, queued: Boolean(jobId), jobId };
+}
+
+async function deferSessionEndWork(params: {
+	transcript: string;
+	rawTranscript: string;
+	sessionKey: string | undefined;
+	sessionId: string;
+	agentId: string;
+	harness: string;
+	cwd: string | null;
+	endedAt: string;
+	transcriptPath: string | undefined;
+	memoryCfg: ReturnType<typeof loadMemoryConfig>;
+}): Promise<void> {
+	const {
+		transcript,
+		rawTranscript,
+		sessionKey,
+		sessionId,
+		agentId,
+		harness,
+		cwd,
+		endedAt,
+		transcriptPath,
+		memoryCfg,
+	} = params;
+
+	if (rawTranscript) {
+		try {
+			writeTranscriptAudit({
+				basePath: getAgentsDir(),
+				agentId,
+				sessionId,
+				sessionKey: sessionKey ?? null,
+				rawTranscript,
+				capturedAt: endedAt,
+			});
+		} catch (error) {
+			logger.warn("hooks", "Deferred transcript audit write failed", {
+				error: error instanceof Error ? error.message : String(error),
+				sessionKey,
 			});
 		}
 	}
 
 	if (transcript.trim().length > 0) {
 		try {
-			if (
-				!isNoiseSession({
-					project: req.cwd ?? null,
+			if (!isNoiseSession({ project: cwd, sessionKey: sessionKey ?? null, sessionId, harness })) {
+				await writeCanonicalTranscriptFromSnapshot({
+					agentId,
+					harness,
 					sessionKey: sessionKey ?? null,
 					sessionId,
-					harness: req.harness,
-				})
-			) {
+					project: cwd,
+					rawTranscript,
+					transcript,
+					capturedAt: endedAt,
+					transcriptPath,
+				});
 				const manifest = ensureCanonicalManifest({
 					agentId,
 					sessionId,
 					sessionKey: sessionKey ?? null,
-					project: req.cwd ?? null,
-					harness: req.harness,
+					project: cwd,
+					harness,
 					capturedAt: endedAt,
 					startedAt: null,
 					endedAt,
@@ -3211,8 +3360,8 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 					agentId,
 					sessionId,
 					sessionKey: sessionKey ?? null,
-					project: req.cwd ?? null,
-					harness: req.harness,
+					project: cwd,
+					harness,
 					capturedAt: endedAt,
 					startedAt: null,
 					endedAt,
@@ -3220,38 +3369,31 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 					manifestPath: manifest.path.replace(`${getAgentsDir()}/`, "").replace(/\\/g, "/"),
 				});
 				logger.debug("hooks", "Session transcript JSONL snapshot written", {
-					harness: req.harness,
-					project: req.cwd,
+					harness,
+					project: cwd,
 					sessionKey,
-					path: canonicalTranscriptRelativePath(req.harness),
+					path: canonicalTranscriptRelativePath(harness),
 				});
 			}
 		} catch (e) {
-			logger.warn("hooks", "Transcript artifact write failed (non-fatal)", {
+			logger.warn("hooks", "Deferred transcript indexing failed", {
 				error: e instanceof Error ? e.message : String(e),
 				sessionKey,
+				transcriptPath,
 			});
 		}
 	}
 
-	if (!memoryCfg.pipelineV2.enabled && !memoryCfg.pipelineV2.shadowMode) {
-		logger.info("hooks", "Session end extraction skipped — pipeline disabled");
-		return { memoriesSaved: 0 };
-	}
-
-	let feedbackAspectsUpdated = 0;
-	let feedbackFtsConfirmations = 0;
-	let feedbackDecayedAspects = 0;
-	let feedbackPropagatedAttributes = 0;
-	if (sessionKey && memoryCfg.pipelineV2.graph.enabled && memoryCfg.pipelineV2.feedback.enabled) {
+	const pipelineActive = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode;
+	if (sessionKey && pipelineActive && memoryCfg.pipelineV2.graph.enabled && memoryCfg.pipelineV2.feedback.enabled) {
+		let feedbackDecayedAspects = 0;
+		let feedbackPropagatedAttributes = 0;
 		try {
 			const feedback = applyFtsOverlapFeedback(getDbAccessor(), sessionKey, agentId, {
 				delta: memoryCfg.pipelineV2.feedback.ftsWeightDelta,
 				maxWeight: memoryCfg.pipelineV2.feedback.maxAspectWeight,
 				minWeight: memoryCfg.pipelineV2.feedback.minAspectWeight,
 			});
-			feedbackAspectsUpdated = feedback.aspectsUpdated;
-			feedbackFtsConfirmations = feedback.totalFtsConfirmations;
 
 			if (
 				memoryCfg.pipelineV2.feedback.decayEnabled &&
@@ -3272,83 +3414,20 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 				feedbackDecayedAspects,
 				feedbackPropagatedAttributes,
 			});
+			logger.debug("hooks", "Deferred aspect feedback completed", {
+				sessionKey,
+				feedbackAspectsUpdated: feedback.aspectsUpdated,
+				feedbackFtsConfirmations: feedback.totalFtsConfirmations,
+				feedbackDecayedAspects,
+				feedbackPropagatedAttributes,
+			});
 		} catch (err) {
-			logger.warn("hooks", "Aspect feedback failed", {
+			logger.warn("hooks", "Deferred aspect feedback failed", {
 				error: err instanceof Error ? err.message : String(err),
 				sessionKey,
 			});
 		}
 	}
-
-	if (transcript.length < 500) {
-		return { memoriesSaved: 0 };
-	}
-
-	// Safety cap against degenerate inputs (corrupt files, etc).
-	// The summary worker handles long transcripts via chunked
-	// map-reduce summarization, so this is a last-resort guard.
-	const MAX_TRANSCRIPT_CHARS = 100_000;
-	let truncated = false;
-	if (transcript.length > MAX_TRANSCRIPT_CHARS) {
-		logger.warn("hooks", "Transcript exceeds safety cap, truncating", {
-			original: transcript.length,
-			cap: MAX_TRANSCRIPT_CHARS,
-		});
-		transcript = `${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}\n[truncated]`;
-		truncated = true;
-	}
-
-	// Queue for async processing by the summary worker instead of
-	// blocking on LLM inference. The worker produces both a dated
-	// markdown summary and atomic fact rows.
-	if (
-		isNoiseSession({
-			project: req.cwd ?? null,
-			sessionKey: sessionKey ?? null,
-			sessionId,
-			harness: req.harness,
-		})
-	) {
-		logger.debug("hooks", "Session end summary skipped for noise session", {
-			harness: req.harness,
-			project: req.cwd,
-			sessionKey,
-			sessionId,
-		});
-		return { memoriesSaved: 0, queued: false };
-	}
-
-	const jobId = enqueueSummaryJob(getDbAccessor(), {
-		harness: req.harness,
-		transcript,
-		sessionKey,
-		sessionId,
-		project: req.cwd,
-		agentId,
-		trigger: "session_end",
-		capturedAt: endedAt,
-		endedAt,
-	});
-
-	logger.info("hooks", "Session end queued for summary", {
-		jobId,
-		feedbackAspectsUpdated,
-		feedbackFtsConfirmations,
-		feedbackDecayedAspects,
-		feedbackPropagatedAttributes,
-		feedbackTelemetry: getFeedbackTelemetry(),
-	});
-	logger.info("hooks", "Session end transcript queued", {
-		harness: req.harness,
-		project: req.cwd,
-		sessionKey,
-		transcriptPath: req.transcriptPath,
-		transcriptChars: transcript.length,
-		truncated,
-		preview: transcript.slice(0, 500),
-	});
-
-	return { memoriesSaved: 0, queued: true, jobId };
 }
 
 // ---------------------------------------------------------------------------

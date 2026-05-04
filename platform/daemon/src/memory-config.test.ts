@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PIPELINE_V2, loadMemoryConfig, loadPipelineConfig } from "./memory-config";
+import {
+	DEFAULT_PIPELINE_V2,
+	MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+	MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+	loadMemoryConfig,
+	loadPipelineConfig,
+} from "./memory-config";
 
 const tmpDirs: string[] = [];
 
@@ -87,6 +93,28 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.embedding.provider).toBe("native");
 		expect(cfg.embedding.model).toBe("nomic-embed-text-v1.5");
 		expect(cfg.embedding.dimensions).toBe(768);
+		expect(cfg.embedding.promptSubmitTimeoutMs).toBe(MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS);
+	});
+
+	it("loads embedding prompt-submit timeout from agent.yaml", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			"embedding:\n  provider: ollama\n  model: mxbai-embed-large\n  promptSubmitTimeoutMs: 10000\n",
+		);
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.embedding.promptSubmitTimeoutMs).toBe(10000);
+	});
+
+	it("clamps embedding prompt-submit timeout bounds", () => {
+		const lowDir = makeTempAgentsDir();
+		writeFileSync(join(lowDir, "agent.yaml"), "embedding:\n  provider: ollama\n  promptSubmitTimeoutMs: 50\n");
+		expect(loadMemoryConfig(lowDir).embedding.promptSubmitTimeoutMs).toBe(MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS);
+
+		const highDir = makeTempAgentsDir();
+		writeFileSync(join(highDir, "agent.yaml"), "embedding:\n  provider: ollama\n  promptSubmitTimeoutMs: 999999\n");
+		expect(loadMemoryConfig(highDir).embedding.promptSubmitTimeoutMs).toBe(MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS);
 	});
 
 	it("respects ollama+nomic-embed-text config without overriding", () => {
@@ -1222,6 +1250,27 @@ describe("loadPipelineConfig", () => {
 
 		expect(result.worker.maxLoadPerCpu).toBe(DEFAULT_PIPELINE_V2.worker.maxLoadPerCpu);
 		expect(result.worker.overloadBackoffMs).toBe(DEFAULT_PIPELINE_V2.worker.overloadBackoffMs);
+	});
+
+	it("defaults threadedExtraction to true when absent", () => {
+		const result = loadPipelineConfig({
+			memory: { pipelineV2: { enabled: true } },
+		});
+
+		expect(result.worker.threadedExtraction).toBe(true);
+	});
+
+	it("respects explicit threadedExtraction: false opt-out", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					enabled: true,
+					worker: { threadedExtraction: false },
+				},
+			},
+		});
+
+		expect(result.worker.threadedExtraction).toBe(false);
 	});
 
 	it("uses defaults for maintenance config when absent", () => {

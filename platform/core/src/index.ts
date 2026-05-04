@@ -201,6 +201,25 @@ export type {
 	WorkspaceSourceRepoSyncOptions,
 	WorkspaceSourceRepoSyncResult,
 } from "./workspace-source-repo";
+export {
+	addObsidianSource,
+	DEFAULT_OBSIDIAN_EXCLUDE_GLOBS,
+	getAgentsDir,
+	getSourcesConfigPath,
+	loadSourcesConfig,
+	markSourceIndexed,
+	removeSource,
+	saveSourcesConfig,
+} from "./sources-config";
+export type {
+	AddObsidianSourceInput,
+	AddSourceResult,
+	RemoveSourceResult,
+	SignetSourceEntry,
+	SignetSourceKind,
+	SignetSourceMode,
+	SignetSourcesConfig,
+} from "./sources-config";
 
 // Portable export/import
 export {

@@ -54,7 +54,14 @@ export function setNativeEmbeddingProviderForTest(provider: ((text: string) => P
 
 type EmbeddingFetchOptions = {
 	readonly signal?: AbortSignal;
+	readonly timeoutMs?: number;
 };
+
+function resolveEmbeddingTimeoutMs(opts: EmbeddingFetchOptions, fallback: number): number {
+	return typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+		? opts.timeoutMs
+		: fallback;
+}
 
 type EmbeddingFetchSignal = {
 	readonly signal: AbortSignal;
@@ -110,7 +117,7 @@ async function fetchOllamaEmbedding(
 			body: JSON.stringify({ model, prompt: text }),
 		},
 		opts,
-		30000,
+		resolveEmbeddingTimeoutMs(opts, 30000),
 	);
 	if (!res.ok) {
 		logger.warn("embedding", "Ollama embedding request failed", {
@@ -175,7 +182,7 @@ export async function fetchEmbedding(
 						body: JSON.stringify({ input: text, model: fallbackModel }),
 					},
 					opts,
-					5000,
+					resolveEmbeddingTimeoutMs(opts, 5000),
 				);
 				if (llamaCppRes.ok) {
 					const data = (await llamaCppRes.json()) as { data?: Array<{ embedding: number[] }> };
@@ -209,7 +216,7 @@ export async function fetchEmbedding(
 								body: JSON.stringify({ input: text, model: discoveredModel }),
 							},
 							opts,
-							5000,
+							resolveEmbeddingTimeoutMs(opts, 5000),
 						);
 						if (llamaCppRes.ok) {
 							nativeFallbackProvider = "llama-cpp";
@@ -258,7 +265,7 @@ export async function fetchEmbedding(
 					body: JSON.stringify({ model: cfg.model, input: text }),
 				},
 				opts,
-				30000,
+				resolveEmbeddingTimeoutMs(opts, 30000),
 			);
 			if (!res.ok) {
 				logger.warn("embedding", "llama.cpp embedding request failed", {
@@ -288,7 +295,7 @@ export async function fetchEmbedding(
 				body: JSON.stringify({ model: cfg.model, input: text }),
 			},
 			opts,
-			30000,
+			resolveEmbeddingTimeoutMs(opts, 30000),
 		);
 		if (!res.ok) {
 			logger.warn("embedding", "Embedding API request failed", {
