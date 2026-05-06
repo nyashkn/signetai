@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-06
-- Bug fixes: respect active harnesses during sync; classify body-read timeouts correctly in daemon clients.
+- Bug fixes: wrap launchd plist runtime in /bin/bash to avoid macOS AMFI exec failure; install ClawHub skills from dashboard; respect active harnesses during sync; classify body-read timeouts correctly in daemon clients.
 - Docs: correct stale documentation claims.
 
 ### 2026-05-04
@@ -35,6 +35,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: force horizontal contributor avatars; render contributors inline; clean up contributors rendering; add LeuciRemi to contributors; correct stale documentation claims; fix documentation drift.
 
 ## Release Ledger
+
+## [0.111.7] - 2026-05-06
+
+Release summary: 2 bug fixes.
+Tag range: `v0.111.6..v0.111.7`.
+
+### Bug Fixes
+
+- **cli**: wrap launchd plist runtime in /bin/bash to avoid macOS AMFI exec failure (#635)
+- **daemon**: install ClawHub skills from dashboard (#633)
 
 ## [0.111.6] - 2026-05-06
 
