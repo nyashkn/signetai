@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-07
+- Features: add ACPX routing backend.
 - Bug fixes: gate npm publish on daemon release assets; dedupe resumed session-start hooks; stabilize Obsidian source sync; index Obsidian sources asynchronously; harden recall authorization.
 - Docs: refine ontology artifact model; add north star ontology.
 
@@ -35,6 +36,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: make prompt-submit embedding timeout configurable; apply is_deleted filter to BM25 FTS path.
 
 ## Release Ledger
+
+## [0.112.0] - 2026-05-07
+
+Release summary: 1 feature.
+Tag range: `v0.111.14..v0.112.0`.
+
+### Features
+
+- **inference**: add ACPX routing backend (#642)
 
 ## [0.111.14] - 2026-05-07
 
