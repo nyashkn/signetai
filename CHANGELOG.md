@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-10
+- Bug fixes: match feature flag response shape.
+
 ### 2026-05-09
 - Bug fixes: hide deleted rows from list endpoint; add auth whoami parity route; disable embeddings in mutation api route tests; add batch memory forget route parity; isolate background acpx summaries; use claude connector for Claude Code.
 
@@ -33,10 +36,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: enable threadedExtraction by default and fix build.
 - Docs: correct stale documentation claims.
 
-### 2026-05-02
-- Bug fixes: align exposed memory tools with harness guidance; sanitize generated hints; pass remember hints through; guide recall query shape.
-
 ## Release Ledger
+
+## [0.115.14] - 2026-05-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.115.13..v0.115.14`.
+
+### Bug Fixes
+
+- **daemon-rs**: match feature flag response shape (#672)
 
 ## [0.115.13] - 2026-05-09
 
