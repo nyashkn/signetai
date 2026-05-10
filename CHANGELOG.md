@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-10
-- Bug fixes: add embeddings status parity route; add packaged app updates; match feature flag response shape.
+- Bug fixes: sync source before install; add embeddings status parity route; add packaged app updates; match feature flag response shape.
 
 ### 2026-05-09
 - Bug fixes: hide deleted rows from list endpoint; add auth whoami parity route; disable embeddings in mutation api route tests; add batch memory forget route parity; isolate background acpx summaries; use claude connector for Claude Code.
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: correct stale documentation claims.
 
 ## Release Ledger
+
+## [0.115.17] - 2026-05-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.115.16..v0.115.17`.
+
+### Bug Fixes
+
+- **desktop**: sync source before install (#675)
 
 ## [0.115.16] - 2026-05-10
 
