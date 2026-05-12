@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-12
 - Bug fixes: bound and queue secret exec; normalize acpx claude setup alias; add ACPX quick setup; degrade bounded git workspace operations; persist global bin paths; verify public ghcr pulls after publish; add most-used memories parity route.
+- Refactoring: add configurable identity presets.
 
 ### 2026-05-11
 - Features: add header images for three new essays; add three new essays on memory architecture and sovereignty.
@@ -34,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: correct stale documentation claims.
 
 ## Release Ledger
+
+## [0.116.7] - 2026-05-12
+
+Release summary: 1 refactor.
+Tag range: `v0.116.6..v0.116.7`.
+
+### Refactoring
+
+- **identity**: add configurable identity presets (#689)
 
 ## [0.116.6] - 2026-05-12
 
