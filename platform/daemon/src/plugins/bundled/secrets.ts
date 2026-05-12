@@ -39,13 +39,19 @@ const surfaces: PluginSurfaceDeclarationsV1 = {
 		{
 			method: "POST",
 			path: "/api/secrets/exec",
-			summary: "Run a command with injected secrets",
+			summary: "Queue a command with injected secrets",
+			requiredCapabilities: ["secrets:exec"],
+		},
+		{
+			method: "GET",
+			path: "/api/secrets/exec/:jobId",
+			summary: "Inspect a queued secret exec job",
 			requiredCapabilities: ["secrets:exec"],
 		},
 		{
 			method: "POST",
 			path: "/api/secrets/:name/exec",
-			summary: "Legacy single-secret exec route",
+			summary: "Legacy single-secret queued exec route",
 			requiredCapabilities: ["secrets:exec"],
 		},
 		{

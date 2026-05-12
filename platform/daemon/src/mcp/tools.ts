@@ -1308,7 +1308,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 		{
 			title: "Execute with Secrets",
 			description:
-				"Run a shell command with secrets injected as environment variables. " +
+				"Queue a command with secrets injected as environment variables. " +
 				"Provide a secrets map where keys are env var names and values are Signet secret names or 1Password references (op://vault/item/field). " +
 				"Output is automatically redacted — secret values never appear in results.",
 			inputSchema: z.object({
@@ -1319,26 +1319,70 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 					.describe(
 						'Map of env var name → secret ref, e.g. { "OPENAI_API_KEY": "OPENAI_API_KEY" } or { "DB_PASSWORD": "op://vault/item/password" }',
 					),
+				timeoutSeconds: z
+					.number()
+					.int()
+					.positive()
+					.max(1800)
+					.optional()
+					.describe("Maximum subprocess runtime; defaults to 5 minutes"),
 			}),
 			annotations: { readOnlyHint: false },
 		},
-		async ({ command, secrets }) => {
+		async ({ command, secrets, timeoutSeconds }) => {
 			if (Object.keys(secrets).length === 0) {
 				return errorResult("secrets map must contain at least one entry");
 			}
 
+			const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : undefined;
+			const requestTimeout = 10_000;
 			const result = await daemonFetch<{
-				stdout: string;
-				stderr: string;
-				code: number;
+				stdout?: string;
+				stderr?: string;
+				code?: number;
+				id?: string;
+				status?: string;
 			}>(baseUrl, "/api/secrets/exec", {
 				method: "POST",
-				body: { command, secrets },
-				timeout: 30_000,
+				body: { command, secrets, timeoutMs },
+				timeout: requestTimeout,
 			});
 
 			if (!result.ok) {
 				return errorResult(`Exec failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"secret_exec_status",
+		{
+			title: "Secret Exec Status",
+			description:
+				"Poll a queued secret_exec job by id. Returns redacted stdout/stderr/code once the job completes; secret values never appear in results.",
+			inputSchema: z.object({
+				jobId: z.string().min(1).describe("Job id returned by secret_exec"),
+			}),
+			annotations: { readOnlyHint: true },
+		},
+		async ({ jobId }) => {
+			const result = await daemonFetch<{
+				id: string;
+				status: string;
+				stdout?: string;
+				stderr?: string;
+				code?: number;
+				timedOut?: boolean;
+				error?: string;
+				createdAt?: string;
+				startedAt?: string;
+				completedAt?: string;
+				timeoutMs?: number;
+			}>(baseUrl, `/api/secrets/exec/${encodeURIComponent(jobId)}`);
+
+			if (!result.ok) {
+				return errorResult(`Secret exec status failed: ${result.error}`);
 			}
 			return textResult(result.data);
 		},

@@ -2275,7 +2275,7 @@ Returns `404` if the secret does not exist.
 
 ### POST /api/secrets/exec
 
-Execute a shell command with multiple secrets injected into the subprocess
+Queue a shell command with multiple secrets injected into the subprocess
 environment. Callers pass a map of env var names to secret references —
 never actual values. References can be Signet secret names or direct
 1Password refs (`op://vault/item/field`). The daemon resolves and injects
@@ -2294,13 +2294,27 @@ all values before spawning.
 ```
 
 Both `command` and `secrets` are required. The `secrets` map must contain at
-least one entry.
+least one entry. `timeoutMs` is optional and defaults to 5 minutes; values are
+clamped between 1 second and 30 minutes. Secret exec is always queued and the
+route always returns immediately with HTTP `202`; callers poll the job endpoint
+for the redacted result.
 
-**Response**
+Timed-out commands are terminated by the daemon and finish with code `124` and
+`timedOut: true` in the polled job result.
+The secret exec queue is bounded; saturated queues return `429`. Output is
+redacted before truncation, and timeout cleanup targets the subprocess process
+group where the platform supports it.
+
+**Queued response (`202`)**
 
 ```json
-{ "code": 0, "stdout": "...", "stderr": "" }
+{ "id": "uuid", "status": "queued", "createdAt": "...", "timeoutMs": 300000 }
 ```
+
+### GET /api/secrets/exec/:jobId
+
+Return the in-memory status for a queued secret exec job. Completed jobs
+include the same redacted `result` object as the synchronous response.
 
 ### POST /api/secrets/:name/exec
 

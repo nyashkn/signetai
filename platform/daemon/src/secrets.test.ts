@@ -7,10 +7,13 @@ import {
 	deleteSecret,
 	execWithSecrets,
 	getSecret,
+	getSecretExecJob,
 	hasSecret,
 	listSecrets,
 	localSecretProvider,
 	putSecret,
+	resetSecretExecJobsForTests,
+	startSecretExecJob,
 } from "./secrets.js";
 
 const originalSignetPath = process.env.SIGNET_PATH;
@@ -29,6 +32,7 @@ describe("local secrets provider", () => {
 
 	afterEach(() => {
 		resetDefaultPluginHostForTests();
+		resetSecretExecJobsForTests();
 		if (originalSignetPath === undefined) {
 			Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		} else {
@@ -104,6 +108,120 @@ describe("local secrets provider", () => {
 		expect(result.stderr).not.toContain("sk-test-local");
 	});
 
+	test("execWithSecrets times out bounded subprocesses", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-timeout");
+		const script = join(agentsDir, "sleep-secret.mjs");
+		writeFileSync(script, "setTimeout(() => process.stdout.write(process.env.OPENAI_API_KEY), 2000);\n");
+
+		const result = await execWithSecrets(`bun ${script}`, { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 1000 });
+
+		expect(result.code).toBe(124);
+		expect(result.timedOut).toBe(true);
+		expect(result.stdout).not.toContain("sk-timeout");
+		expect(result.stderr).toContain("timed out");
+	});
+
+	test("execWithSecrets redacts before output truncation can leak secret prefixes", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-partial-secret");
+		const script = join(agentsDir, "partial-secret.mjs");
+		writeFileSync(script, `process.stdout.write(${JSON.stringify("A".repeat(1020))} + process.env.OPENAI_API_KEY);\n`);
+
+		const result = await execWithSecrets(
+			`bun ${script}`,
+			{ OPENAI_API_KEY: "OPENAI_API_KEY" },
+			{ timeoutMs: 1000, maxOutputBytes: 1024 },
+		);
+
+		expect(result.code).toBe(0);
+		expect(result.stdout).not.toContain("sk-");
+		expect(result.stdout).not.toContain("sk-partial-secret");
+		expect(result.stdout).toContain("stdout truncated");
+	});
+
+	test("execWithSecrets kills subprocess children on timeout", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-child-timeout");
+		const marker = join(agentsDir, "child-survived.txt");
+		const child = join(agentsDir, "timeout-child.mjs");
+		const parent = join(agentsDir, "timeout-parent.mjs");
+		writeFileSync(child, "setTimeout(() => Bun.write(process.env.MARKER_PATH, process.env.OPENAI_API_KEY), 1200);\n");
+		writeFileSync(
+			parent,
+			[
+				'import { spawn } from "node:child_process";',
+				'spawn(process.execPath, [process.env.CHILD_SCRIPT], { env: process.env, stdio: "ignore" });',
+				"setTimeout(() => {}, 5000);",
+			].join("\n"),
+		);
+
+		process.env.MARKER_PATH = marker;
+		process.env.CHILD_SCRIPT = child;
+		const result = await execWithSecrets(`bun ${parent}`, { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 200 });
+		process.env.MARKER_PATH = undefined;
+		process.env.CHILD_SCRIPT = undefined;
+		await new Promise((resolve) => setTimeout(resolve, 1400));
+
+		expect(result.code).toBe(124);
+		expect(result.timedOut).toBe(true);
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	test("startSecretExecJob returns immediately and completes in the background", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-background");
+		const script = join(agentsDir, "background-secret.mjs");
+		writeFileSync(script, "setTimeout(() => process.stdout.write(process.env.OPENAI_API_KEY), 25);\n");
+
+		const job = startSecretExecJob(`bun ${script}`, { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 1000 });
+
+		expect(job.id.length).toBeGreaterThan(0);
+		expect(["queued", "running"]).toContain(job.status);
+		expect(job.result).toBeUndefined();
+
+		let finished = getSecretExecJob(job.id);
+		for (let i = 0; i < 20 && finished?.status !== "completed"; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			finished = getSecretExecJob(job.id);
+		}
+
+		expect(finished?.status).toBe("completed");
+		expect(finished?.result?.code).toBe(0);
+		expect(finished?.result?.stdout).toBe("[REDACTED]");
+		expect(finished?.result?.stdout).not.toContain("sk-background");
+	});
+
+	test("startSecretExecJob limits concurrently running jobs", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-queued");
+		const script = join(agentsDir, "queued-secret.mjs");
+		writeFileSync(script, "setTimeout(() => process.stdout.write(process.env.OPENAI_API_KEY), 200);\n");
+
+		const jobs = Array.from({ length: 6 }, () =>
+			startSecretExecJob(`bun ${script}`, { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 1000 }),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		const statuses = jobs.map((job) => getSecretExecJob(job.id)?.status);
+
+		expect(statuses.filter((status) => status === "running")).toHaveLength(4);
+		expect(statuses.filter((status) => status === "queued")).toHaveLength(2);
+	});
+
+	test("startSecretExecJob evicts retained completed job results instead of blocking new work", async () => {
+		await putSecret("OPENAI_API_KEY", "sk-retained");
+		const jobs = [];
+
+		for (let i = 0; i < 150; i++) {
+			const job = startSecretExecJob("bun --version", { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 1000 });
+			jobs.push(job);
+			for (let poll = 0; poll < 80; poll++) {
+				if (getSecretExecJob(job.id)?.status === "completed") break;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+		}
+
+		const next = startSecretExecJob("bun --version", { OPENAI_API_KEY: "OPENAI_API_KEY" }, { timeoutMs: 1000 });
+
+		expect(["queued", "running"]).toContain(next.status);
+		expect(jobs.some((job) => !getSecretExecJob(job.id))).toBe(true);
+	});
+
 	test("corrupt stores fail clearly and are not overwritten by list or health checks", async () => {
 		mkdirSync(join(agentsDir, ".secrets"), { recursive: true });
 		writeFileSync(secretsFile(), "not-json", { mode: 0o600 });
@@ -132,6 +250,7 @@ describe("local secrets provider", () => {
 		mkdirSync(join(agentsDir, ".secrets"), { recursive: true });
 		writeFileSync(secretsFile(), "not-json", { mode: 0o600 });
 		resetDefaultPluginHostForTests();
+		resetSecretExecJobsForTests();
 
 		const plugin = getDefaultPluginHost().get(SIGNET_SECRETS_PLUGIN_ID);
 
