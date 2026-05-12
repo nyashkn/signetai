@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-12
-- Bug fixes: verify public ghcr pulls after publish; add most-used memories parity route.
+- Bug fixes: persist global bin paths; verify public ghcr pulls after publish; add most-used memories parity route.
 
 ### 2026-05-11
 - Features: add header images for three new essays; add three new essays on memory architecture and sovereignty.
@@ -34,6 +34,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: correct stale documentation claims.
 
 ## Release Ledger
+
+## [0.116.2] - 2026-05-12
+
+Release summary: 1 bug fix.
+Tag range: `v0.116.1..v0.116.2`.
+
+### Bug Fixes
+
+- **install**: persist global bin paths (#685)
 
 ## [0.116.1] - 2026-05-12
 
