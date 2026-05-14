@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-14
-- Bug fixes: reap acpx process trees.
+- Bug fixes: surface daemon start journal diagnostics; clean up detached codex acp processes; reap acpx process trees.
 
 ### 2026-05-13
 - Features: daily reflections with dashboard card.
@@ -35,6 +35,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: update ACPX integration architecture.
 
 ## Release Ledger
+
+## [0.118.5] - 2026-05-14
+
+Release summary: 2 bug fixes.
+Tag range: `v0.118.4..v0.118.5`.
+
+### Bug Fixes
+
+- **cli**: surface daemon start journal diagnostics (#710)
+- **daemon**: clean up detached codex acp processes (#709)
 
 ## [0.118.4] - 2026-05-14
 
