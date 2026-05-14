@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-14
+- Bug fixes: reap acpx process trees.
+
 ### 2026-05-13
 - Features: daily reflections with dashboard card.
 - Bug fixes: prune migration backups for disk headroom; use checked LLM model catalog; support latest memory provider lifecycle; generate Daily Brief on dashboard open; keep dependency descriptions in sync; isolate ollama setup validation tests.
@@ -31,12 +34,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: restore knowledge graph mentions schema; bound ontology constellation graph reads; avoid resumed summary artifact collisions; stream logs without EventSource; align release commits with version sync; match connector list schema; keep dev workspace links local; prune migration backups before copy; catch release version sync regression; harden recent regression surfaces.
 - Docs: update ACPX integration architecture.
 
-### 2026-05-07
-- Features: inherit parent context for sub-agent sessions; add ACPX routing backend.
-- Bug fixes: gate npm publish on daemon release assets; dedupe resumed session-start hooks; stabilize Obsidian source sync; index Obsidian sources asynchronously; harden recall authorization.
-- Docs: refine ontology artifact model; add north star ontology.
-
 ## Release Ledger
+
+## [0.118.4] - 2026-05-14
+
+Release summary: 1 bug fix.
+Tag range: `v0.118.3..v0.118.4`.
+
+### Bug Fixes
+
+- **pipeline**: reap acpx process trees (#708)
 
 ## [0.118.3] - 2026-05-13
 
