@@ -122,6 +122,10 @@ import "./sqlite.js";
 
 // Template directory location (relative to built CLI)
 function getTemplatesDir() {
+	if (process.env.SIGNET_TEMPLATES_DIR && existsSync(process.env.SIGNET_TEMPLATES_DIR)) {
+		return process.env.SIGNET_TEMPLATES_DIR;
+	}
+
 	const devPath = join(__dirname, "..", "templates");
 	const distPath = join(__dirname, "..", "..", "templates");
 
@@ -133,6 +137,10 @@ function getTemplatesDir() {
 
 // Skills source directory (root skills/ copied into package at build time)
 function getSkillsSourceDir() {
+	if (process.env.SIGNET_SKILLS_SOURCE && existsSync(process.env.SIGNET_SKILLS_SOURCE)) {
+		return process.env.SIGNET_SKILLS_SOURCE;
+	}
+
 	// Dev: monorepo root skills/
 	const devPath = join(__dirname, "..", "..", "..", "skills");
 	// Dist: skills/ next to dist/
@@ -307,6 +315,15 @@ function getCliVersion(): string {
 		const version = getVersionFromPackageJson(candidate);
 		if (version) {
 			return version;
+		}
+	}
+
+	if (process.env.SIGNET_DIR) {
+		try {
+			const version = readFileSync(join(process.env.SIGNET_DIR, "VERSION"), "utf8").trim();
+			if (version) return version;
+		} catch {
+			// Fall through to unknown version.
 		}
 	}
 
