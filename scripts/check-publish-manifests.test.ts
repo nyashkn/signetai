@@ -31,6 +31,13 @@ function extractWorkflowRunBlock(workflow: string, step: string): string {
 }
 
 describe("check-publish-manifests", () => {
+	test("keeps the nightly release manually triggerable", () => {
+		const root = join(import.meta.dir, "..");
+		const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf-8");
+
+		expect(workflow).toContain("  workflow_dispatch:\n  push:");
+	});
+
 	test("keeps threaded extraction worker in standalone daemon and meta-package builds", () => {
 		const root = join(import.meta.dir, "..");
 		const daemonBuild = readFileSync(join(root, "platform", "daemon", "build.ts"), "utf-8");
