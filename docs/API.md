@@ -868,6 +868,11 @@ compatibility. Requires `remember` permission.
 
 Get a single memory by ID. Returns deleted memories only if the query
 explicitly requests them; by default, soft-deleted records return `404`.
+Direct reads are filtered through the same resolved agent read policy used by
+recall/search. Pass `agentId`/`agent_id`, `x-signet-agent-id`, or an
+`x-signet-session-key` that resolves to an agent when reading non-default
+agent memories; cross-agent or private memories outside that read scope return
+`404` without provenance fields.
 
 Requires `recall` permission.
 
@@ -882,7 +887,14 @@ Requires `recall` permission.
   "tags": "preference,editor",
   "pinned": 0,
   "who": "claude-code",
+  "source_id": "optional-external-id",
   "source_type": "manual",
+  "source_path": "/absolute/or/original/source.md",
+  "runtime_path": "memory/MEMORY.md",
+  "idempotency_key": "stable-import-key",
+  "sourcePath": "/absolute/or/original/source.md",
+  "runtimePath": "memory/MEMORY.md",
+  "idempotencyKey": "stable-import-key",
   "project": null,
   "session_id": null,
   "confidence": null,
@@ -898,6 +910,10 @@ Requires `recall` permission.
   "updated_by": "operator"
 }
 ```
+
+`sourcePath`, `runtimePath`, and `idempotencyKey` are camelCase aliases for
+`source_path`, `runtime_path`, and `idempotency_key` so import provenance written
+through `POST /api/memory/remember` is visible on direct reads.
 
 ### GET /api/memory/:id/history
 
