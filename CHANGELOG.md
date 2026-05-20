@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-20
-- Bug fixes: expose row provenance on read; persist remember row provenance; repair bundled node daemon startup; avoid heredoc in bundle smoke config.
+- Bug fixes: preserve constellation pointer input; expose row provenance on read; persist remember row provenance; repair bundled node daemon startup; avoid heredoc in bundle smoke config.
 
 ### 2026-05-19
 - Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
@@ -30,6 +30,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: surface daemon start journal diagnostics; clean up detached codex acp processes; reap acpx process trees.
 
 ## Release Ledger
+
+## [0.123.12] - 2026-05-20
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.123.11-22a3766a9b1d108d193b9da92c6ab1c9b91b5a4d..v0.123.12`.
+
+### Bug Fixes
+
+- **dashboard**: preserve constellation pointer input (#736)
 
 ## [0.123.11] - 2026-05-20
 
