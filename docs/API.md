@@ -789,6 +789,9 @@ Body-level fields override prefix-parsed values.
   "pinned": false,
   "sourceType": "manual",
   "sourceId": "optional-external-id",
+  "sourcePath": "/absolute/or/original/source.md",
+  "runtimePath": "memory/MEMORY.md",
+  "idempotencyKey": "stable-import-key",
   "createdAt": "2026-02-21T10:00:00.000Z",
   "agentId": "alice",
   "visibility": "global"
@@ -806,6 +809,15 @@ Only `content` is required. Multi-agent fields:
 memory is sourced from an older conversation or imported artifact so structured
 currentness and supersession can compare facts by source time instead of ingest
 time.
+
+Row-level provenance fields are optional: `sourcePath`/`source_path` stores the
+original source path, `runtimePath`/`runtime_path` stores the runtime-relative
+path, and `idempotencyKey`/`idempotency_key` stores a stable import key. When an
+`idempotencyKey` is supplied, remember checks it before content-hash dedupe;
+retries with the same key return the existing row instead of inserting a
+duplicate within the same `agentId`, `visibility`, and `scope` tuple. Importers
+may also supply the snake_case names inside a `metadata` object for
+compatibility.
 
 Structured callers may also pass `structured.entities`, `structured.aspects`,
 and `structured.hints`. Aspect attributes are persisted directly under
@@ -838,9 +850,9 @@ or update the knowledge graph.
 }
 ```
 
-If an identical memory (by content hash or `sourceId`) already exists,
-`deduped: true` is returned with the existing record — no duplicate is
-created.
+If an identical memory (by `sourceId`, `idempotencyKey`, or content hash) already
+exists in the relevant scope, `deduped: true` is returned with the existing
+record — no duplicate is created.
 
 ### POST /api/memory/save
 
