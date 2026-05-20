@@ -1768,16 +1768,16 @@ export function getEntityHealth(
 	minComparisons = 3,
 ): ReadonlyArray<EntityHealth> {
 	return accessor.withReadDb((db) => {
+		const predictorTable = db
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'predictor_comparisons'")
+			.get() as { name: string } | undefined;
+		if (!predictorTable) return [];
+
 		const args: Array<string | number> = [agentId];
 		const sinceClause = typeof since === "string" && since.length > 0 ? " AND created_at >= ?" : "";
 		if (sinceClause && since !== undefined) {
 			args.push(since);
 		}
-
-		const predictorComparisonsExists = db
-			.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'predictor_comparisons'")
-			.get();
-		if (!predictorComparisonsExists) return [];
 
 		const rows = db
 			.prepare(

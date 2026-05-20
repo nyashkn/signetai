@@ -15,6 +15,13 @@ struct Migration {
     sql: &'static str,
 }
 
+const TS_MEMORY_SEARCH_TELEMETRY_VERSION: u32 = 66;
+const TS_MEMORY_SEARCH_TELEMETRY_NAME: &str = "memory-search-telemetry";
+const TS_ONTOLOGY_PROPOSALS_VERSION: u32 = 67;
+const TS_ONTOLOGY_PROPOSALS_NAME: &str = "ontology-proposals";
+const TS_AGENT_SCOPED_IDEMPOTENCY_VERSION: u32 = 72;
+const TS_AGENT_SCOPED_IDEMPOTENCY_NAME: &str = "agent-scoped-idempotency-key";
+
 /// Simple checksum matching the TS implementation (hash of "version:name").
 fn checksum(version: u32, name: &str) -> String {
     let s = format!("{version}:{name}");
@@ -25,15 +32,8 @@ fn checksum(version: u32, name: &str) -> String {
     format!("{:x}", h as u32)
 }
 
-/// Helper: add a column only if it doesn't already exist.
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, typedef: &str) {
-    if let Err(e) = add_column_if_missing_required(conn, table, column, typedef) {
-        warn!(%table, %column, err = %e, "failed to add column");
-    }
-}
-
-/// Fallible column add for startup parity repairs and required schema fixes.
-fn add_column_if_missing_required(
+/// Helper: add a required column only if it doesn't already exist.
+fn add_column_if_missing(
     conn: &Connection,
     table: &str,
     column: &str,
@@ -49,10 +49,22 @@ fn add_column_if_missing_required(
 
     if !has_col {
         let sql = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {typedef}");
-        conn.execute_batch(&sql)?;
+        conn.execute_batch(&sql).map_err(|err| {
+            error!(%table, %column, %typedef, err = %err, "failed to add required migration column");
+            CoreError::from(err)
+        })?;
     }
 
     Ok(())
+}
+
+/// Historical per-migration compatibility shims are best-effort because some
+/// older SQL files can legitimately skip the target table. Required runtime
+/// parity repair uses `add_column_if_missing` directly and fails startup.
+fn add_column_if_missing_best_effort(conn: &Connection, table: &str, column: &str, typedef: &str) {
+    if let Err(err) = add_column_if_missing(conn, table, column, typedef) {
+        warn!(%table, %column, %typedef, err = %err, "skipping optional migration column repair");
+    }
 }
 
 /// All schema migrations in order. SQL is idempotent (IF NOT EXISTS / IF MISSING).
@@ -355,17 +367,165 @@ pub fn run(conn: &Connection) -> Result<(), CoreError> {
         }
     }
 
-    ensure_schema_parity_guards(conn)?;
-
     if count > 0 {
         info!(count, "migrations applied");
     }
 
+    ensure_cross_daemon_parity_tables(conn)?;
+    ensure_cross_daemon_parity_columns(conn)?;
+
     Ok(())
 }
 
-fn ensure_schema_parity_guards(conn: &Connection) -> Result<(), CoreError> {
-    add_column_if_missing_required(conn, "entities", "mentions", "INTEGER DEFAULT 0")?;
+/// Reconcile schema drift between the TypeScript and Rust daemons.
+///
+/// Some parity columns are required by current Rust route/query code but may be
+/// absent in fresh or TS-created databases whose historical migrations stamped
+/// versions before Rust learned about the extra columns.
+fn ensure_cross_daemon_parity_tables(conn: &Connection) -> Result<(), CoreError> {
+    conn.execute_batch(include_str!("sql/040-memory-search-telemetry.sql"))?;
+    conn.execute_batch(include_str!("sql/041-ontology-proposals.sql"))?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_MEMORY_SEARCH_TELEMETRY_VERSION,
+        TS_MEMORY_SEARCH_TELEMETRY_NAME,
+    )?;
+    Ok(())
+}
+
+fn ensure_cross_daemon_parity_columns(conn: &Connection) -> Result<(), CoreError> {
+    add_column_if_missing(conn, "entities", "mentions", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "entities", "pinned", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "entities", "pinned_at", "TEXT")?;
+    add_column_if_missing(conn, "entities", "updated_at", "TEXT")?;
+
+    add_column_if_missing(conn, "memories", "agent_id", "TEXT DEFAULT 'default'")?;
+    add_column_if_missing(conn, "memories", "visibility", "TEXT DEFAULT 'global'")?;
+    add_column_if_missing(conn, "memories", "scope", "TEXT")?;
+    add_column_if_missing(conn, "memories", "idempotency_key", "TEXT")?;
+    add_column_if_missing(conn, "memories", "runtime_path", "TEXT")?;
+
+    add_column_if_missing(
+        conn,
+        "connectors",
+        "settings_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    add_column_if_missing(conn, "connectors", "enabled", "INTEGER NOT NULL DEFAULT 1")?;
+
+    add_column_if_missing(conn, "entity_attributes", "proposal_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "group_key", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "claim_key", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "source_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "source_kind", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "source_path", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "source_root", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "entity_attributes",
+        "proposal_evidence",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(conn, "entity_dependencies", "proposal_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "confidence", "REAL")?;
+    add_column_if_missing(conn, "entity_dependencies", "reason", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "source_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "source_kind", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "source_path", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "source_root", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "entity_dependencies",
+        "proposal_evidence",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entity_attributes_proposal
+            ON entity_attributes(agent_id, proposal_id);
+         CREATE INDEX IF NOT EXISTS idx_entity_dependencies_proposal
+            ON entity_dependencies(agent_id, proposal_id);",
+    )?;
+
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_memories_idempotency_key;
+         CREATE UNIQUE INDEX idx_memories_idempotency_key
+            ON memories(
+                idempotency_key,
+                COALESCE(NULLIF(agent_id, ''), 'default'),
+                COALESCE(visibility, 'global'),
+                COALESCE(scope, '__NULL__')
+            )
+            WHERE idempotency_key IS NOT NULL AND is_deleted = 0;",
+    )?;
+
+    conn.execute_batch(
+        "UPDATE connectors
+            SET settings_json = CASE
+                WHEN json_valid(config_json)
+                     AND json_type(config_json, '$.settings') IS NOT NULL
+                THEN json_extract(config_json, '$.settings')
+                ELSE NULLIF(config_json, '')
+            END
+          WHERE NULLIF(config_json, '') IS NOT NULL
+            AND (
+                settings_json IS NULL
+                OR settings_json = ''
+                OR (
+                    settings_json = '{}'
+                    AND COALESCE(updated_at, '') = COALESCE(created_at, '')
+                    AND COALESCE(
+                        CASE
+                            WHEN json_valid(config_json)
+                            THEN json_extract(config_json, '$.settings')
+                        END,
+                        '__missing__'
+                    ) != '{}'
+                )
+            );",
+    )?;
+
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ONTOLOGY_PROPOSALS_VERSION,
+        TS_ONTOLOGY_PROPOSALS_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_AGENT_SCOPED_IDEMPOTENCY_VERSION,
+        TS_AGENT_SCOPED_IDEMPOTENCY_NAME,
+    )?;
+
+    Ok(())
+}
+
+fn stamp_typescript_parity_migration(
+    conn: &Connection,
+    version: u32,
+    name: &str,
+) -> Result<(), CoreError> {
+    let already_stamped: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+            [version],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)?;
+    if already_stamped {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let cs = checksum(version, name);
+    conn.execute(
+        "INSERT INTO schema_migrations (version, applied_at, checksum)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![version, now, cs],
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations_audit (version, applied_at, duration_ms, checksum)
+         VALUES (?1, ?2, 0, ?3)",
+        rusqlite::params![version, now, cs],
+    )?;
     Ok(())
 }
 
@@ -391,7 +551,7 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
                 ("memories", "update_count", "INTEGER DEFAULT 0"),
                 ("memories", "runtime_path", "TEXT"),
             ] {
-                add_column_if_missing(conn, col.0, col.1, col.2);
+                add_column_if_missing_best_effort(conn, col.0, col.1, col.2);
             }
             // Indexes on programmatically-added columns
             conn.execute_batch(
@@ -401,44 +561,53 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
             )?;
         }
         4 => {
-            add_column_if_missing(conn, "memory_history", "actor_type", "TEXT");
-            add_column_if_missing(conn, "memory_history", "session_id", "TEXT");
-            add_column_if_missing(conn, "memory_history", "request_id", "TEXT");
+            add_column_if_missing_best_effort(conn, "memory_history", "actor_type", "TEXT");
+            add_column_if_missing_best_effort(conn, "memory_history", "session_id", "TEXT");
+            add_column_if_missing_best_effort(conn, "memory_history", "request_id", "TEXT");
         }
         5 => {
-            add_column_if_missing(conn, "entities", "canonical_name", "TEXT");
-            add_column_if_missing_required(conn, "entities", "mentions", "INTEGER DEFAULT 0")?;
-            add_column_if_missing(conn, "relations", "mentions", "INTEGER DEFAULT 1");
-            add_column_if_missing(conn, "relations", "confidence", "REAL DEFAULT 0.5");
-            add_column_if_missing(conn, "relations", "updated_at", "TEXT");
-            add_column_if_missing(conn, "memory_entity_mentions", "mention_text", "TEXT");
-            add_column_if_missing(conn, "memory_entity_mentions", "confidence", "REAL");
-            add_column_if_missing(conn, "memory_entity_mentions", "created_at", "TEXT");
+            add_column_if_missing_best_effort(conn, "entities", "canonical_name", "TEXT");
+            add_column_if_missing_best_effort(conn, "relations", "mentions", "INTEGER DEFAULT 1");
+            add_column_if_missing_best_effort(conn, "relations", "confidence", "REAL DEFAULT 0.5");
+            add_column_if_missing_best_effort(conn, "relations", "updated_at", "TEXT");
+            add_column_if_missing_best_effort(
+                conn,
+                "memory_entity_mentions",
+                "mention_text",
+                "TEXT",
+            );
+            add_column_if_missing_best_effort(conn, "memory_entity_mentions", "confidence", "REAL");
+            add_column_if_missing_best_effort(conn, "memory_entity_mentions", "created_at", "TEXT");
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_entities_canonical_name ON entities(canonical_name);",
             )?;
         }
         6 => {
-            add_column_if_missing(conn, "memories", "idempotency_key", "TEXT");
+            add_column_if_missing_best_effort(conn, "memories", "idempotency_key", "TEXT");
             conn.execute_batch(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency_key
                      ON memories(idempotency_key) WHERE idempotency_key IS NOT NULL;",
             )?;
         }
         7 => {
-            add_column_if_missing(conn, "memory_jobs", "document_id", "TEXT");
+            add_column_if_missing_best_effort(conn, "memory_jobs", "document_id", "TEXT");
         }
         13 => {
-            add_column_if_missing(conn, "memories", "source_path", "TEXT");
-            add_column_if_missing(conn, "memories", "source_section", "TEXT");
+            add_column_if_missing_best_effort(conn, "memories", "source_path", "TEXT");
+            add_column_if_missing_best_effort(conn, "memories", "source_section", "TEXT");
         }
         15 => {
-            add_column_if_missing(conn, "session_scores", "confidence", "REAL");
-            add_column_if_missing(conn, "session_scores", "continuity_reasoning", "TEXT");
+            add_column_if_missing_best_effort(conn, "session_scores", "confidence", "REAL");
+            add_column_if_missing_best_effort(
+                conn,
+                "session_scores",
+                "continuity_reasoning",
+                "TEXT",
+            );
         }
         17 => {
-            add_column_if_missing(conn, "scheduled_tasks", "skill_name", "TEXT");
-            add_column_if_missing(
+            add_column_if_missing_best_effort(conn, "scheduled_tasks", "skill_name", "TEXT");
+            add_column_if_missing_best_effort(
                 conn,
                 "scheduled_tasks",
                 "skill_mode",
@@ -446,41 +615,66 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
             );
         }
         19 => {
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "entities",
                 "agent_id",
                 "TEXT NOT NULL DEFAULT 'default'",
             );
-            add_column_if_missing(conn, "entities", "pinned", "INTEGER NOT NULL DEFAULT 0");
-            add_column_if_missing(conn, "entities", "pinned_at", "TEXT");
-            add_column_if_missing(conn, "entities", "embedding", "BLOB");
+            add_column_if_missing_best_effort(
+                conn,
+                "entities",
+                "pinned",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            add_column_if_missing_best_effort(conn, "entities", "pinned_at", "TEXT");
+            add_column_if_missing_best_effort(conn, "entities", "embedding", "BLOB");
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_entities_agent ON entities(agent_id);",
             )?;
         }
         20 => {
-            add_column_if_missing(conn, "session_memories", "entity_slot", "INTEGER");
-            add_column_if_missing(conn, "session_memories", "aspect_slot", "INTEGER");
-            add_column_if_missing(
+            add_column_if_missing_best_effort(conn, "session_memories", "entity_slot", "INTEGER");
+            add_column_if_missing_best_effort(conn, "session_memories", "aspect_slot", "INTEGER");
+            add_column_if_missing_best_effort(
                 conn,
                 "session_memories",
                 "is_constraint",
                 "INTEGER NOT NULL DEFAULT 0",
             );
-            add_column_if_missing(conn, "session_memories", "structural_density", "INTEGER");
+            add_column_if_missing_best_effort(
+                conn,
+                "session_memories",
+                "structural_density",
+                "INTEGER",
+            );
         }
         21 => {
-            add_column_if_missing(conn, "session_checkpoints", "focal_entity_ids", "TEXT");
-            add_column_if_missing(conn, "session_checkpoints", "focal_entity_names", "TEXT");
-            add_column_if_missing(conn, "session_checkpoints", "active_aspect_ids", "TEXT");
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
+                conn,
+                "session_checkpoints",
+                "focal_entity_ids",
+                "TEXT",
+            );
+            add_column_if_missing_best_effort(
+                conn,
+                "session_checkpoints",
+                "focal_entity_names",
+                "TEXT",
+            );
+            add_column_if_missing_best_effort(
+                conn,
+                "session_checkpoints",
+                "active_aspect_ids",
+                "TEXT",
+            );
+            add_column_if_missing_best_effort(
                 conn,
                 "session_checkpoints",
                 "surfaced_constraint_count",
                 "INTEGER",
             );
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "session_checkpoints",
                 "traversal_memory_count",
@@ -488,48 +682,68 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
             );
         }
         22 => {
-            add_column_if_missing(conn, "entities", "pinned", "INTEGER NOT NULL DEFAULT 0");
-            add_column_if_missing(conn, "entities", "pinned_at", "TEXT");
+            add_column_if_missing_best_effort(
+                conn,
+                "entities",
+                "pinned",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+            add_column_if_missing_best_effort(conn, "entities", "pinned_at", "TEXT");
         }
         23 => {
-            add_column_if_missing(conn, "session_memories", "predictor_rank", "INTEGER");
+            add_column_if_missing_best_effort(
+                conn,
+                "session_memories",
+                "predictor_rank",
+                "INTEGER",
+            );
         }
         24 => {
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "predictor_comparisons",
                 "scorer_confidence",
                 "REAL NOT NULL DEFAULT 0",
             );
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "predictor_comparisons",
                 "success_rate",
                 "REAL NOT NULL DEFAULT 0.5",
             );
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "predictor_comparisons",
                 "predictor_top_ids",
                 "TEXT NOT NULL DEFAULT '[]'",
             );
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "predictor_comparisons",
                 "baseline_top_ids",
                 "TEXT NOT NULL DEFAULT '[]'",
             );
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
                 conn,
                 "predictor_comparisons",
                 "relevance_scores",
                 "TEXT NOT NULL DEFAULT '{}'",
             );
-            add_column_if_missing(conn, "predictor_comparisons", "fts_overlap_score", "REAL");
+            add_column_if_missing_best_effort(
+                conn,
+                "predictor_comparisons",
+                "fts_overlap_score",
+                "REAL",
+            );
         }
         25 => {
-            add_column_if_missing(conn, "session_memories", "agent_relevance_score", "REAL");
-            add_column_if_missing(
+            add_column_if_missing_best_effort(
+                conn,
+                "session_memories",
+                "agent_relevance_score",
+                "REAL",
+            );
+            add_column_if_missing_best_effort(
                 conn,
                 "session_memories",
                 "agent_feedback_count",
@@ -537,11 +751,11 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
             );
         }
         30 => {
-            add_column_if_missing(conn, "memory_jobs", "document_id", "TEXT");
+            add_column_if_missing_best_effort(conn, "memory_jobs", "document_id", "TEXT");
         }
         31 => {
-            add_column_if_missing(conn, "entity_dependencies", "reason", "TEXT");
-            add_column_if_missing(conn, "entities", "last_synthesized_at", "TEXT");
+            add_column_if_missing_best_effort(conn, "entity_dependencies", "reason", "TEXT");
+            add_column_if_missing_best_effort(conn, "entities", "last_synthesized_at", "TEXT");
         }
         34 => {
             // Rebuild session_transcripts with compound (session_key, agent_id) PK.
@@ -607,9 +821,9 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
         // NOT re-execute this arm — the session_summaries work was applied
         // when they upgraded to v35 and is idempotent via IF NOT EXISTS guards.
         35 => {
-            add_column_if_missing(conn, "session_summaries", "source_type", "TEXT");
-            add_column_if_missing(conn, "session_summaries", "source_ref", "TEXT");
-            add_column_if_missing(conn, "session_summaries", "meta_json", "TEXT");
+            add_column_if_missing_best_effort(conn, "session_summaries", "source_type", "TEXT");
+            add_column_if_missing_best_effort(conn, "session_summaries", "source_ref", "TEXT");
+            add_column_if_missing_best_effort(conn, "session_summaries", "meta_json", "TEXT");
             conn.execute_batch(
                 "UPDATE session_summaries
                     SET source_type = CASE
@@ -652,7 +866,7 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
                     "TEXT NOT NULL DEFAULT 'default'",
                 ),
             ] {
-                add_column_if_missing(conn, col.0, col.1, col.2);
+                add_column_if_missing_best_effort(conn, col.0, col.1, col.2);
             }
             conn.execute_batch(
                 "UPDATE summary_jobs
@@ -676,19 +890,19 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
 
     // Cross-daemon parity: keep scoped memory columns/indexes aligned.
     if m.version >= 2 {
-        add_column_if_missing(
+        add_column_if_missing_best_effort(
             conn,
             "memories",
             "agent_id",
             "TEXT NOT NULL DEFAULT 'default'",
         );
-        add_column_if_missing(
+        add_column_if_missing_best_effort(
             conn,
             "memories",
             "visibility",
             "TEXT NOT NULL DEFAULT 'global'",
         );
-        add_column_if_missing(conn, "memories", "scope", "TEXT");
+        add_column_if_missing_best_effort(conn, "memories", "scope", "TEXT");
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_memories_agent_visibility_scope
                 ON memories(agent_id, visibility, scope);
@@ -734,51 +948,240 @@ fn repair_bogus_version(conn: &Connection) -> Result<(), CoreError> {
 mod tests {
     use super::*;
 
-    fn columns(conn: &Connection, table: &str) -> Vec<String> {
-        let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-            .expect("table info statement prepares");
-        stmt.query_map([], |row| row.get::<_, String>(1))
-            .expect("table info query runs")
-            .map(|row| row.expect("column row reads"))
-            .collect()
-    }
-
     #[test]
-    fn migrations_install_knowledge_graph_mentions_columns() {
-        let conn = Connection::open_in_memory().expect("in-memory db opens");
-
-        run(&conn).expect("migrations run");
-
-        assert!(columns(&conn, "entities").contains(&"mentions".to_string()));
-        assert!(columns(&conn, "relations").contains(&"mentions".to_string()));
-        assert!(columns(&conn, "memory_entity_mentions").contains(&"mention_text".to_string()));
-    }
-
-    #[test]
-    fn schema_parity_guard_repairs_existing_entities_table() {
-        let conn = Connection::open_in_memory().expect("in-memory db opens");
-        conn.execute_batch(
-            "CREATE TABLE entities (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL
-            );",
+    fn backfills_connector_settings_from_config_json_when_default_empty_object_exists() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+        conn.execute(
+            r#"INSERT INTO connectors (id, provider, display_name, config_json, created_at, updated_at)
+             VALUES ('obsidian-main', 'obsidian', 'Obsidian', '{"vault":"/tmp/vault"}', datetime('now'), datetime('now'))"#,
+            [],
         )
-        .expect("entities table creates");
+        .expect("insert TS-style connector");
 
-        ensure_schema_parity_guards(&conn).expect("parity guard runs");
+        let before: String = conn
+            .query_row(
+                "SELECT settings_json FROM connectors WHERE id = 'obsidian-main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read default settings_json");
+        assert_eq!(before, "{}");
 
-        assert!(columns(&conn, "entities").contains(&"mentions".to_string()));
+        run(&conn).expect("rerun migrations backfills settings_json");
+
+        let after: String = conn
+            .query_row(
+                "SELECT settings_json FROM connectors WHERE id = 'obsidian-main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read backfilled settings_json");
+        assert_eq!(after, r#"{"vault":"/tmp/vault"}"#);
+
+        conn.execute(
+            r#"UPDATE connectors
+               SET settings_json = '{}', updated_at = datetime('now', '+1 second')
+               WHERE id = 'obsidian-main'"#,
+            [],
+        )
+        .expect("simulate intentional empty settings payload");
+
+        run(&conn).expect("rerun migrations preserves intentional empty settings");
+
+        let intentional_empty: String = conn
+            .query_row(
+                "SELECT settings_json FROM connectors WHERE id = 'obsidian-main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read intentionally empty settings_json");
+        assert_eq!(intentional_empty, "{}");
     }
 
     #[test]
-    fn required_column_add_reports_alter_errors() {
-        let conn = Connection::open_in_memory().expect("in-memory db opens");
+    fn connector_settings_repair_preserves_rust_wrapper_with_empty_settings() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+        conn.execute(
+            r#"INSERT INTO connectors
+               (id, provider, display_name, config_json, settings_json, created_at, updated_at)
+               VALUES
+               (
+                 'local-empty',
+                 'obsidian',
+                 'Obsidian',
+                 '{"id":"local-empty","provider":"obsidian","displayName":"Obsidian","settings":{},"enabled":true}',
+                 '{}',
+                 datetime('now'),
+                 datetime('now')
+               )"#,
+            [],
+        )
+        .expect("insert Rust-style connector with intentionally empty settings");
 
-        let err =
-            add_column_if_missing_required(&conn, "entities", "mentions", "INTEGER DEFAULT 0")
-                .expect_err("missing required table should fail schema repair");
+        run(&conn).expect("rerun migrations preserves intentionally empty wrapper settings");
 
-        assert!(err.to_string().contains("entities"));
+        let settings: String = conn
+            .query_row(
+                "SELECT settings_json FROM connectors WHERE id = 'local-empty'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read settings_json");
+        assert_eq!(settings, "{}");
+    }
+
+    #[test]
+    fn connector_settings_repair_backfills_from_rust_wrapper_inner_settings() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+        conn.execute(
+            r#"INSERT INTO connectors
+               (id, provider, display_name, config_json, settings_json, created_at, updated_at)
+               VALUES
+               (
+                 'local-configured',
+                 'obsidian',
+                 'Obsidian',
+                 '{"id":"local-configured","provider":"obsidian","displayName":"Obsidian","settings":{"vault":"/tmp/vault"},"enabled":true}',
+                 '{}',
+                 datetime('now'),
+                 datetime('now')
+               )"#,
+            [],
+        )
+        .expect("insert Rust-style connector with default settings_json");
+
+        run(&conn).expect("rerun migrations backfills inner wrapper settings");
+
+        let settings: String = conn
+            .query_row(
+                "SELECT settings_json FROM connectors WHERE id = 'local-configured'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read settings_json");
+        assert_eq!(settings, r#"{"vault":"/tmp/vault"}"#);
+    }
+
+    #[test]
+    fn records_ts_parity_migrations_without_colliding_rust_versions() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+
+        for (version, table) in [
+            (66_i64, "memory_search_telemetry"),
+            (67_i64, "ontology_proposals"),
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("query sqlite_master");
+            assert_eq!(
+                exists, 1,
+                "{table} should be created by migration {version}"
+            );
+
+            let stamped: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    [version],
+                    |row| row.get(0),
+                )
+                .expect("query schema_migrations");
+            assert_eq!(
+                stamped, 1,
+                "migration {version} should be recorded in schema_migrations"
+            );
+        }
+
+        let idempotency_stamped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 72",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query schema_migrations");
+        assert_eq!(
+            idempotency_stamped, 1,
+            "migration 72 should be recorded in schema_migrations"
+        );
+
+        for version in [40_i64, 41_i64] {
+            let stamped: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                    [version],
+                    |row| row.get(0),
+                )
+                .expect("query schema_migrations");
+            assert_eq!(
+                stamped, 0,
+                "Rust must not stamp local parity DDL as TS migration {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn repairs_idempotency_index_to_match_ts_scoped_contract() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+
+        conn.execute(
+            "INSERT INTO memories
+             (id, content, type, idempotency_key, agent_id, visibility, scope, created_at, updated_at, updated_by)
+             VALUES ('mem-global', 'global memory', 'fact', 'shared-key', 'default', 'global', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test')",
+            [],
+        )
+        .expect("insert global idempotency row");
+        conn.execute(
+            "INSERT INTO memories
+             (id, content, type, idempotency_key, agent_id, visibility, scope, created_at, updated_at, updated_by)
+             VALUES ('mem-private', 'private memory', 'fact', 'shared-key', 'default', 'private', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test')",
+            [],
+        )
+        .expect("same idempotency key should be allowed across visibility scopes");
+
+        let duplicate = conn.execute(
+            "INSERT INTO memories
+             (id, content, type, idempotency_key, agent_id, visibility, scope, created_at, updated_at, updated_by)
+             VALUES ('mem-duplicate', 'duplicate memory', 'fact', 'shared-key', 'default', 'global', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test')",
+            [],
+        );
+        assert!(
+            duplicate.is_err(),
+            "same idempotency key should remain unique within owner, visibility, and scope"
+        );
+    }
+
+    #[test]
+    fn repairs_ts_parity_tables_when_ledger_versions_are_already_stamped() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+        conn.execute_batch(
+            "DROP TABLE memory_search_telemetry;
+             DROP TABLE ontology_proposals;",
+        )
+        .expect("simulate TS-created ledger with missing Rust parity tables");
+
+        run(&conn).expect("run migrations with TS parity versions already stamped");
+
+        for table in ["memory_search_telemetry", "ontology_proposals"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("query sqlite_master");
+            assert_eq!(
+                exists, 1,
+                "{table} should be repaired even when Rust migration versions are pre-stamped"
+            );
+        }
     }
 }

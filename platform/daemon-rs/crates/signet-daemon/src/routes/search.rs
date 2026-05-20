@@ -106,9 +106,13 @@ pub async fn recall(
             .unwrap_or_else(|_| crate::auth::middleware::AuthState {
                 result: crate::auth::types::AuthResult::unauthenticated(),
             });
-            if let Err(resp) =
-                require_rate_limit_guard(&auth, "recallLlm", &state.recall_llm_limiter, state.auth_mode, None)
-            {
+            if let Err(resp) = require_rate_limit_guard(
+                &auth,
+                "recallLlm",
+                &state.recall_llm_limiter,
+                state.auth_mode,
+                None,
+            ) {
                 return (*resp).into_response();
             }
         }
@@ -412,11 +416,9 @@ pub async fn recall(
                     // verify against. Matches TS daemon parity contract.
                     if limit >= 2 {
                         if let Some(text) = summary {
-                            let content = format!(
-                                "[model summary, verify against source memories] {text}"
-                            );
-                            let top_score =
-                                resp.results.first().map(|h| h.score).unwrap_or(0.5);
+                            let content =
+                                format!("[model summary, verify against source memories] {text}");
+                            let top_score = resp.results.first().map(|h| h.score).unwrap_or(0.5);
                             let score = top_score.clamp(0.01, 1.0);
 
                             // SHA-1 digest of query for stable id, matching TS daemon.
@@ -624,12 +626,7 @@ pub async fn embeddings_stats(State(state): State<Arc<AppState>>) -> Json<serde_
 }
 
 pub async fn embeddings_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let cfg = state
-        .config
-        .manifest
-        .embedding
-        .clone()
-        .unwrap_or_default();
+    let cfg = state.config.manifest.embedding.clone().unwrap_or_default();
     let base_url = resolve_embedding_base_url(&cfg.provider, cfg.base_url.as_deref());
     let mut status = serde_json::json!({
         "provider": cfg.provider,
@@ -640,9 +637,8 @@ pub async fn embeddings_status(State(state): State<Arc<AppState>>) -> Json<serde
     });
 
     if cfg.provider == "none" {
-        status["error"] = serde_json::json!(
-            "Embedding provider set to 'none' — vector search disabled"
-        );
+        status["error"] =
+            serde_json::json!("Embedding provider set to 'none' — vector search disabled");
     } else if state.embedding.read().await.is_some() {
         status["available"] = serde_json::json!(true);
         status["dimensions"] = serde_json::json!(cfg.dimensions);

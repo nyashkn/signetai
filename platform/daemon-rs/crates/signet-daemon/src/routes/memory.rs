@@ -26,12 +26,13 @@ pub struct ListParams {
 
 #[derive(Deserialize)]
 pub struct MostUsedParams {
-    limit: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
 pub struct ListResponse {
     memories: Vec<serde_json::Value>,
+    total: i64,
     stats: MemoryStats,
 }
 
@@ -88,6 +89,7 @@ pub async fn list(
 
             Ok(ListResponse {
                 memories,
+                total,
                 stats: MemoryStats {
                     total,
                     with_embeddings: embeddings,
@@ -98,6 +100,7 @@ pub async fn list(
         .await
         .unwrap_or_else(|_| ListResponse {
             memories: vec![],
+            total: 0,
             stats: MemoryStats {
                 total: 0,
                 with_embeddings: 0,
@@ -116,13 +119,7 @@ pub async fn most_used(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MostUsedParams>,
 ) -> Json<serde_json::Value> {
-    let limit = params
-        .limit
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|raw| *raw >= 1)
-        .unwrap_or(6)
-        .min(200);
-
+    let limit = params.limit.unwrap_or(6).clamp(1, 200);
     let memories = state
         .pool
         .read(move |conn| {
@@ -130,10 +127,11 @@ pub async fn most_used(
                 "SELECT id, content, access_count, importance, type, tags
                  FROM memories
                  WHERE access_count > 0
+                   AND (is_deleted = 0 OR is_deleted IS NULL)
                  ORDER BY access_count DESC, importance DESC
                  LIMIT ?1",
             )?;
-            let memories: Vec<serde_json::Value> = stmt
+            let rows: Vec<serde_json::Value> = stmt
                 .query_map(rusqlite::params![limit], |row| {
                     Ok(serde_json::json!({
                         "id": row.get::<_, String>(0)?,
@@ -144,9 +142,9 @@ pub async fn most_used(
                         "tags": row.get::<_, Option<String>>(5)?,
                     }))
                 })?
-                .filter_map(|r| r.ok())
+                .filter_map(|row| row.ok())
                 .collect();
-            Ok(memories)
+            Ok(rows)
         })
         .await
         .unwrap_or_default();

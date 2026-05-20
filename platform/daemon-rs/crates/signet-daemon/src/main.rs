@@ -184,16 +184,14 @@ async fn main() -> anyhow::Result<()> {
             let model = p.extraction.model.clone();
             let timeout = p.extraction.timeout;
             let api_key = std::env::var("OPENAI_API_KEY").ok();
-            signet_pipeline::provider::from_config(
-                &signet_pipeline::provider::LlmProviderConfig {
-                    provider,
-                    model,
-                    base_url: endpoint,
-                    api_key,
-                    timeout_ms: Some(timeout),
-                    max_context_tokens: None,
-                },
-            )
+            signet_pipeline::provider::from_config(&signet_pipeline::provider::LlmProviderConfig {
+                provider,
+                model,
+                base_url: endpoint,
+                api_key,
+                timeout_ms: Some(timeout),
+                max_context_tokens: None,
+            })
         });
 
     let auth_mode = read_auth_mode(&config);
@@ -274,16 +272,16 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(routes::write::remember),
         )
         .route(
-            "/api/memory/forget",
-            axum::routing::post(routes::write::forget_batch),
-        )
-        .route(
             "/api/memory/{id}/recover",
             axum::routing::post(routes::write::recover),
         )
         .route(
             "/api/memory/modify",
             axum::routing::post(routes::write::modify_batch),
+        )
+        .route(
+            "/api/memory/forget",
+            axum::routing::post(routes::write::forget_batch),
         )
         .route(
             "/api/memory/feedback",
@@ -295,6 +293,16 @@ async fn main() -> anyhow::Result<()> {
             get(routes::config::get_config).post(routes::config::save_config),
         )
         .route("/api/harnesses", get(routes::harnesses::list))
+        // Source configuration routes
+        .route("/api/sources", get(routes::sources::list))
+        .route(
+            "/api/sources/obsidian",
+            axum::routing::post(routes::sources::add_obsidian),
+        )
+        .route(
+            "/api/sources/{id}",
+            axum::routing::delete(routes::sources::delete_source),
+        )
         .route("/api/identity", get(routes::config::identity))
         .route("/api/features", get(routes::config::features))
         // Hook lifecycle routes
@@ -329,6 +337,30 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/hooks/session-checkpoint-extract",
             axum::routing::post(routes::hooks::session_checkpoint_extract),
+        )
+        // Inference routes
+        .route("/api/inference/status", get(routes::inference::status))
+        .route("/api/inference/history", get(routes::inference::history))
+        .route(
+            "/api/inference/explain",
+            axum::routing::post(routes::inference::explain),
+        )
+        .route(
+            "/api/inference/execute",
+            axum::routing::post(routes::inference::execute),
+        )
+        .route(
+            "/api/inference/stream",
+            axum::routing::post(routes::inference::stream),
+        )
+        .route(
+            "/api/inference/requests/{id}",
+            axum::routing::delete(routes::inference::request_delete),
+        )
+        .route("/v1/models", get(routes::inference::gateway_models))
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(routes::inference::gateway_chat_completions),
         )
         // Agent roster routes (multi-agent support — migration 043)
         .route(
@@ -389,6 +421,60 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/knowledge/constellation",
             get(routes::knowledge::constellation),
+        )
+        .route(
+            "/api/knowledge/expand",
+            axum::routing::post(routes::knowledge::expand),
+        )
+        .route(
+            "/api/knowledge/expand/session",
+            axum::routing::post(routes::knowledge::expand_session),
+        )
+        // Ontology native routes
+        .route(
+            "/api/ontology/proposals",
+            get(routes::ontology::list).post(routes::ontology::create),
+        )
+        .route(
+            "/api/ontology/proposals/conflicts",
+            get(routes::ontology::conflicts),
+        )
+        .route(
+            "/api/ontology/proposals/batch",
+            axum::routing::post(routes::ontology::batch),
+        )
+        .route(
+            "/api/ontology/proposals/repair/duplicates",
+            axum::routing::post(routes::ontology::repair_duplicates),
+        )
+        .route(
+            "/api/ontology/proposals/{id}/evidence",
+            get(routes::ontology::evidence),
+        )
+        .route(
+            "/api/ontology/proposals/{id}/apply",
+            axum::routing::post(routes::ontology::apply),
+        )
+        .route(
+            "/api/ontology/proposals/{id}/reject",
+            axum::routing::post(routes::ontology::reject),
+        )
+        .route("/api/ontology/proposals/{id}", get(routes::ontology::get))
+        .route(
+            "/api/ontology/claims/evidence",
+            get(routes::ontology::claim_evidence),
+        )
+        .route(
+            "/api/ontology/links/{id}/evidence",
+            get(routes::ontology::link_evidence),
+        )
+        .route(
+            "/api/ontology/extract",
+            axum::routing::post(routes::ontology::extract),
+        )
+        .route(
+            "/api/ontology/consolidate",
+            axum::routing::post(routes::ontology::consolidate),
         )
         // Pipeline routes
         .route("/api/pipeline/status", get(routes::pipeline::status))
@@ -516,6 +602,15 @@ async fn main() -> anyhow::Result<()> {
             get(routes::marketplace::catalog_detail),
         )
         .route(
+            "/api/marketplace/reviews",
+            get(routes::marketplace_reviews::list).post(routes::marketplace_reviews::create),
+        )
+        .route(
+            "/api/marketplace/reviews/config",
+            get(routes::marketplace_reviews::get_config)
+                .patch(routes::marketplace_reviews::patch_config),
+        )
+        .route(
             "/api/marketplace/mcp/{id}",
             get(routes::marketplace::get_server)
                 .patch(routes::marketplace::update_server)
@@ -523,6 +618,10 @@ async fn main() -> anyhow::Result<()> {
         )
         // Secrets routes
         .route("/api/secrets", get(routes::secrets::list))
+        .route(
+            "/api/secrets/1password/status",
+            get(routes::secrets::onepassword_status),
+        )
         .route(
             "/api/secrets/exec",
             axum::routing::post(routes::secrets::run_with_secrets),
@@ -547,7 +646,37 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(routes::scheduler::trigger),
         )
         .route("/api/tasks/{id}/runs", get(routes::scheduler::runs))
-        .route("/api/skills/analytics", get(routes::skill_analytics::summary))
+        .route(
+            "/api/skills/analytics",
+            get(routes::skill_analytics::summary),
+        )
+        // Skill library routes
+        .route("/api/skills", get(routes::skills::list))
+        .route("/api/skills/search", get(routes::skills::search))
+        .route("/api/skills/browse", get(routes::skills::browse))
+        .route(
+            "/api/skills/install",
+            axum::routing::post(routes::skills::install),
+        )
+        .route(
+            "/api/skills/{name}",
+            get(routes::skills::get).delete(routes::skills::delete),
+        )
+        // Plugin routes
+        .route("/api/plugins", get(routes::plugins::list))
+        .route(
+            "/api/plugins/prompt-contributions",
+            get(routes::plugins::prompt_contributions),
+        )
+        .route("/api/plugins/audit", get(routes::plugins::audit))
+        .route(
+            "/api/plugins/{id}/diagnostics",
+            get(routes::plugins::diagnostics),
+        )
+        .route(
+            "/api/plugins/{id}",
+            get(routes::plugins::get).patch(routes::plugins::patch),
+        )
         // Git routes
         .route("/api/git/status", get(routes::git::status))
         .route("/api/git/pull", axum::routing::post(routes::git::pull))
@@ -595,6 +724,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/documents/{id}/chunks", get(routes::documents::chunks))
         // Diagnostics routes
         .route("/api/diagnostics", get(routes::diagnostics::report))
+        .route(
+            "/api/telemetry/memory-search",
+            get(routes::telemetry::memory_search),
+        )
+        .route(
+            "/api/telemetry/memory-search/export",
+            get(routes::telemetry::memory_search_export),
+        )
         .route(
             "/api/diagnostics/{domain}",
             get(routes::diagnostics::domain),
@@ -971,7 +1108,9 @@ pub(crate) async fn start_summary_worker(state: &AppState) -> bool {
             base_url: pipeline.synthesis.endpoint.clone(),
             api_key: api_key_for_provider(&pipeline.synthesis.provider),
             timeout_ms: Some(pipeline.synthesis.timeout),
-            max_context_tokens: Some(signet_pipeline::provider::resolve_ollama_max_context_tokens()),
+            max_context_tokens: Some(
+                signet_pipeline::provider::resolve_ollama_max_context_tokens(),
+            ),
         });
     let semaphore = Arc::new(signet_pipeline::provider::LlmSemaphore::default());
     let handle = signet_pipeline::summary::start(
@@ -1742,7 +1881,9 @@ mod tests {
                 None,
             )),
             None, // llm provider — not wired in test helpers
-            Some(signet_pipeline::worker::new_runtime_stats_handle(0.8, 30_000)),
+            Some(signet_pipeline::worker::new_runtime_stats_handle(
+                0.8, 30_000,
+            )),
             AuthMode::Local,
             None,
             AuthRateLimiter::from_rules(&rules),
