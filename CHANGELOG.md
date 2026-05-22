@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-22
+- Bug fixes: throw on unimplemented migration sources instead of silently no-oping.
+
 ### 2026-05-21
 - Bug fixes: expose recall timing metadata; harden aggregate recall dogfood paths.
 - Performance: speed up aggregate recall.
@@ -28,11 +31,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-05-16
 - Features: add audited control plane.
 
-### 2026-05-15
-- Features: make constellation graph usable.
-- Bug fixes: surface unhealthy diagnostics domains.
-
 ## Release Ledger
+
+## [0.123.22] - 2026-05-22
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.123.21-3cb519152b0c3e377c37460eae09689c4dfdced4..v0.123.22`.
+
+### Bug Fixes
+
+- **core**: throw on unimplemented migration sources instead of silently no-oping (#748)
 
 ## [0.123.21] - 2026-05-21
 
