@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-23
 - Features: implement parseMemory with structured section extraction.
+- Refactoring: improve readability of agents.ts.
 
 ### 2026-05-22
 - Bug fixes: throw on unimplemented migration sources instead of silently no-oping.
@@ -32,6 +33,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: build mac zip artifacts; preserve root-only filesystem globs; repair native bundle regressions; sync built-in dreaming skill.
 
 ## Release Ledger
+
+## [0.124.1] - 2026-05-23
+
+Release summary: 1 refactor.
+Tag range: `v0.124.0..v0.124.1`.
+
+### Refactoring
+
+- improve readability of agents.ts (#752)
 
 ## [0.124.0] - 2026-05-23
 
