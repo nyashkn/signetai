@@ -1,6 +1,6 @@
 {
   "name": "@signet/connector-opencode",
-  "version": "0.125.2",
+  "version": "0.126.0",
   "description": "Signet connector for OpenCode - installs hooks and generates config",
   "type": "module",
   "main": "./dist/index.js",
