@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-24
 - Features: add Discord source adapter.
-- Bug fixes: surface aggregate usage and credit fallback.
+- Bug fixes: disclose macOS launchagent attribution; surface aggregate usage and credit fallback.
 - Refactoring: unify provider routing factory.
 
 ### 2026-05-23
@@ -35,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: load updater through cjs interop.
 
 ## Release Ledger
+
+## [0.125.1] - 2026-05-24
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.124.5-0c4ae5131bf116c37ff8f2bfb1ea2eec03e71f4e..v0.125.1`.
+
+### Bug Fixes
+
+- **cli**: disclose macOS launchagent attribution (#761)
 
 ## [0.125.0] - 2026-05-24
 
