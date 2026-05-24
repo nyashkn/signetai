@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-24
+- Features: add Discord source adapter.
 - Bug fixes: surface aggregate usage and credit fallback.
 - Refactoring: unify provider routing factory.
 
@@ -34,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: load updater through cjs interop.
 
 ## Release Ledger
+
+## [0.125.0] - 2026-05-24
+
+Release summary: 1 feature.
+Tag range: `v0.124.5..v0.125.0`.
+
+### Features
+
+- **sources**: add Discord source adapter (#759)
 
 ## [0.124.5] - 2026-05-24
 
