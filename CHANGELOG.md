@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-24
 - Features: project provider artifacts into graph; add native plugin memory integration; add source operations diagnostics; add GitHub source provider; add source snapshot operations; import Discord desktop cache; add Discord source adapter.
-- Bug fixes: disclose macOS launchagent attribution; surface aggregate usage and credit fallback.
+- Bug fixes: rebuild graph during snapshot import; disclose macOS launchagent attribution; surface aggregate usage and credit fallback.
 - Refactoring: unify provider routing factory.
 - Docs: split HTTP reference.
 
@@ -36,6 +36,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: load updater through cjs interop.
 
 ## Release Ledger
+
+## [0.130.1] - 2026-05-24
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.128.0-86f1290f0e82974a680767b0d4c718a43b56532c..v0.130.1`.
+
+### Bug Fixes
+
+- **sources**: rebuild graph during snapshot import (#770)
 
 ## [0.130.0] - 2026-05-24
 
