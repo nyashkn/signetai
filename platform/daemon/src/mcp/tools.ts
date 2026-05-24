@@ -141,6 +141,10 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"memory_modify",
 	"memory_forget",
 	"memory_feedback",
+	"signet_recall",
+	"signet_source_search",
+	"signet_session_search",
+	"signet_save_note",
 	"knowledge_expand",
 	"knowledge_tree",
 	"knowledge_list_entities",
@@ -862,6 +866,109 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 		},
 	);
 
+	server.registerTool(
+		"signet_recall",
+		{
+			title: "Signet Recall",
+			description:
+				"Explicit Signet recall. Use this instead of generic memory_search in Codex when querying Signet context.",
+			inputSchema: z.object({
+				query: z.string().describe("Natural-language recall query"),
+				limit: z.number().optional().describe("Max results to return (default 10)"),
+				project: z.string().optional().describe("Optional project path filter"),
+				type: z.string().optional().describe("Filter by memory type"),
+				tags: z.string().optional().describe("Filter by tags (comma-separated)"),
+				who: z.string().optional().describe("Filter by author"),
+				since: z.string().optional().describe("Only include memories created after this date"),
+				until: z.string().optional().describe("Only include memories created before this date"),
+				keyword_query: z.string().optional().describe("Override the keyword/FTS query used for recall"),
+				score_min: z.number().optional().describe("Minimum recall score threshold (client-side)"),
+				aggregate: z.boolean().optional().describe("Synthesize an aggregate answer from bounded recall evidence"),
+				aggregate_budget: z.enum(["small", "medium", "large"]).optional().describe("Aggregate recall budget"),
+				save_aggregate: z.boolean().optional().describe("Save the aggregate answer as a memory"),
+				session_key: z.string().optional().describe("Session key for per-context recall dedupe"),
+				agent_id: z.string().optional().describe("Agent ID for scoped recall"),
+				include_recalled: z.boolean().optional().describe("Include rows already recalled in this context"),
+			}),
+		},
+		async ({
+			query,
+			keyword_query,
+			limit,
+			project,
+			type,
+			tags,
+			who,
+			since,
+			until,
+			score_min,
+			aggregate,
+			aggregate_budget,
+			save_aggregate,
+			session_key,
+			agent_id,
+			include_recalled,
+		}) => {
+			const result = await daemonFetch<unknown>(baseUrl, "/api/memory/recall", {
+				method: "POST",
+				body: buildRecallRequestBody(query, {
+					keyword_query,
+					limit: limit ?? 10,
+					project,
+					type,
+					tags,
+					who,
+					since,
+					until,
+					aggregate,
+					aggregate_budget,
+					save_aggregate,
+					sessionKey: session_key,
+					agentId: agent_id,
+					includeRecalled: include_recalled,
+				}),
+			});
+
+			if (!result.ok) return errorResult(`Recall failed: ${result.error}`);
+			return textResult(formatRecallText(applyRecallScoreThreshold(result.data, score_min)));
+		},
+	);
+
+	server.registerTool(
+		"signet_source_search",
+		{
+			title: "Signet Source Search",
+			description:
+				"Search Signet source-backed artifacts such as Codex native memory, Obsidian, imported docs, and transcripts.",
+			inputSchema: z.object({
+				query: z.string().describe("Natural-language source search query"),
+				limit: z.number().optional().describe("Max results to return (default 10)"),
+				project: z.string().optional().describe("Optional project path filter"),
+				session_key: z.string().optional().describe("Session key for per-context recall dedupe"),
+				agent_id: z.string().optional().describe("Agent ID for scoped recall"),
+				include_recalled: z.boolean().optional().describe("Include rows already recalled in this context"),
+			}),
+		},
+		async ({ query, limit, project, session_key, agent_id, include_recalled }) => {
+			const result = await daemonFetch<unknown>(baseUrl, "/api/memory/recall", {
+				method: "POST",
+				body: {
+					...buildRecallRequestBody(query, {
+						limit: limit ?? 10,
+						project,
+						sessionKey: session_key,
+						agentId: agent_id,
+						includeRecalled: include_recalled,
+					}),
+					sourceOnly: true,
+				},
+			});
+
+			if (!result.ok) return errorResult(`Source search failed: ${result.error}`);
+			return textResult(formatRecallText(result.data));
+		},
+	);
+
 	// ------------------------------------------------------------------
 	// memory_store — save a new memory
 	// ------------------------------------------------------------------
@@ -968,6 +1075,30 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			if (!result.ok) {
 				return errorResult(`Store failed: ${result.error}`);
 			}
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"signet_save_note",
+		{
+			title: "Save Codex Memory Note",
+			description:
+				"Write a small explicit note into Codex native memory under extensions/ad_hoc/notes. Never edits generated MEMORY.md files.",
+			inputSchema: z.object({
+				content: z.string().min(1).max(8000).describe("Note content to save"),
+				title: z.string().optional().describe("Optional short note title used in the filename/frontmatter"),
+				tags: z.string().optional().describe("Optional comma-separated tags"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({ content, title, tags }) => {
+			const result = await daemonFetch<unknown>(baseUrl, "/api/memory/codex-native-note", {
+				method: "POST",
+				body: { content, title, tags },
+			});
+
+			if (!result.ok) return errorResult(`Save note failed: ${result.error}`);
 			return textResult(result.data);
 		},
 	);
@@ -2180,6 +2311,44 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			description:
 				"Search active or completed session transcripts. " +
 				"Pass current_session_key from a sub-agent to default to its parent when the session key encodes lineage.",
+			inputSchema: z.object({
+				query: z.string().describe("Natural language or keyword query"),
+				session_key: z.string().optional().describe("Specific transcript session key to search"),
+				current_session_key: z
+					.string()
+					.optional()
+					.describe("Current session key; sub-agent lineage may resolve this to the parent session"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+				project: z.string().optional().describe("Optional project path filter"),
+				limit: z.number().optional().describe("Max results to return (default 10, max 20)"),
+			}),
+		},
+		async ({ query, session_key, current_session_key, agent_id, project, limit }) => {
+			const result = await daemonFetch<unknown>(baseUrl, "/api/sessions/search", {
+				method: "POST",
+				body: {
+					query,
+					sessionKey: session_key,
+					currentSessionKey: current_session_key,
+					agentId: agent_id,
+					project,
+					limit,
+				},
+			});
+
+			if (!result.ok) {
+				return errorResult(`Session search failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"signet_session_search",
+		{
+			title: "Signet Session Search",
+			description:
+				"Search active or completed Signet session transcripts. This is transcript-only and separate from memory recall.",
 			inputSchema: z.object({
 				query: z.string().describe("Natural language or keyword query"),
 				session_key: z.string().optional().describe("Specific transcript session key to search"),
