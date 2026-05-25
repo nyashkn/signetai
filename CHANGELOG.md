@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-25
-- Features: extract Discord attachment text; add npc backend prototype; tail Discord gateway events.
+- Features: add Discord source operations panel; extract Discord attachment text; add npc backend prototype; tail Discord gateway events.
 - Bug fixes: surface graph extraction diagnostics; patch partial Discord gateway updates; avoid duplicate native plugin hooks.
 
 ### 2026-05-24
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
 
 ## Release Ledger
+
+## [0.137.0] - 2026-05-25
+
+Release summary: 1 feature.
+Tag range: `v0.136.1..v0.137.0`.
+
+### Features
+
+- **dashboard**: add Discord source operations panel (#784)
 
 ## [0.136.1] - 2026-05-25
 
