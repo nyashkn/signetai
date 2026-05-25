@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-25
+- Features: tail Discord gateway events.
 - Bug fixes: avoid duplicate native plugin hooks.
 
 ### 2026-05-24
@@ -36,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
 
 ## Release Ledger
+
+## [0.134.0] - 2026-05-25
+
+Release summary: 1 feature.
+Tag range: `v0.133.1..v0.134.0`.
+
+### Features
+
+- **sources**: tail Discord gateway events (#777)
 
 ## [0.133.1] - 2026-05-25
 
