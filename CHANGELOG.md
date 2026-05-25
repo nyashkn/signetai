@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-25
-- Features: tail Discord gateway events.
+- Features: add npc backend prototype; tail Discord gateway events.
 - Bug fixes: patch partial Discord gateway updates; avoid duplicate native plugin hooks.
 
 ### 2026-05-24
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
 
 ## Release Ledger
+
+## [0.135.0] - 2026-05-25
+
+Release summary: 1 feature.
+Tag range: `bundle-0.133.0-ea0e42b7455a256171bc65b1bbabf5807a739908..v0.135.0`.
+
+### Features
+
+- **unreal**: add npc backend prototype (#780)
 
 ## [0.134.1] - 2026-05-25
 
