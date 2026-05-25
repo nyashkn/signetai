@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-25
 - Features: add Discord source operations panel; extract Discord attachment text; add npc backend prototype; tail Discord gateway events.
-- Bug fixes: surface graph extraction diagnostics; patch partial Discord gateway updates; avoid duplicate native plugin hooks.
+- Bug fixes: scope dreaming triggers by agent; surface graph extraction diagnostics; patch partial Discord gateway updates; avoid duplicate native plugin hooks.
 
 ### 2026-05-24
 - Features: resume Discord history backfill; resume Discord history backfill from checkpoints; add dashboard snapshot operations; project provider artifacts into graph; add native plugin memory integration; add source operations diagnostics; add GitHub source provider; add source snapshot operations; import Discord desktop cache; add Discord source adapter.
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
 
 ## Release Ledger
+
+## [0.137.1] - 2026-05-25
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.134.1-f0b0e732263049e41a9716509d62d3447859137f..v0.137.1`.
+
+### Bug Fixes
+
+- **daemon**: scope dreaming triggers by agent (#786)
 
 ## [0.137.0] - 2026-05-25
 
