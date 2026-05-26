@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-05-26
-- Bug fixes: accept empty check-fts posts; respect Signet path for dashboard logs.
+- Bug fixes: resolve hermes-plugin from native bundle SIGNET_DIR; accept empty check-fts posts; respect Signet path for dashboard logs.
 
 ### 2026-05-25
 - Features: add Discord source operations panel; extract Discord attachment text; add npc backend prototype; tail Discord gateway events.
@@ -37,6 +37,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: separate transcript search surfaces.
 
 ## Release Ledger
+
+## [0.137.3] - 2026-05-26
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.137.1-63ceeb68fa4b9d0f90d35d84691042996e9aee77..v0.137.3`.
+
+### Bug Fixes
+
+- **hermes-agent**: resolve hermes-plugin from native bundle SIGNET_DIR (#789)
 
 ## [0.137.2] - 2026-05-26
 
