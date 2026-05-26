@@ -86,6 +86,7 @@ const logCategories = [
 	"embedding",
 	"embedding-tracker",
 	"harness",
+	"diagnostics",
 	"system",
 	"hooks",
 	"pipeline",

@@ -111,9 +111,11 @@ describe("DaemonManager dual-mode regressions (#606 / PR #615)", () => {
 		const STDOUT_FD = 17;
 		const STDERR_FD = 18;
 		let openSyncCallCount = 0;
+		const openedPaths: string[] = [];
 		const openSyncSpy = spyOn(fs, "openSync").mockImplementation(
-			(_path: fs.PathLike | number, _flags: fs.OpenMode): number => {
+			(path: fs.PathLike | number, _flags: fs.OpenMode): number => {
 				openSyncCallCount += 1;
+				openedPaths.push(String(path));
 				return openSyncCallCount === 1 ? STDOUT_FD : STDERR_FD;
 			},
 		);
@@ -150,6 +152,10 @@ describe("DaemonManager dual-mode regressions (#606 / PR #615)", () => {
 
 		// openSync must have been used (proves the sync path, not the lazy createWriteStream path).
 		expect(openSyncSpy).toHaveBeenCalledTimes(2);
+		expect(openedPaths).toEqual([
+			"/tmp/signet-workspace/.daemon/logs/daemon.out.log",
+			"/tmp/signet-workspace/.daemon/logs/daemon.err.log",
+		]);
 
 		openSyncSpy.mockRestore();
 	});

@@ -62,6 +62,7 @@ export type LogCategory =
 	| "mcp-analytics" // MCP invocation analytics
 	| "config" // Configuration loading and resolution
 	| "config-migration" // Legacy config migration on startup
+	| "diagnostics" // Runtime diagnostics and health reporting
 	| "provider-safety" // Provider transition audit and rollback guardrails
 	| "dreaming" // Dreaming worker (background knowledge synthesis)
 	| "http" // HTTP server lifecycle
@@ -131,6 +132,26 @@ const DEFAULT_CONFIG: LoggerConfig = {
 	consoleOutput: true,
 	jsonFormat: true,
 };
+
+export function resolveLoggerConfig(
+	env: NodeJS.ProcessEnv = process.env,
+	homeDir = homedir(),
+): Partial<LoggerConfig> {
+	const envLogFile = env.SIGNET_LOG_FILE?.trim();
+	if (envLogFile) {
+		return { logFilePath: envLogFile, logDir: dirname(envLogFile) };
+	}
+
+	const envLogDir = env.SIGNET_LOG_DIR?.trim();
+	if (envLogDir) {
+		return { logDir: envLogDir };
+	}
+
+	const signetPath = env.SIGNET_PATH?.trim();
+	return {
+		logDir: join(signetPath || join(homeDir, ".agents"), ".daemon", "logs"),
+	};
+}
 
 class Logger extends EventEmitter {
 	private config: LoggerConfig;
@@ -543,11 +564,6 @@ class Logger extends EventEmitter {
 }
 
 // Singleton instance
-const envLogFile = process.env.SIGNET_LOG_FILE?.trim();
-const envLogDir = process.env.SIGNET_LOG_DIR?.trim();
-const loggerConfig: Partial<LoggerConfig> = {
-	...(envLogFile ? { logFilePath: envLogFile, logDir: dirname(envLogFile) } : envLogDir ? { logDir: envLogDir } : {}),
-};
-export const logger = new Logger(loggerConfig);
+export const logger = new Logger(resolveLoggerConfig());
 
 export default logger;

@@ -1,7 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { app } from "electron";
 import { type WorkspaceMismatch, healthWorkspaceMismatch } from "./daemon-workspace.js";
 import { bunPath, daemonEntry, daemonRoot } from "./paths.js";
 
@@ -264,7 +263,7 @@ export class DaemonManager {
 			throw new Error(`Bundled daemon entry not found: ${entry}. Install the .dmg or run stage:runtime first.`);
 		}
 
-		const logDir = join(app.getPath("userData"), "logs");
+		const logDir = join(this.#workspacePath, ".daemon", "logs");
 		mkdirSync(logDir, { recursive: true });
 		this.#closeFds();
 
