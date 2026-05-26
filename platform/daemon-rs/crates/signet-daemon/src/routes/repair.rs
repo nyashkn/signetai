@@ -148,9 +148,9 @@ pub struct CheckFtsBody {
 /// POST /api/repair/check-fts — verify/repair FTS index consistency.
 pub async fn check_fts(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<Option<CheckFtsBody>>,
+    body: Option<Json<CheckFtsBody>>,
 ) -> impl IntoResponse {
-    let do_repair = body.map(|b| b.repair).unwrap_or(false);
+    let do_repair = body.map(|Json(b)| b.repair).unwrap_or(false);
 
     let result = state
         .pool
@@ -608,4 +608,85 @@ pub async fn cold_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::
         .unwrap_or_else(|_| serde_json::json!({"count": 0}));
 
     Json(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use signet_core::config::{AgentIdentity, AgentManifest, DaemonConfig};
+    use signet_core::db::DbPool;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    use crate::auth::rate_limiter::{AuthRateLimiter, default_limits};
+    use crate::auth::types::AuthMode;
+    use crate::state::AppState;
+
+    use super::check_fts;
+
+    fn test_state() -> Arc<AppState> {
+        let dir = tempdir().expect("tempdir").keep();
+        let db = dir.join("memory").join("memories.db");
+        let (pool, _writer) = DbPool::open(&db).expect("open db");
+        let rules = default_limits();
+
+        Arc::new(AppState::new(
+            DaemonConfig {
+                base_path: dir,
+                db_path: db,
+                port: 3850,
+                host: "127.0.0.1".to_string(),
+                bind: Some("127.0.0.1".to_string()),
+                manifest: AgentManifest {
+                    agent: AgentIdentity {
+                        name: "test-agent".to_string(),
+                        description: None,
+                        created: None,
+                        updated: None,
+                    },
+                    ..Default::default()
+                },
+            },
+            pool,
+            None,
+            None,
+            None,
+            AuthMode::Local,
+            None,
+            AuthRateLimiter::from_rules(&rules),
+            AuthRateLimiter::from_rules(&rules),
+        ))
+    }
+
+    #[tokio::test]
+    async fn check_fts_accepts_empty_post_without_json_content_type() {
+        let app = Router::new()
+            .route("/api/repair/check-fts", post(check_fts))
+            .with_state(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/repair/check-fts")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(json["action"], "check_fts");
+        assert_eq!(json["success"], true);
+    }
 }

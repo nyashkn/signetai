@@ -260,7 +260,15 @@ async function execApi(gid: string, cmd: CommandDef): Promise<void> {
 	await scrollGroup(gid);
 
 	try {
-		const res = await fetch(`${API_BASE}${cmd.path}`, { method: cmd.method });
+		const init: RequestInit =
+			cmd.method === "POST"
+				? {
+						method: cmd.method,
+						headers: { "content-type": "application/json" },
+						body: "{}",
+					}
+				: { method: cmd.method };
+		const res = await fetch(`${API_BASE}${cmd.path}`, init);
 		const elapsed = Math.round(performance.now() - start);
 		const ct = res.headers.get("content-type") ?? "";
 		const body = ct.includes("json") ? JSON.stringify(await res.json(), null, 2) : await res.text();
