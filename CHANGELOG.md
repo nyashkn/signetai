@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-26
+- Bug fixes: accept empty check-fts posts; respect Signet path for dashboard logs.
+
 ### 2026-05-25
 - Features: add Discord source operations panel; extract Discord attachment text; add npc backend prototype; tail Discord gateway events.
 - Bug fixes: scope dreaming triggers by agent; surface graph extraction diagnostics; patch partial Discord gateway updates; avoid duplicate native plugin hooks.
@@ -33,10 +36,17 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: harden aggregate recall; dedupe recalled context by session epoch; preserve constellation pointer input; expose row provenance on read; persist remember row provenance; repair bundled node daemon startup; avoid heredoc in bundle smoke config.
 - Refactoring: separate transcript search surfaces.
 
-### 2026-05-19
-- Bug fixes: minimize bundle release smoke workspace; install bun in bundle release job.
-
 ## Release Ledger
+
+## [0.137.2] - 2026-05-26
+
+Release summary: 2 bug fixes.
+Tag range: `bundle-0.137.0-dbcdb1b27837affea4f1423c0efdc635405dc44f..v0.137.2`.
+
+### Bug Fixes
+
+- **repair**: accept empty check-fts posts (#791)
+- **daemon**: respect Signet path for dashboard logs (#790)
 
 ## [0.137.1] - 2026-05-25
 
