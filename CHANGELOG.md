@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-27
+- Bug fixes: remove critical audit advisories.
+
 ### 2026-05-26
 - Bug fixes: resolve hermes-plugin from native bundle SIGNET_DIR; accept empty check-fts posts; respect Signet path for dashboard logs.
 
@@ -32,11 +35,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: speed up aggregate recall.
 - Docs: overhaul repo guidance.
 
-### 2026-05-20
-- Bug fixes: harden aggregate recall; dedupe recalled context by session epoch; preserve constellation pointer input; expose row provenance on read; persist remember row provenance; repair bundled node daemon startup; avoid heredoc in bundle smoke config.
-- Refactoring: separate transcript search surfaces.
-
 ## Release Ledger
+
+## [0.137.4] - 2026-05-27
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.137.2-0647cb74e7c19da445b8f4cd9affbafca5c97c95..v0.137.4`.
+
+### Bug Fixes
+
+- **deps**: remove critical audit advisories (#793)
 
 ## [0.137.3] - 2026-05-26
 
