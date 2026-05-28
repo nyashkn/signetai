@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-28
+- Features: gate prompt injection on entity context.
+
 ### 2026-05-27
 - Bug fixes: remove critical audit advisories.
 
@@ -30,12 +33,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-05-22
 - Bug fixes: throw on unimplemented migration sources instead of silently no-oping.
 
-### 2026-05-21
-- Bug fixes: expose recall timing metadata; harden aggregate recall dogfood paths.
-- Performance: speed up aggregate recall.
-- Docs: overhaul repo guidance.
-
 ## Release Ledger
+
+## [0.138.0] - 2026-05-28
+
+Release summary: 1 feature.
+Tag range: `bundle-0.137.3-2b6ea1fed44ce577ef437c049bf44ce41e22b8eb..v0.138.0`.
+
+### Features
+
+- **hooks**: gate prompt injection on entity context (#795)
 
 ## [0.137.4] - 2026-05-27
 
