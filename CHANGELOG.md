@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-28
 - Features: gate prompt injection on entity context.
+- Bug fixes: route prompt context through attributes.
 
 ### 2026-05-27
 - Bug fixes: remove critical audit advisories.
@@ -34,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: throw on unimplemented migration sources instead of silently no-oping.
 
 ## Release Ledger
+
+## [0.138.1] - 2026-05-28
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.137.4-9221d683926f580acfef9560c2522dadd65e64d2..v0.138.1`.
+
+### Bug Fixes
+
+- **daemon**: route prompt context through attributes (#796)
 
 ## [0.138.0] - 2026-05-28
 
