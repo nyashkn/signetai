@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-05-28
 - Features: gate prompt injection on entity context.
-- Bug fixes: harden prompt entity context filtering; restrict prompt entity injection types; route prompt context through attributes.
+- Bug fixes: queue aggregate recall extraction; harden prompt entity context filtering; restrict prompt entity injection types; route prompt context through attributes.
 
 ### 2026-05-27
 - Bug fixes: remove critical audit advisories.
@@ -35,6 +35,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: throw on unimplemented migration sources instead of silently no-oping.
 
 ## Release Ledger
+
+## [0.138.4] - 2026-05-28
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.138.2-5822d2a6f89542e6f4474331dbb51eca3602b914..v0.138.4`.
+
+### Bug Fixes
+
+- **memory**: queue aggregate recall extraction (#799)
 
 ## [0.138.3] - 2026-05-28
 
