@@ -37,7 +37,7 @@ change. The agent keeps its footing.
 
 The job is simple: bring your own context to the agents you already use,
 then keep that context inspectable and under your control. Signet runs
-beneath Forge, Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi,
+beneath Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi,
 Oh My Pi, Hermes Agent, and other harnesses so the durable layer survives
 the tool of the week.
 
@@ -124,7 +124,7 @@ These are the product surface areas Signet is optimized around:
 | 🗂️ Source-backed context | Raw transcripts and workspace files remain available beneath summaries and recall results |
 | 🎯 Inspectable recall | Hybrid search, graph traversal, provenance, scopes, and ranking signals explain why context surfaced |
 | 🏠 Local-first substrate | Data lives on your machine in SQLite and markdown, portable by default |
-| 🤝 Cross-harness continuity | Forge, Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi, Oh My Pi, Hermes Agent, one shared context layer |
+| 🤝 Cross-harness continuity | Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi, Oh My Pi, Hermes Agent, one shared context layer |
 | 🧩 SDK-first extensibility | Typed SDKs, middleware, and plugin surfaces let builders shape Signet around their own agents |
 
 ## Is Signet right for you?
@@ -210,7 +210,6 @@ Signet handles the memory layer underneath it.
 | Harness | Status | Integration |
 |---|---|---|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Supported** | Hooks |
-| Forge | **First-party** | Native runtime / reference harness |
 | [OpenCode](https://github.com/sst/opencode) | **Supported** | Plugin + Hooks |
 | [OpenClaw](https://github.com/openclaw/openclaw) | **Supported** | Runtime plugin + NemoClaw compatible |
 | [Codex](https://github.com/openai/codex) | **Supported** | Hooks + MCP server |
@@ -363,7 +362,7 @@ SDK (@signet/sdk)
 
 Connectors
   claude-code, opencode, openclaw, codex, gemini, oh-my-pi, pi,
-  hermes-agent, forge
+  hermes-agent
 ```
 
 ## Packages
@@ -376,13 +375,11 @@ Connectors
 | [`platform/daemon-rs`](./platform/daemon-rs) | Rust shadow runtime and parity logging |
 | [`signet-dashboard`](./surfaces/dashboard) | Svelte dashboard built to static assets and served by the daemon |
 | [`@signet/sdk`](./libs/sdk) | Typed client, React hooks, Vercel AI SDK middleware |
-| [`runtimes/forge`](./runtimes/forge) | Forge native terminal harness and reference runtime implementation |
 | [`@signet/connector-base`](./libs/connector-base) | Shared connector primitives and utilities |
 | [`@signet/connector-claude-code`](./integrations/claude-code/connector) | Claude Code integration |
 | [`@signet/connector-opencode`](./integrations/opencode/connector) | OpenCode integration |
 | [`@signet/connector-openclaw`](./integrations/openclaw/connector) | OpenClaw integration |
 | [`@signet/connector-codex`](./integrations/codex/connector) | Codex CLI integration |
-| [`@signet/connector-forge`](./integrations/forge/connector) | Forge integration |
 | [`@signet/connector-gemini`](./integrations/gemini/connector) | Gemini CLI integration |
 | [`@signet/connector-oh-my-pi`](./integrations/oh-my-pi/connector) | Oh My Pi integration |
 | [`@signet/connector-hermes-agent`](./integrations/hermes-agent/connector) | Hermes Agent integration |
@@ -484,7 +481,7 @@ contributing significant features. Read the
 
 ## Contributors
 
-Made with love by... 
+Made with love by...
 
 <a href="https://github.com/NicholaiVogel"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/217880623?v=4&s=48" width="48" height="48" alt="NicholaiVogel" title="NicholaiVogel" /></a> <a href="https://github.com/BusyBee3333"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/241850310?v=4&s=48" width="48" height="48" alt="BusyBee3333" title="BusyBee3333" /></a> <a href="https://github.com/stephenwoska2-cpu"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/258141506?v=4&s=48" width="48" height="48" alt="stephenwoska2-cpu" title="stephenwoska2-cpu" /></a> <a href="https://github.com/PatchyToes"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/256889430?v=4&s=48" width="48" height="48" alt="PatchyToes" title="PatchyToes" /></a> <a href="https://github.com/aaf2tbz"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/260091788?v=4&s=48" width="48" height="48" alt="aaf2tbz" title="aaf2tbz" /></a> <a href="https://github.com/ddasgupta4"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/ddasgupta4?v=4&s=48" width="48" height="48" alt="ddasgupta4" title="ddasgupta4" /></a> <a href="https://github.com/alcar2364"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/alcar2364?v=4&s=48" width="48" height="48" alt="alcar2364" title="alcar2364" /></a> <a href="https://github.com/maximhar"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/maximhar?v=4&s=48" width="48" height="48" alt="maximhar" title="maximhar" /></a> <a href="https://github.com/lost-orchard"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/lost-orchard?v=4&s=48" width="48" height="48" alt="lost-orchard" title="lost-orchard" /></a> <a href="https://github.com/Ostico"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/8008416?v=4&s=48" width="48" height="48" alt="Ostico" title="Ostico" /></a> <a href="https://github.com/gpzack"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/271398594?v=4&s=48" width="48" height="48" alt="gpzack" title="gpzack" /></a> <a href="https://github.com/LeuciRemi"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/44776125?v=4&s=48" width="48" height="48" alt="LeuciRemi" title="LeuciRemi" /></a> <a href="https://github.com/nyashkn"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/1158551?v=4&s=48" width="48" height="48" alt="nyashkn" title="nyashkn" /></a> <a href="https://github.com/dragontvstaff"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/279829920?v=4&s=48" width="48" height="48" alt="dragontvstaff" title="dragontvstaff" /></a> <a href="https://github.com/Alexi5000"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/135995822?v=4&s=48" width="48" height="48" alt="Alexi5000" title="Alexi5000" /></a> <a href="https://github.com/Jarvis-ORC-HPS"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/273477147?v=4&s=48" width="48" height="48" alt="Jarvis-ORC-HPS" title="Jarvis-ORC-HPS" /></a> <a href="https://github.com/nanookclaw"><img align="left" hspace="4" src="https://avatars.githubusercontent.com/u/258741235?v=4&s=48" width="48" height="48" alt="nanookclaw" title="nanookclaw" /></a>
 <br clear="left" />
