@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-05-31
+- Refactoring: remove forge runtime.
+- Docs: nitpick; add missing contributors.
+
 ### 2026-05-30
 - Bug fixes: show macos window on launch.
 
@@ -29,12 +33,21 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: unify provider routing factory.
 - Docs: split HTTP reference.
 
-### 2026-05-23
-- Features: implement parseMemory with structured section extraction.
-- Bug fixes: route aggregate recall through synthesis; route direct API pipeline providers.
-- Refactoring: improve readability of agents.ts.
-
 ## Release Ledger
+
+## [0.138.6] - 2026-05-31
+
+Release summary: 1 refactor and 2 docs updates.
+Tag range: `bundle-0.138.4-9fa2e4b4e6e0f4b88273f35f851266c7e70e3905..v0.138.6`.
+
+### Refactoring
+
+- **runtime**: remove forge runtime (#802)
+
+### Docs
+
+- **readme**: nitpick
+- **readme**: add missing contributors
 
 ## [0.138.5] - 2026-05-30
 
