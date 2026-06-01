@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-01
-- Bug fixes: preserve setup onboarding; repair summary_jobs migration columns.
+- Bug fixes: make transcript recapture idempotent; preserve setup onboarding; repair summary_jobs migration columns.
 
 ### 2026-05-31
 - Refactoring: remove forge runtime.
@@ -31,6 +31,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: scope dreaming triggers by agent; surface graph extraction diagnostics; patch partial Discord gateway updates; avoid duplicate native plugin hooks.
 
 ## Release Ledger
+
+## [0.138.9] - 2026-06-01
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.138.6-3d1753b09bace3366000041420bcfbe224cfd108..v0.138.9`.
+
+### Bug Fixes
+
+- **daemon-rs**: make transcript recapture idempotent (#808)
 
 ## [0.138.8] - 2026-06-01
 
