@@ -1935,6 +1935,51 @@ memory:
 		expect(second).toMatch(/^session-end:agent:main:main:[0-9a-f-]{36}$/);
 		expect(first).not.toBe(second);
 	});
+
+	test.serial("enqueues summary job when only dreaming is enabled (pipelineV2 disabled)", async () => {
+		writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: true
+`);
+		createMemoryDb([]);
+		const transcriptPath = join(TEST_DIR, "transcript.txt");
+		writeFileSync(transcriptPath, "x".repeat(1000));
+
+		const result = await handleSessionEnd({
+			harness: "test",
+			transcriptPath,
+			sessionKey: "sess-dreaming",
+			sessionId: "sess-dreaming",
+			cwd: "/home/user/signetai",
+		});
+
+		expect(result.queued).toBe(true);
+		expect(typeof result.jobId).toBe("string");
+	});
+
+	test.serial("skips enqueueing when neither pipelineV2 nor dreaming is enabled", async () => {
+		writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: false
+`);
+		createMemoryDb([]);
+		const transcriptPath = join(TEST_DIR, "transcript.txt");
+		writeFileSync(transcriptPath, "x".repeat(1000));
+
+		const result = await handleSessionEnd({
+			harness: "test",
+			transcriptPath,
+			sessionKey: "sess-both-disabled",
+			sessionId: "sess-both-disabled",
+			cwd: "/home/user/signetai",
+		});
+
+		expect(result.queued).toBe(false);
+	});
 });
 
 // ============================================================================
@@ -3191,15 +3236,95 @@ describe("handleCheckpointExtract", () => {
 			sessionKey: "ckpt-nopath",
 			transcriptPath: "/nonexistent/path/transcript.jsonl",
 		});
-
 		expect(result.skipped).toBe(true);
 		expect(result.queued).toBeUndefined();
+	});
+
+	test.serial("enqueues checkpoint when only dreaming is enabled", () => {
+		writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: true
+`);
+		createMemoryDb([]);
+
+		const result = handleCheckpointExtract({
+			harness: "test",
+			sessionKey: "ckpt-dreaming",
+			transcript: "x".repeat(600),
+		});
+
+		expect(result.queued).toBe(true);
+		expect(typeof result.jobId).toBe("string");
+	});
+
+	test.serial("skips checkpoint when neither pipelineV2 nor dreaming is enabled", () => {
+		writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: false
+`);
+		createMemoryDb([]);
+
+		const result = handleCheckpointExtract({
+			harness: "test",
+			sessionKey: "ckpt-both-disabled",
+			transcript: "x".repeat(600),
+		});
+
+		expect(result.skipped).toBe(true);
 	});
 });
 
 // ============================================================================
-// Pure / stateless function tests (from co-located src/ tests)
+// Summary worker tick gate — verifies the worker processes jobs when
+// dreaming is enabled even with pipelineV2 disabled (regression for #812).
 // ============================================================================
+
+describe("summary worker tick gate", () => {
+	test.serial(
+		"processes enqueued job when only dreaming is enabled",
+		async () => {
+			writeAgentYaml(`memory:
+  pipelineV2:
+    enabled: false
+  dreaming:
+    enabled: true
+`);
+			createMemoryDb([]);
+
+			const enq = handleCheckpointExtract({
+				harness: "test",
+				sessionKey: "ckpt-worker-dreaming",
+				transcript: "x".repeat(600),
+			});
+			expect(enq.queued).toBe(true);
+			expect(typeof enq.jobId).toBe("string");
+			const jobId = enq.jobId!;
+
+			const { startSummaryWorker } = await import("./pipeline/summary-worker");
+			const handle = startSummaryWorker(getDbAccessor());
+
+			// First tick fires after POLL_INTERVAL_MS (5s)
+			await new Promise((resolve) => setTimeout(resolve, 5500));
+			handle.stop();
+
+			const db = openTestDb();
+			const job = db
+				.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?")
+				.get(jobId) as { status: string; attempts: number } | undefined;
+			db.close();
+
+			expect(job).toBeDefined();
+			// Gate allowed tick through → job was leased → attempts incremented.
+			// Without LLM the processing will fail, but that doesn't matter.
+			expect(job!.attempts).toBeGreaterThan(0);
+		},
+		15_000,
+	);
+});
 
 describe("buildSignetSystemPrompt", () => {
 	it("lists primary signet retrieval tools with namespaced ids", () => {
