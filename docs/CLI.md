@@ -20,24 +20,24 @@ Installation
 ---
 
 ```bash
-# native bundle (recommended)
+# direct native binary
 curl -fsSL https://signetai.sh/install.sh | bash
 
-# npm package
+# npm wrapper for the same compiled Signet binary
 npm install -g signetai
 
-# Bun package
+# Bun wrapper for the same compiled Signet binary
 bun add -g signetai
 ```
 
-Package-manager installs use the primary package manager captured during
-setup for runtime operations such as skills and updates, with deterministic
-fallback when unavailable. Native bundle installs use the bundled updater.
-
-On macOS, package-manager installs run the background daemon through the
-JavaScript runtime. The system Login Items / Background Activity notification
-may therefore name Bun or Node.js rather than Signet. Use the native bundle
-installer when you want the native daemon install path.
+All three install paths install the same compiled Signet binary. The npm and
+Bun paths use optional native packages for the current platform; install scripts
+only link the already-installed binary into place. They do not install Bun,
+rebuild Signet, or install daemon dependencies.
+Published native binaries currently cover Linux x64, Linux arm64, macOS x64,
+macOS arm64, and Windows x64. Windows direct installs should use
+`npm install -g signetai`; the old PowerShell `install.ps1` path has been
+removed until a native Windows direct installer ships.
 
 ---
 

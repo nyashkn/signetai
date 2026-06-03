@@ -19,31 +19,35 @@
       "version": "0.138.11",
       "bin": {
         "signet": "bin/signet.js",
-        "signet-mcp": "dist/mcp-stdio.js",
-      },
-      "dependencies": {
-        "@hono/node-server": "^1.14.0",
-        "@huggingface/transformers": "^3.4.0",
-        "@inquirer/prompts": "^7.0.0",
-        "chalk": "^5.3.0",
-        "chokidar": "^4.0.0",
-        "commander": "^12.0.0",
-        "hono": "^4.8.0",
-        "libsodium-wrappers": "^0.8.2",
-        "onnxruntime-node": "1.21.0",
-        "open": "^10.0.0",
-        "ora": "^8.0.0",
-        "sqlite-vec": "^0.1.7-alpha.2",
-      },
-      "devDependencies": {
-        "@types/better-sqlite3": "^7.6.0",
-        "@types/libsodium-wrappers": "^0.8.2",
+        "signet-mcp": "bin/signet-mcp.js",
       },
       "optionalDependencies": {
-        "@1password/sdk": "^0.3.0",
-        "better-sqlite3": "^12.0.0",
-        "sharp": "^0.34.1",
+        "@signetai/signetai-darwin-arm64": "0.138.11",
+        "@signetai/signetai-darwin-x64": "0.138.11",
+        "@signetai/signetai-linux-arm64": "0.138.11",
+        "@signetai/signetai-linux-x64": "0.138.11",
+        "@signetai/signetai-win32-x64": "0.138.11",
       },
+    },
+    "dist/signetai-darwin-arm64": {
+      "name": "@signetai/signetai-darwin-arm64",
+      "version": "0.138.11",
+    },
+    "dist/signetai-darwin-x64": {
+      "name": "@signetai/signetai-darwin-x64",
+      "version": "0.138.11",
+    },
+    "dist/signetai-linux-arm64": {
+      "name": "@signetai/signetai-linux-arm64",
+      "version": "0.138.11",
+    },
+    "dist/signetai-linux-x64": {
+      "name": "@signetai/signetai-linux-x64",
+      "version": "0.138.11",
+    },
+    "dist/signetai-win32-x64": {
+      "name": "@signetai/signetai-win32-x64",
+      "version": "0.138.11",
     },
     "integrations/claude-code/connector": {
       "name": "@signet/connector-claude-code",
@@ -1468,6 +1472,16 @@
     "@signet/web": ["@signet/web@workspace:web/marketing"],
 
     "@signetai/signet-memory-openclaw": ["@signetai/signet-memory-openclaw@workspace:integrations/openclaw/memory-adapter"],
+
+    "@signetai/signetai-darwin-arm64": ["@signetai/signetai-darwin-arm64@workspace:dist/signetai-darwin-arm64"],
+
+    "@signetai/signetai-darwin-x64": ["@signetai/signetai-darwin-x64@workspace:dist/signetai-darwin-x64"],
+
+    "@signetai/signetai-linux-arm64": ["@signetai/signetai-linux-arm64@workspace:dist/signetai-linux-arm64"],
+
+    "@signetai/signetai-linux-x64": ["@signetai/signetai-linux-x64@workspace:dist/signetai-linux-x64"],
+
+    "@signetai/signetai-win32-x64": ["@signetai/signetai-win32-x64@workspace:dist/signetai-win32-x64"],
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 

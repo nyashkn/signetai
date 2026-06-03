@@ -239,15 +239,22 @@ methodology, scoring note, and run workflow.
 
 ```bash
 curl -fsSL https://signetai.sh/install.sh | bash
+npm install -g signetai
+bun add -g signetai
 signet setup               # interactive setup wizard
 ```
 
+curl, npm, and Bun all install the same compiled Signet binary. The npm and
+Bun package-manager paths use optional native packages for the current platform;
+install scripts only link the already-installed binary into place. They do not
+install Bun, rebuild Signet, or install daemon dependencies.
+Published native binaries currently cover Linux x64, Linux arm64, macOS x64,
+macOS arm64, and Windows x64. Windows direct installs should use
+`npm install -g signetai`; the old PowerShell `install.ps1` path has been
+removed until a native Windows direct installer ships.
+
 The wizard initializes `$SIGNET_WORKSPACE/`, configures your harnesses, sets up
 an embedding provider, creates the database, and starts the daemon.
-
-On macOS, the native bundle installer is preferred. Package-manager installs
-run the background daemon through Bun or Node.js, so macOS may show that
-runtime's signer in Login Items / Background Activity instead of Signet.
 
 > Path note: `$SIGNET_WORKSPACE` means your active Signet workspace path.
 > Default is `~/.agents`, configurable via `signet workspace set <path>`.
@@ -393,7 +400,7 @@ Connectors
 | [`@signet/desktop`](./surfaces/desktop) | Electron desktop application |
 | [`@signet/tray`](./surfaces/tray) | Shared tray/menu bar utilities |
 | [`@signet/native`](./platform/native) | Native accelerators |
-| [`signetai`](./dist/signetai) | Meta-package (`signet` binary) |
+| [`signetai`](./dist/signetai) | npm/Bun wrapper for the compiled Signet binary |
 | [`@signet/web`](./web/marketing) | Astro marketing site deployed to Cloudflare Pages |
 | [`reviews-worker`](./web/workers/reviews) | Cloudflare Worker for review automation |
 | [`signet.secrets`](./plugins/core/secrets) | Core Signet-native secrets plugin |

@@ -18,14 +18,25 @@ jobs:
       - name: Promote to stable/latest
         run: |
           set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$NPM_CONFIG_USERCONFIG"
-          npm view "signetai@${VERSION}" version >/dev/null
-          npm dist-tag add "signetai@${VERSION}" latest
+          test -n "$NODE_AUTH_TOKEN"
+          npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          required_packages=(
+            "@signetai/signetai-linux-x64"
+            "@signetai/signetai-linux-arm64"
+            "@signetai/signetai-darwin-x64"
+            "@signetai/signetai-darwin-arm64"
+            "@signetai/signetai-win32-x64"
+            "signetai"
+          )
+          for package in "${required_packages[@]}"; do
+            npm view "${package}@${VERSION}" version >/dev/null
+            npm dist-tag add "${package}@${VERSION}" latest
+          done
           npm dist-tag add "@signetai/signet-memory-openclaw@${VERSION}" latest || true
           gh release edit "v${VERSION}" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
           echo "Promoted v${VERSION} to stable/latest"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/.npmrc
           VERSION: ${{ inputs.version }}

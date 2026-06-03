@@ -29,6 +29,7 @@
 .gitnexus/
 .graphiq/
 .idea/
+.native-build/
 .playwright-mcp/
 .pnpm-store/
 .ruff_cache/
@@ -42,6 +43,7 @@
 Thumbs.db
 coverage/
 dogfood-output/
+dist/native/
 email*
 node_modules/
 npm-debug.log*
