@@ -6,51 +6,57 @@
   <img src="public/Signet-Logo-Black.png" alt="Signet" width="120">
 </picture>
 
-# S I G N E T   A I
+# Signet AI
 
-**Bring your own context to any AI agent**
+**Own your agent's context.**
 
-<a href="https://github.com/Signet-AI/signetai/actions"><img src="https://img.shields.io/github/actions/workflow/status/Signet-AI/signetai/release.yml?branch=main&style=for-the-badge" alt="CI status"></a>
 <a href="https://github.com/Signet-AI/signetai/releases"><img src="https://img.shields.io/github/v/release/Signet-AI/signetai?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
 <a href="https://www.npmjs.com/package/signetai"><img src="https://img.shields.io/npm/v/signetai?style=for-the-badge" alt="npm"></a>
-<a href="https://github.com/Signet-AI/signetai/discussions"><img src="https://img.shields.io/github/discussions/Signet-AI/signetai?style=for-the-badge" alt="Discussions"></a>
-<a href="https://discord.gg/pHa5scah9C"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge" alt="Apache-2.0 License"></a>
-<a href="https://github.com/openclaw/openclaw"><img src="https://img.shields.io/badge/OpenClaw-Compatible-orange?style=for-the-badge" alt="OpenClaw Compatible"></a>
 <a href="./docs/BENCHMARKING.md#current-longmemeval-score"><img src="https://img.shields.io/badge/LongMemEval-97.6%25-black?style=for-the-badge" alt="LongMemEval 97.6% answer accuracy"></a>
 
 **97.6% average LongMemEval answer accuracy**<br />
-Readable record · inspectable recall · harnesses are replaceable
+Local-first context · source-backed recall · repairable memory · portable across agents
 
-[Website](https://signetai.sh) · [Docs](https://signetai.sh/docs) · [Benchmarks](./docs/BENCHMARKING.md) · [Vision](VISION.md) · [Discussions](https://github.com/Signet-AI/signetai/discussions) · [Discord](https://discord.gg/Psdeg7sQm7) · [Contributing](docs/CONTRIBUTING.md) · [AI Policy](AI_POLICY.md)
+[Quick start](#quick-start-about-5-minutes) · [Why Signet](#why-signet) · [Benchmarks](./docs/BENCHMARKING.md) · [Docs](https://signetai.sh/docs) · [Discord](https://discord.gg/Psdeg7sQm7)
 
 </div>
 
 ---
 
-**Models change. Harnesses change. Providers change. Your context should not.**
+Models change. Providers change. Agent shells change. Your context should not.
 
-Signet is the portable context layer for AI agents. It keeps identity,
-memory, provenance, secrets, skills, and working knowledge outside any
-single chat app, model provider, or harness. The execution surface can
-change. The agent keeps its footing.
+Your agents are starting to remember projects, users, decisions, documents,
+conversations, preferences, mistakes, routines, and private working context.
 
-The job is simple: bring your own context to the agents you already use,
-then keep that context inspectable and under your control. Signet runs
-beneath Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi,
-Oh My Pi, Hermes Agent, and other harnesses so the durable layer survives
-the tool of the week.
+That memory is no longer a feature. It is infrastructure — and custody matters.
 
-Memory is ambient. Signet captures useful context between sessions,
-preserves the raw record, indexes it for recall, and injects relevant
-context before the next prompt starts. The agent wakes up with continuity
-instead of asking you to rebuild the room by hand.
+Signet is a local-first context layer for AI agents: memory, identity,
+transcripts, source records, provenance, agent instructions, secrets, and
+repair tools in infrastructure you control.
 
-Why teams adopt it:
-- less prompt re-explaining between sessions
-- one context layer across agents, models, harnesses, and providers
-- local-first storage with inspectable provenance and repair tools
-- a path away from harness-locked behavioral context
+Hosted memory APIs are fastest until memory becomes part of your product
+contract: deletion, provenance, repair, portability, and private context
+custody. Signet is for that moment.
+
+Not another hosted memory API. Not another harness-specific plugin. Signet is
+the durable layer underneath your agents.
+
+## Why Signet
+
+| Claim | Why it matters |
+|---|---|
+| Local-first custody | SQLite, readable workspace files, transcripts, source records, memories, and identity files live where you control them |
+| Source-backed recall | Every useful memory can point back to where it came from |
+| Repairable memory | Inspect, edit, supersede, delete, reclassify, and scope bad context |
+| Portable across agents | One layer works across Claude Code, Codex, OpenCode, OpenClaw, Gemini CLI, Hermes Agent, MCP, SDKs, and apps |
+| Team deployment primitives | Signet includes scoped agents, visibility, auth policy, retention controls, secrets storage, and audit-friendly APIs |
+| Proven recall | LongMemEval-tracked recall without giving up governance |
+
+You know you need Signet when agent memory is no longer just recall quality.
+You need to know where context lives, where it came from, who can see it, how
+it can be corrected, what gets deleted, and whether it can move when your
+tools change.
 
 ## Quick start (about 5 minutes)
 
@@ -65,168 +71,117 @@ If you already use Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI,
 Pi, Oh My Pi, or Hermes Agent, keep your existing harness. Signet installs
 under it.
 
-### Docker self-hosting
-
-Run Signet as a containerized daemon with first-party Compose assets:
-
-```bash
-cd deploy/docker
-cp .env.example .env
-docker compose up -d --build
-```
-
-See [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) for token bootstrap,
-backup, and upgrade runbook details.
-
-## Bring your own context
-
-Portable memory only matters if the agent can see the world you already
-work inside. Signet is built around ordinary context, not a special
-knowledge-base ritual: project notes, transcripts, markdown files, PDFs,
-URLs, identity files, decisions, preferences, and the corrections that
-shape how work actually happens.
-
-The durable record stays readable. The semantic layer helps the agent
-navigate it. Retrieval is a lens over the record, not a replacement for
-it. When a summary is stale, conflict-heavy, or decision-critical, the
-agent can climb back down to the source.
-
-## First proof of value (2-session test)
+## Proof in one repair loop
 
 Run this once:
 
 ```bash
-signet remember "my primary stack is bun + typescript + sqlite"
+signet remember "Project Atlas deploys only after QA signs off" \
+  --tags project-atlas --who user
+signet recall "Project Atlas deploy policy" --tags project-atlas --json
 ```
 
-Then in your next session, ask your agent:
-
-```text
-what stack am i using for this project?
-```
-
-You should see continuity without manually reconstructing context.
-If not, inspect recall and provenance in the dashboard or run:
+Then open the dashboard:
 
 ```bash
-signet recall "primary stack"
+signet dashboard
 ```
 
-Want the deeper architecture view? Jump to [How it works](#how-it-works) or [Architecture](#architecture).
+This is the smallest proof, but it shows the product shape: the memory is
+local, queryable, tagged, visible in the dashboard, and repairable instead of
+being trapped behind a hosted recall response.
 
-## Core capabilities
+If recall returns a stale deployment policy, you can edit or delete the memory,
+run the same recall again, and verify the agent is seeing corrected context
+before it acts.
 
-These are the product surface areas Signet is optimized around:
+In the dashboard, the record is not a black-box snippet:
 
-| Core | What it does |
+```text
+Memory: Project Atlas deploys only after QA signs off
+Tags: project-atlas
+Dashboard actions: edit · delete · mark pinned · similar
+Daemon lifecycle: modify · forget · recover
+```
+
+## How Signet is different
+
+| Alternative | Good for | Where Signet is different |
+|---|---|---|
+| Hosted memory APIs | Fast prototypes and managed memory | Signet keeps storage, provenance, ranking policy, repair, deletion, and self-hosting under your control |
+| Harness-specific plugins | Improving memory inside one agent shell | Signet runs underneath many harnesses, so context survives tool churn |
+| Vector/RAG memory | Searching notes and documents | Signet keeps transcripts, identity, source records, repair history, and scoped recall |
+| Lightweight local stores | Simple private persistence | Signet adds provenance, dashboard inspection, team policy, connectors, MCP, SDKs, and daemon APIs |
+
+Hosted memory APIs are great for prototypes. They get uncomfortable when
+memory becomes part of your product contract: storage, recall policy,
+deletion, provenance, and portability all matter.
+
+| Stay hosted if... | Switch to Signet when... |
 |---|---|
-| 🧠 Ambient memory | Sessions are captured automatically, no manual memory ceremony required |
-| 🗂️ Source-backed context | Raw transcripts and workspace files remain available beneath summaries and recall results |
-| 🎯 Inspectable recall | Hybrid search, graph traversal, provenance, scopes, and ranking signals explain why context surfaced |
-| 🏠 Local-first substrate | Data lives on your machine in SQLite and markdown, portable by default |
-| 🤝 Cross-harness continuity | Claude Code, OpenCode, OpenClaw, Codex, Gemini CLI, Pi, Oh My Pi, Hermes Agent, one shared context layer |
-| 🧩 SDK-first extensibility | Typed SDKs, middleware, and plugin surfaces let builders shape Signet around their own agents |
+| You need the fastest managed API path | Memory has to live in infrastructure you control |
+| Recall quality is the only contract | Deletion, repair, provenance, and auditability are also part of the contract |
+| One app owns the memory surface | Multiple agents, harnesses, SDKs, MCP clients, or internal apps need the same context |
+| Vendor-managed ranking is acceptable | You need to inspect and tune recall policy around your own sources |
+| You cannot run a daemon or own backups yet | You need an exportable workspace you can inspect, back up, and move |
+
+## Switching cost
+
+Signet is infrastructure, so it has a real operating surface:
+- a local or self-hosted daemon
+- an embedding provider
+- a SQLite-backed workspace to back up
+- harness connectors, hooks, MCP servers, or SDK calls depending on your stack
+
+The trade is deliberate: you operate the memory layer, and in return you can
+inspect, repair, scope, self-host, and move the context your agents depend on.
+
+Day two is bounded: keep the daemon healthy, back up `$SIGNET_WORKSPACE/`,
+rerun setup when harness integrations change, and use local/team/hybrid auth
+mode based on how the daemon is exposed. The upside is that failures remain
+inspectable because the data plane is still yours.
+
+For a single-developer install, day two usually means `signet status`, backing
+up one workspace directory, and rerunning setup only when you add or replace an
+agent harness.
 
 ## Is Signet right for you?
 
 Use Signet if you want:
-- memory continuity across sessions without manual prompt bootstrapping
-- local ownership of agent state and history
-- one context layer across multiple agent harnesses
+- agents that remember across sessions without prompt bootstrapping
+- memory your team can inspect, repair, scope, and self-host
+- source-backed recall across private docs, repos, conversations, and artifacts
+- one memory layer across agent harnesses, MCP clients, SDKs, and custom apps
 
 Signet may be overkill if you only need short-lived chat memory inside a
-single hosted assistant.
-
-## What Signet is not
-
-Signet is not a chat app, not a harness, and not a fake second brain
-trying to outsmart the model. It is the durable layer underneath: files,
-memory, identity, provenance, retrieval, secrets, and permissions.
-
-The harness should stay replaceable. The provider should provide
-intelligence, not custody. Signet keeps the continuity somewhere you can
-inspect, repair, move, and rebuild.
-
-## Why you can trust this
-
-- runs local-first by default
-- raw records and workspace files stay inspectable
-- SQLite powers the query layer; recall keeps provenance and source references
-- memory can be repaired (edit, supersede, delete, reclassify)
-- easy to build on: SDK, connectors, MCP, and workspace primitives let teams
-  shape Signet around their agents, policies, and workflows
-- no vendor lock-in, your context stays portable
-
-If you are building agents for an organization, Signet is meant to be shaped,
-not merely installed. Use the SDK, plugin SDK, connectors, and MCP surface to
-fit your own agents, permission model, workflows, and deployment style.
-
-## What keeps it reliable
-
-These systems improve quality and reliability of the core memory loop:
-
-| Supporting | What it does |
-|---|---|
-| 📜 Lossless transcripts | Raw session history preserved alongside extracted memories |
-| 🕸️ Structured retrieval substrate | Graph traversal + FTS5 + vector search produce bounded candidate context |
-| 🎯 Feedback-aware ranking | Recency, provenance, importance, and dampening signals help separate useful context from repeated noise |
-| 🔬 Noise filtering | Hub and similarity controls reduce low-signal memory surfacing |
-| 📄 Document ingestion | Pull PDFs, markdown, and URLs into the same retrieval pipeline |
-| 🖥️ CLI + Dashboard | Operate and inspect the system from terminal or web UI |
-
-## Advanced capabilities (optional)
-
-These extend Signet for larger deployments and custom integrations:
-
-| Advanced | What it does |
-|---|---|
-| 🔐 Agent-blind secrets | Encrypted secret storage, injected at execution time, not exposed to agent text |
-| 👯 Multi-agent policies | Isolated/shared/group memory visibility for multiple named agents |
-| 🔄 Git sync | Identity and memory can be versioned in your own remote |
-| 📦 SDK + plugin SDK | Typed client, React hooks, Vercel/OpenAI helpers, and plugin surfaces for extending the ecosystem |
-| 🔌 MCP aggregation | Register MCP servers once, expose across connected harnesses |
-| 👥 Team controls | RBAC, token policy, and rate limits for shared deployments |
-| 🏪 Ecosystem installs | Install skills and MCP servers from [skills.sh](https://skills.sh) and [ClawHub](https://clawhub.ai) |
-| ⚖️ Apache 2.0 | Fully open source, forkable, and self-hostable |
-
-## When memory is wrong
-
-Memory quality is not just recall quality. It is governance quality.
-
-Signet is built to support:
-- provenance inspection (where a memory came from)
-- scoped visibility controls (who can see what)
-- memory repair (edit, supersede, delete, or reclassify)
-- transcript fallback (verify extracted memory against raw source)
-- lifecycle controls (retention, decay, and conflict handling)
+single hosted assistant or a simple vector search endpoint.
 
 ## Harness support
 
-Signet is not a harness. It doesn't replace Claude Code, OpenClaw,
-OpenCode, Codex, Gemini CLI, Pi, Oh My Pi, or Hermes Agent - it runs
-alongside them as an enhancement. Bring the harness you already use.
-Signet handles the memory layer underneath it.
+Signet is not trying to win by being another agent shell. It runs underneath
+the tools people already use and gives them one owned memory layer.
 
-| Harness | Status | Integration |
+| Harness | Integration path | Notes |
 |---|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Supported** | Hooks |
-| [OpenCode](https://github.com/sst/opencode) | **Supported** | Plugin + Hooks |
-| [OpenClaw](https://github.com/openclaw/openclaw) | **Supported** | Runtime plugin + NemoClaw compatible |
-| [Codex](https://github.com/openai/codex) | **Supported** | Hooks + MCP server |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | **Supported** | Memory provider plugin |
-| [Pi](https://github.com/mariozechner/pi-coding-agent) | **Supported** | Extension + Hooks |
-| Oh My Pi | **Supported** | Managed extension |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Supported** | MCP server + GEMINI.md sync |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Hooks + MCP | Direct `/remember` and `/recall` skills |
+| [OpenCode](https://github.com/sst/opencode) | Plugin + hooks | Runtime plugin with lifecycle support |
+| [OpenClaw](https://github.com/openclaw/openclaw) | Runtime plugin | Flagship path; legacy hooks remain compatibility-only |
+| [Codex](https://github.com/openai/codex) | MCP + compatibility hooks | Plugin bundle when available; degraded compaction fidelity |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Memory provider plugin | `memory_*`, `recall`, and `remember` tools |
+| [Pi](https://github.com/mariozechner/pi-coding-agent) | Extension + hooks | Memory commands and agent-callable tools |
+| Oh My Pi | Managed extension | Lifecycle recall injection; no `/remember` or `/recall` commands yet |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | MCP + GEMINI.md sync | On-demand tools plus identity sync |
 
 
 > Don't see your favorite harness? file an [issue](https://github.com/Signet-AI/signetai/issues) and request that it be added!
 
-## LongMemEval Benchmark
+## Memory that holds up
 
-[LongMemEval](https://arxiv.org/abs/2410.10813) measures whether a memory
-system can recover and use facts across long-running, multi-session
-assistant conversations. Signet's latest tracked MemoryBench runs average
-**97.6% answer accuracy** under the `rules` profile.
+Signet's latest tracked MemoryBench run averages **97.6% LongMemEval answer
+accuracy** under the `rules` profile.
+
+The benchmark matters because Signet is not only governable memory. It also
+retrieves the right facts across long-running, multi-session conversations.
 
 That profile keeps the benchmark contract strict: memories are ingested through
 `/api/memory/remember`, recalled through `/api/memory/recall`, and answered
@@ -289,16 +244,19 @@ signet agent add bob --memory shared       # bob sees all global memories
 signet agent add ci --memory group --group eng  # ci sees memories from the eng group
 
 signet agent list                          # roster + policies
-signet remember "deploy key" --agent alice --private  # alice-only secret
-signet recall "deploy" --agent alice       # scoped to alice's visible memories
+signet remember "deploy window is Fridays" --agent alice --private
+signet recall "deploy window" --agent alice  # scoped to alice's visible memories
 signet agent info alice                    # identity files, policy, memory count
 ```
+
+Use the secrets subsystem for credentials. Do not store tokens or keys as
+recallable memories.
 
 OpenClaw users get zero-config routing — session keys like
 `agent:alice:discord:direct:u123` are parsed automatically; no
 `agentId` header needed.
 
-In connected harnesses, skills work directly:
+In harnesses with command-style integrations, skills work directly:
 
 ```text
 /remember critical: never commit secrets to git
@@ -429,7 +387,7 @@ Connectors
 
 | Paper / Project | Relevance |
 |---|---|
-| [Lossless Context Management](https://papers.voltropy.com/LCM) (Voltropy, 2026) | Hierarchical summarization, guaranteed convergence. Patterns adapted in [LCM-PATTERNS.md](./docs/specs/planning/LCM-PATTERNS.md). |
+| [Lossless Context Management](https://papers.voltropy.com/LCM) (Voltropy, 2026) | Hierarchical summarization, guaranteed convergence. Related runtime notes live in [lossless-working-memory-runtime.md](./docs/specs/approved/lossless-working-memory-runtime.md). |
 | [Recursive Language Models](https://arxiv.org/abs/2512.24601) (Zhang et al., 2026) | Active context management. LCM builds on and departs from RLM's approach. |
 | [acpx](https://github.com/openclaw/acpx) (OpenClaw) | Agent Client Protocol. Structured agent coordination. |
 | [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (Martian Engineering) | LCM reference implementation as an OpenClaw plugin. |
@@ -457,7 +415,8 @@ cd surfaces/dashboard && bun run dev  # Dashboard dev
 
 Requirements:
 
-- Node.js 18+ or Bun
+- Bun for normal repo development
+- Node.js 18+ for Node-targeted package surfaces
 - macOS or Linux
 - Optional for harness integrations: Claude Code, Codex, OpenCode, OpenClaw,
   Gemini CLI, Pi, Oh My Pi, or Hermes Agent
