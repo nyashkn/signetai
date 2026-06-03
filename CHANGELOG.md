@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-03
+- Bug fixes: buffer streaming reasoning fallback.
+
 ### 2026-06-02
 - Bug fixes: decouple summary worker from pipelineV2 so dreaming gets summaries.
 
@@ -26,10 +29,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-05-27
 - Bug fixes: remove critical audit advisories.
 
-### 2026-05-26
-- Bug fixes: resolve hermes-plugin from native bundle SIGNET_DIR; accept empty check-fts posts; respect Signet path for dashboard logs.
-
 ## Release Ledger
+
+## [0.138.11] - 2026-06-03
+
+Release summary: 1 bug fix.
+Tag range: `bundle-0.138.10-daf51f41174571e6794c7f0b08a66d515d06cdff..v0.138.11`.
+
+### Bug Fixes
+
+- **pipeline**: buffer streaming reasoning fallback (#815)
 
 ## [0.138.10] - 2026-06-02
 
