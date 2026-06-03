@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-03
-- Bug fixes: pack native tarballs from local paths; publish native npm assets as release tarballs; bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
+- Bug fixes: keep rust daemon runtime opt-in; pack native tarballs from local paths; publish native npm assets as release tarballs; bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
 - Refactoring: replace TypeScript runtime with Rust parity daemon.
 - Docs: tighten positioning flow; sharpen context custody pitch.
 
@@ -32,6 +32,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: remove critical audit advisories.
 
 ## Release Ledger
+
+## [0.138.18] - 2026-06-03
+
+Release summary: 1 bug fix.
+Tag range: `v0.138.17..v0.138.18`.
+
+### Bug Fixes
+
+- **cli**: keep rust daemon runtime opt-in (#822)
 
 ## [0.138.17] - 2026-06-03
 
