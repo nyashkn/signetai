@@ -7,8 +7,8 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-03
-- Bug fixes: publish native packages without npm scope; buffer streaming reasoning fallback.
-- Docs: sharpen context custody pitch.
+- Bug fixes: bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
+- Docs: tighten positioning flow; sharpen context custody pitch.
 
 ### 2026-06-02
 - Bug fixes: decouple summary worker from pipelineV2 so dreaming gets summaries.
@@ -31,6 +31,19 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: remove critical audit advisories.
 
 ## Release Ledger
+
+## [0.138.14] - 2026-06-03
+
+Release summary: 1 bug fix and 1 docs update.
+Tag range: `v0.138.13..v0.138.14`.
+
+### Bug Fixes
+
+- **install**: bundle native assets in npm package
+
+### Docs
+
+- **readme**: tighten positioning flow
 
 ## [0.138.13] - 2026-06-03
 
