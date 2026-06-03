@@ -1,11 +1,16 @@
 //! Memory write route handlers (remember, modify, forget, recover).
 
 use std::collections::HashSet;
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use rusqlite::{OptionalExtension, params};
@@ -21,6 +26,7 @@ use signet_services::normalize::normalize_and_hash;
 use signet_services::session::SessionTracker;
 use signet_services::transactions;
 
+use crate::analytics::ErrorEntry;
 use crate::auth::middleware::{authenticate_headers, require_scope_guard};
 use crate::auth::types::TokenScope;
 use crate::state::AppState;
@@ -52,6 +58,448 @@ fn check_mutations_frozen(state: &AppState) -> Option<axum::response::Response> 
     }
 }
 
+fn parse_body_string(payload: &Value, field: &str) -> Result<Option<String>, &'static str> {
+    let Some(value) = payload.get(field) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err("field must be a string");
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn parse_patch_tags(value: &Value) -> Result<Option<Vec<String>>, &'static str> {
+    if value.is_null() {
+        return Ok(Some(Vec::new()));
+    }
+    if let Some(tags) = value.as_str() {
+        return Ok(Some(
+            tags.split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ));
+    }
+    if let Some(tags) = value.as_array() {
+        let mut parsed = Vec::new();
+        for tag in tags {
+            let Some(tag) = tag.as_str() else {
+                return Err("tags must be a string, string array, or null");
+            };
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                parsed.push(tag.to_string());
+            }
+        }
+        return Ok(Some(parsed));
+    }
+    Err("tags must be a string, string array, or null")
+}
+
+fn parse_patch_importance(value: &Value) -> Result<Option<f64>, &'static str> {
+    let Some(value) = value.as_f64() else {
+        return Err("importance must be a finite number between 0 and 1");
+    };
+    if !(0.0..=1.0).contains(&value) || !value.is_finite() {
+        return Err("importance must be a finite number between 0 and 1");
+    }
+    Ok(Some(value))
+}
+
+fn parse_patch_if_version(payload: &Value) -> Result<Option<i64>, &'static str> {
+    let Some(value) = payload.get("if_version") else {
+        return Ok(None);
+    };
+    let Some(version) = value.as_i64() else {
+        return Err("if_version must be a positive integer");
+    };
+    if version <= 0 {
+        return Err("if_version must be a positive integer");
+    }
+    Ok(Some(version))
+}
+
+fn codex_notes_dir() -> PathBuf {
+    if let Ok(home) = env::var("CODEX_HOME") {
+        return PathBuf::from(home)
+            .join("memories")
+            .join("extensions")
+            .join("ad_hoc")
+            .join("notes");
+    }
+    env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".codex")
+        .join("memories")
+        .join("extensions")
+        .join("ad_hoc")
+        .join("notes")
+}
+
+fn codex_note_slug(title: Option<&str>, content: &str) -> String {
+    let raw = title.unwrap_or(content).to_ascii_lowercase();
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if !slug.is_empty() {
+        return slug;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())[..12].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/codex-native-note
+// ---------------------------------------------------------------------------
+
+pub async fn codex_native_note(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let Some(obj) = payload.as_object() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "JSON object body is required"})),
+        )
+            .into_response();
+    };
+    let content = obj
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "content is required"})),
+        )
+            .into_response();
+    }
+    if content.chars().count() > 8000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "content must be 8000 characters or fewer"})),
+        )
+            .into_response();
+    }
+    if let Some(resp) = check_mutations_frozen(&state) {
+        return resp;
+    }
+
+    let title = obj.get("title").and_then(Value::as_str).map(str::trim);
+    let title = title.filter(|value| !value.is_empty());
+    let tags = obj.get("tags").and_then(Value::as_str).map(str::trim);
+    let tags = tags.filter(|value| !value.is_empty());
+    let notes_dir = codex_notes_dir();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let timestamp = created_at.replace(':', "-").replace('.', "-");
+    let slug = codex_note_slug(title, content);
+    let mut body = String::new();
+    body.push_str("---\nsource: signet_save_note\ncreated_at: ");
+    body.push_str(&serde_json::to_string(&created_at).unwrap_or_else(|_| "\"\"".to_string()));
+    body.push('\n');
+    if let Some(title) = title {
+        body.push_str("title: ");
+        body.push_str(&serde_json::to_string(title).unwrap_or_else(|_| "\"\"".to_string()));
+        body.push('\n');
+    }
+    if let Some(tags) = tags {
+        body.push_str("tags: ");
+        body.push_str(&serde_json::to_string(tags).unwrap_or_else(|_| "\"\"".to_string()));
+        body.push('\n');
+    }
+    body.push_str("---\n\n");
+    body.push_str(content);
+    body.push('\n');
+
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<PathBuf> {
+        fs::create_dir_all(&notes_dir)?;
+        for attempt in 0..8 {
+            let suffix = if attempt == 0 {
+                String::new()
+            } else {
+                format!("-{}", uuid::Uuid::new_v4().simple())
+                    .chars()
+                    .take(9)
+                    .collect()
+            };
+            let path = notes_dir.join(format!("{timestamp}-{slug}{suffix}.md"));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(body.as_bytes())?;
+                    return Ok(path);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        let path = notes_dir.join(format!("{timestamp}-{slug}-{}.md", uuid::Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(body.as_bytes())?;
+        Ok(path)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(path)) => {
+            Json(serde_json::json!({"ok": true, "path": path.to_string_lossy()})).into_response()
+        }
+        Ok(Err(err)) => {
+            warn!(err = %err, "failed to save Codex native memory note");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to save Codex native memory note"})),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            warn!(err = %err, "Codex native memory note task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to save Codex native memory note"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/memory/:id
+// ---------------------------------------------------------------------------
+
+pub async fn patch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let Some(obj) = payload.as_object() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "JSON object body is required"})),
+        )
+            .into_response();
+    };
+    let reason = match obj.get("reason").and_then(Value::as_str).map(str::trim) {
+        Some(reason) if !reason.is_empty() => reason.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "reason is required"})),
+            )
+                .into_response();
+        }
+    };
+    let if_version = match parse_patch_if_version(&payload) {
+        Ok(version) => version,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+
+    let content = match payload.get("content") {
+        Some(Value::String(content)) => {
+            let normalized = normalize_and_hash(content);
+            if normalized.storage.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "content must not be empty"})),
+                )
+                    .into_response();
+            }
+            Some(normalized.storage)
+        }
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "content must be a string"})),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+    let memory_type = match parse_body_string(&payload, "type") {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "type must be a non-empty string"})),
+            )
+                .into_response();
+        }
+    };
+    if obj.contains_key("type") && memory_type.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "type must be a non-empty string"})),
+        )
+            .into_response();
+    }
+    let tags = match payload.get("tags") {
+        Some(value) => match parse_patch_tags(value) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let importance = match payload.get("importance") {
+        Some(value) => match parse_patch_importance(value) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let pinned = match payload.get("pinned") {
+        Some(value) => match value.as_bool() {
+            Some(value) => Some(value),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "pinned must be a boolean"})),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    if content.is_none()
+        && memory_type.is_none()
+        && tags.is_none()
+        && importance.is_none()
+        && pinned.is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "at least one of content, type, tags, importance, pinned is required"
+            })),
+        )
+            .into_response();
+    }
+    if let Some(resp) = check_mutations_frozen(&state) {
+        return resp;
+    }
+
+    let memory_id = id.clone();
+    let content_changed = content.is_some();
+    let result = state
+        .pool
+        .write(Priority::High, move |conn| {
+            let result = transactions::modify(
+                conn,
+                &transactions::ModifyInput {
+                    id: &memory_id,
+                    content: content.as_deref(),
+                    memory_type: memory_type.as_deref(),
+                    tags,
+                    importance,
+                    pinned,
+                    if_version,
+                    actor: "api",
+                    reason: Some(reason.as_str()),
+                },
+            )?;
+            match result {
+                transactions::ModifyResult::Updated { new_version } => Ok(serde_json::json!({
+                    "id": memory_id,
+                    "status": "updated",
+                    "currentVersion": new_version - 1,
+                    "newVersion": new_version,
+                    "contentChanged": content_changed,
+                })),
+                transactions::ModifyResult::NoChanges => Ok(serde_json::json!({
+                    "id": memory_id,
+                    "status": "no_changes",
+                })),
+                transactions::ModifyResult::NotFound => Ok(serde_json::json!({
+                    "id": memory_id,
+                    "status": "not_found",
+                    "error": "Not found",
+                    "_code": 404,
+                })),
+                transactions::ModifyResult::Deleted => Ok(serde_json::json!({
+                    "id": memory_id,
+                    "status": "deleted",
+                    "error": "Cannot modify deleted memory",
+                    "_code": 409,
+                })),
+                transactions::ModifyResult::VersionConflict { current } => Ok(serde_json::json!({
+                    "id": memory_id,
+                    "status": "version_conflict",
+                    "currentVersion": current,
+                    "error": "Version conflict",
+                    "_code": 409,
+                })),
+                transactions::ModifyResult::DuplicateHash { existing_id } => {
+                    Ok(serde_json::json!({
+                        "id": memory_id,
+                        "status": "duplicate_content_hash",
+                        "duplicateMemoryId": existing_id,
+                        "error": "Duplicate content hash",
+                        "_code": 409,
+                    }))
+                }
+            }
+        })
+        .await;
+
+    match result {
+        Ok(value) => {
+            let code = value
+                .get("_code")
+                .and_then(Value::as_u64)
+                .and_then(|code| StatusCode::from_u16(code as u16).ok())
+                .unwrap_or(StatusCode::OK);
+            (code, Json(value)).into_response()
+        }
+        Err(err) => {
+            warn!(err = %err, "memory patch failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Modify failed"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/memory/remember
 // ---------------------------------------------------------------------------
@@ -67,6 +515,7 @@ pub struct RememberBody {
     pub pinned: Option<bool>,
     pub source_type: Option<String>,
     pub source_id: Option<String>,
+    pub created_at: Option<String>,
     #[serde(alias = "source_path", alias = "source")]
     pub source_path: Option<String>,
     #[serde(alias = "runtime_path")]
@@ -80,7 +529,84 @@ pub struct RememberBody {
     pub visibility: Option<String>,
     pub scope: Option<String>,
     pub session_key: Option<String>,
+    pub hints: Option<Vec<String>>,
     pub structured: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredPayload {
+    #[serde(default)]
+    entities: Vec<StructuredEntity>,
+    #[serde(default)]
+    aspects: Vec<StructuredAspect>,
+    #[serde(default)]
+    hints: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredEntity {
+    source: String,
+    #[serde(alias = "source_type")]
+    source_type: Option<String>,
+    relationship: String,
+    target: String,
+    #[serde(alias = "target_type")]
+    target_type: Option<String>,
+    confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredAspect {
+    #[serde(alias = "entity")]
+    entity_name: String,
+    #[serde(alias = "entity_type")]
+    entity_type: Option<String>,
+    aspect: String,
+    #[serde(default)]
+    attributes: Vec<StructuredAttribute>,
+    value: Option<String>,
+    #[serde(alias = "group_key")]
+    group_key: Option<String>,
+    #[serde(alias = "claim_key")]
+    claim_key: Option<String>,
+    confidence: Option<f64>,
+    importance: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredAttribute {
+    #[serde(alias = "group_key")]
+    group_key: Option<String>,
+    #[serde(alias = "claim_key")]
+    claim_key: Option<String>,
+    content: String,
+    confidence: Option<f64>,
+    importance: Option<f64>,
+}
+
+#[derive(Default)]
+struct StructuredPersistResult {
+    entities_inserted: usize,
+    entities_updated: usize,
+    relations_inserted: usize,
+    relations_updated: usize,
+    mentions_linked: usize,
+    aspects_created: usize,
+    attributes_created: usize,
+    attributes_superseded: usize,
+}
+
+#[derive(Clone)]
+struct StoredStructuredAttribute {
+    id: String,
+    normalized_content: String,
+    group_key: Option<String>,
+    claim_key: String,
+    created_at: String,
 }
 
 fn parse_remember_tags(value: Option<Value>) -> Result<Vec<String>, &'static str> {
@@ -112,6 +638,156 @@ fn parse_remember_tags(value: Option<Value>) -> Result<Vec<String>, &'static str
         }
         _ => Err("tags must be a string, string array, or null"),
     }
+}
+
+fn canonical_name(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_path_key(value: Option<&str>) -> Option<String> {
+    let normalized = value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if normalized.len() < 3 {
+        return None;
+    }
+    Some(normalized.chars().take(120).collect())
+}
+
+fn normalize_entity_type(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .to_ascii_lowercase()
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "extracted".to_string())
+}
+
+fn tokenize_structured_content(content: &str) -> Vec<String> {
+    content
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|token| token.len() >= 2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_update_marker(content: &str) -> bool {
+    let content = content.to_ascii_lowercase();
+    [
+        "currently",
+        "now",
+        "recently",
+        "lately",
+        "updated",
+        "changed",
+        "switched",
+        "replaced",
+        "no longer",
+        "not anymore",
+        "instead",
+        "previously",
+        "formerly",
+    ]
+    .iter()
+    .any(|marker| content.contains(marker))
+}
+
+fn numeric_tokens(tokens: &[String]) -> HashSet<&str> {
+    const NUMBER_WORDS: &[&str] = &[
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve",
+    ];
+    tokens
+        .iter()
+        .filter_map(|token| {
+            if token.chars().all(|ch| ch.is_ascii_digit()) || NUMBER_WORDS.contains(&token.as_str())
+            {
+                Some(token.as_str())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn has_numeric_conflict(left: &[String], right: &[String]) -> bool {
+    let left_numbers = numeric_tokens(left);
+    let right_numbers = numeric_tokens(right);
+    if left_numbers.is_empty() || right_numbers.is_empty() {
+        return false;
+    }
+    left_numbers != right_numbers
+}
+
+fn is_likely_supersession(new_content: &str, old_content: &str) -> bool {
+    let newer = tokenize_structured_content(new_content);
+    let older = tokenize_structured_content(old_content);
+    if newer.is_empty() || older.is_empty() {
+        return false;
+    }
+    let older_set = older.iter().map(String::as_str).collect::<HashSet<_>>();
+    let overlap = newer
+        .iter()
+        .filter(|token| older_set.contains(token.as_str()))
+        .count();
+    if overlap < 3 {
+        return false;
+    }
+    has_numeric_conflict(&newer, &older) || (has_update_marker(new_content) && overlap >= 4)
+}
+
+fn is_decision_content(content: &str) -> bool {
+    let content = content.to_ascii_lowercase();
+    [
+        "decided to",
+        "decided on",
+        "decided against",
+        "switched from",
+        "switched to",
+        "went with",
+        "sticking with",
+        "committed to",
+        "settled on",
+        "adopted",
+        "architecture decision",
+        "design decision",
+    ]
+    .iter()
+    .any(|marker| content.contains(marker))
 }
 
 fn normalize_scope(value: Option<String>) -> Option<String> {
@@ -490,9 +1166,10 @@ fn guard_write_scope(
     peer: &SocketAddr,
     agent_id: &str,
 ) -> Result<(), Box<axum::response::Response>> {
+    let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
-        state.auth_mode,
-        state.auth_secret.as_deref(),
+        auth_runtime.mode,
+        auth_runtime.secret.as_deref(),
         headers,
         is_loopback(peer),
     )?;
@@ -501,7 +1178,7 @@ fn guard_write_scope(
         agent: Some(agent_id.to_string()),
         user: None,
     };
-    require_scope_guard(&auth, &target, state.auth_mode, is_loopback(peer))
+    require_scope_guard(&auth, &target, auth_runtime.mode, is_loopback(peer))
 }
 
 fn dead_letter_blocked_extraction_memory(
@@ -574,6 +1251,453 @@ fn dead_letter_blocked_extraction_memory(
     Ok(())
 }
 
+fn upsert_structured_entity(
+    conn: &rusqlite::Connection,
+    name: &str,
+    entity_type: Option<&str>,
+    agent_id: &str,
+    now: &str,
+) -> Result<(String, bool), rusqlite::Error> {
+    let name = name.trim();
+    if name.len() < 2 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let canonical = canonical_name(name);
+    if let Some((id, existing_type)) = conn
+        .query_row(
+            "SELECT id, entity_type FROM entities
+             WHERE (canonical_name = ?1 AND agent_id = ?2) OR name = ?3
+             LIMIT 1",
+            params![canonical, agent_id, name],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    {
+        conn.execute(
+            "UPDATE entities SET mentions = COALESCE(mentions, 0) + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        let normalized_type = normalize_entity_type(entity_type);
+        if normalized_type != "extracted" && existing_type == "extracted" {
+            conn.execute(
+                "UPDATE entities SET entity_type = ?1 WHERE id = ?2 AND entity_type = 'extracted'",
+                params![normalized_type, id],
+            )?;
+        }
+        return Ok((id, false));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let entity_type = normalize_entity_type(entity_type);
+    match conn.execute(
+        "INSERT INTO entities
+         (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+        params![id, name, canonical, entity_type, agent_id, now],
+    ) {
+        Ok(_) => Ok((id, true)),
+        Err(err) => {
+            if !err.to_string().contains("UNIQUE constraint") {
+                return Err(err);
+            }
+            let fallback = conn
+                .query_row(
+                    "SELECT id FROM entities WHERE name = ?1 LIMIT 1",
+                    params![name],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(fallback) = fallback else {
+                return Err(err);
+            };
+            conn.execute(
+                "UPDATE entities
+                 SET mentions = COALESCE(mentions, 0) + 1,
+                     canonical_name = COALESCE(canonical_name, ?1),
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![canonical, now, fallback],
+            )?;
+            Ok((fallback, false))
+        }
+    }
+}
+
+fn upsert_structured_relation(
+    conn: &rusqlite::Connection,
+    source_id: &str,
+    target_id: &str,
+    relationship: &str,
+    confidence: f64,
+    now: &str,
+) -> Result<bool, rusqlite::Error> {
+    if let Some((id, mentions, existing_confidence)) = conn
+        .query_row(
+            "SELECT id, COALESCE(mentions, 1), COALESCE(confidence, 0.5)
+             FROM relations
+             WHERE source_entity_id = ?1 AND target_entity_id = ?2 AND relation_type = ?3
+             LIMIT 1",
+            params![source_id, target_id, relationship],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
+        )
+        .optional()?
+    {
+        let next_mentions = mentions + 1;
+        let next_confidence =
+            ((existing_confidence * mentions as f64) + confidence) / next_mentions as f64;
+        conn.execute(
+            "UPDATE relations SET mentions = ?1, confidence = ?2, updated_at = ?3 WHERE id = ?4",
+            params![next_mentions, next_confidence, now, id],
+        )?;
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO relations
+         (id, source_entity_id, target_entity_id, relation_type, strength, mentions, confidence, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 1.0, 1, ?5, ?6, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            source_id,
+            target_id,
+            relationship,
+            confidence,
+            now
+        ],
+    )?;
+    Ok(true)
+}
+
+fn mark_structured_superseded_siblings(
+    conn: &rusqlite::Connection,
+    attribute: &StoredStructuredAttribute,
+    aspect_id: &str,
+    agent_id: &str,
+    now: &str,
+) -> Result<usize, rusqlite::Error> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, normalized_content, group_key, claim_key, created_at
+         FROM entity_attributes
+         WHERE aspect_id = ?1 AND agent_id = ?2
+           AND (group_key = ?3 OR (group_key IS NULL AND ?3 IS NULL))
+           AND claim_key = ?4
+           AND id != ?5
+           AND kind = 'attribute'
+           AND status = 'active'",
+    )?;
+    let siblings = stmt
+        .query_map(
+            params![
+                aspect_id,
+                agent_id,
+                attribute.group_key.as_deref(),
+                attribute.claim_key,
+                attribute.id
+            ],
+            |row| {
+                Ok(StoredStructuredAttribute {
+                    id: row.get(0)?,
+                    normalized_content: row.get(1)?,
+                    group_key: row.get(2)?,
+                    claim_key: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut count = 0usize;
+    for sibling in siblings {
+        let left = chrono::DateTime::parse_from_rfc3339(&attribute.created_at).ok();
+        let right = chrono::DateTime::parse_from_rfc3339(&sibling.created_at).ok();
+        let attribute_is_newer = match (left, right) {
+            (Some(left), Some(right)) => left >= right,
+            _ => true,
+        };
+        let (newer, older) = if attribute_is_newer {
+            (attribute, &sibling)
+        } else {
+            (&sibling, attribute)
+        };
+        if !is_likely_supersession(&newer.normalized_content, &older.normalized_content) {
+            continue;
+        }
+        count += conn.execute(
+            "UPDATE entity_attributes
+             SET status = 'superseded', superseded_by = ?1, updated_at = ?2
+             WHERE id = ?3 AND agent_id = ?4 AND status = 'active'",
+            params![newer.id, now, older.id, agent_id],
+        )?;
+    }
+    Ok(count)
+}
+
+fn persist_structured_payload(
+    conn: &rusqlite::Connection,
+    payload: &StructuredPayload,
+    source_memory_id: &str,
+    content: &str,
+    agent_id: &str,
+    now: &str,
+) -> Result<StructuredPersistResult, rusqlite::Error> {
+    let mut result = StructuredPersistResult::default();
+
+    for entity in &payload.entities {
+        let confidence = entity.confidence.unwrap_or(0.7);
+        let (source_id, source_inserted) = upsert_structured_entity(
+            conn,
+            &entity.source,
+            entity.source_type.as_deref(),
+            agent_id,
+            now,
+        )?;
+        if source_inserted {
+            result.entities_inserted += 1;
+        } else {
+            result.entities_updated += 1;
+        }
+        let (target_id, target_inserted) = upsert_structured_entity(
+            conn,
+            &entity.target,
+            entity.target_type.as_deref(),
+            agent_id,
+            now,
+        )?;
+        if target_inserted {
+            result.entities_inserted += 1;
+        } else {
+            result.entities_updated += 1;
+        }
+        if upsert_structured_relation(
+            conn,
+            &source_id,
+            &target_id,
+            &entity.relationship,
+            confidence,
+            now,
+        )? {
+            result.relations_inserted += 1;
+        } else {
+            result.relations_updated += 1;
+        }
+        for (entity_id, mention_text) in [
+            (source_id.as_str(), entity.source.as_str()),
+            (target_id.as_str(), entity.target.as_str()),
+        ] {
+            result.mentions_linked += conn.execute(
+                "INSERT OR IGNORE INTO memory_entity_mentions
+                 (memory_id, entity_id, mention_text, confidence, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![source_memory_id, entity_id, mention_text, confidence, now],
+            )?;
+        }
+    }
+
+    let kind = if is_decision_content(content) {
+        "constraint"
+    } else {
+        "attribute"
+    };
+    let base_importance = if kind == "constraint" { 0.85 } else { 0.5 };
+    let mut resolved_entities = Vec::new();
+
+    for aspect in &payload.aspects {
+        let (entity_id, inserted) = upsert_structured_entity(
+            conn,
+            &aspect.entity_name,
+            aspect.entity_type.as_deref(),
+            agent_id,
+            now,
+        )?;
+        if inserted {
+            result.entities_inserted += 1;
+        } else {
+            result.entities_updated += 1;
+        }
+        result.mentions_linked += conn.execute(
+            "INSERT OR IGNORE INTO memory_entity_mentions
+             (memory_id, entity_id, mention_text, confidence, created_at)
+             VALUES (?1, ?2, ?3, 0.7, ?4)",
+            params![source_memory_id, entity_id, aspect.entity_name, now],
+        )?;
+        resolved_entities.push(entity_id.clone());
+
+        let aspect_id = uuid::Uuid::new_v4().to_string();
+        let aspect_canonical = canonical_name(&aspect.aspect);
+        conn.execute(
+            "INSERT INTO entity_aspects
+             (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0.5, ?6, ?6)
+             ON CONFLICT(entity_id, canonical_name) DO UPDATE SET updated_at = excluded.updated_at",
+            params![
+                aspect_id,
+                entity_id,
+                agent_id,
+                aspect.aspect,
+                aspect_canonical,
+                now
+            ],
+        )?;
+        let stored_aspect_id = conn.query_row(
+            "SELECT id FROM entity_aspects
+             WHERE entity_id = ?1 AND canonical_name = ?2
+             LIMIT 1",
+            params![entity_id, aspect_canonical],
+            |row| row.get::<_, String>(0),
+        )?;
+        result.aspects_created += 1;
+
+        let mut attributes = aspect.attributes.clone();
+        if let Some(value) = aspect.value.as_ref().map(String::as_str).map(str::trim)
+            && !value.is_empty()
+        {
+            attributes.push(StructuredAttribute {
+                group_key: aspect.group_key.clone(),
+                claim_key: aspect.claim_key.clone(),
+                content: value.to_string(),
+                confidence: aspect.confidence,
+                importance: aspect.importance,
+            });
+        }
+
+        for attr in attributes {
+            let normalized = canonical_name(&attr.content);
+            if normalized.is_empty() {
+                continue;
+            }
+            let duplicate = conn
+                .query_row(
+                    "SELECT id FROM entity_attributes
+                     WHERE aspect_id = ?1 AND agent_id = ?2 AND normalized_content = ?3
+                       AND status = 'active'
+                     LIMIT 1",
+                    params![stored_aspect_id, agent_id, normalized],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if duplicate.is_some() {
+                continue;
+            }
+
+            let attribute_id = uuid::Uuid::new_v4().to_string();
+            let group_key = normalize_path_key(attr.group_key.as_deref());
+            let claim_key = normalize_path_key(attr.claim_key.as_deref());
+            conn.execute(
+                "INSERT INTO entity_attributes
+                 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content,
+                  group_key, claim_key, confidence, importance, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?12)",
+                params![
+                    attribute_id,
+                    stored_aspect_id,
+                    agent_id,
+                    source_memory_id,
+                    kind,
+                    attr.content,
+                    normalized,
+                    group_key.as_deref(),
+                    claim_key.as_deref(),
+                    attr.confidence.unwrap_or(0.7),
+                    attr.importance.unwrap_or(base_importance),
+                    now
+                ],
+            )?;
+            result.attributes_created += 1;
+            if kind == "attribute"
+                && let Some(claim_key) = claim_key
+            {
+                result.attributes_superseded += mark_structured_superseded_siblings(
+                    conn,
+                    &StoredStructuredAttribute {
+                        id: attribute_id,
+                        normalized_content: normalized,
+                        group_key,
+                        claim_key,
+                        created_at: now.to_string(),
+                    },
+                    &stored_aspect_id,
+                    agent_id,
+                    now,
+                )?;
+            }
+        }
+    }
+
+    if resolved_entities.len() >= 2 {
+        for left in 0..resolved_entities.len() - 1 {
+            for right in left + 1..resolved_entities.len() {
+                if resolved_entities[left] == resolved_entities[right] {
+                    continue;
+                }
+                let exists = conn
+                    .query_row(
+                        "SELECT id FROM entity_dependencies
+                         WHERE source_entity_id = ?1 AND target_entity_id = ?2
+                           AND dependency_type = 'related_to' AND agent_id = ?3
+                         LIMIT 1",
+                        params![resolved_entities[left], resolved_entities[right], agent_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if exists.is_some() {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO entity_dependencies
+                     (id, source_entity_id, target_entity_id, agent_id, dependency_type,
+                      strength, confidence, reason, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'related_to', 0.3, 0.5, ?5, ?6, ?6)",
+                    params![
+                        uuid::Uuid::new_v4().to_string(),
+                        resolved_entities[left],
+                        resolved_entities[right],
+                        agent_id,
+                        format!("co-occurred in extracted entities for memory {source_memory_id}"),
+                        now
+                    ],
+                )?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn write_memory_hints(
+    conn: &rusqlite::Connection,
+    memory_id: &str,
+    agent_id: &str,
+    hints: &[String],
+    now: &str,
+) -> Result<usize, rusqlite::Error> {
+    let mut written = 0usize;
+    for hint in hints {
+        let hint = hint.trim();
+        if !(5..=300).contains(&hint.len()) {
+            continue;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                memory_id,
+                agent_id,
+                hint,
+                now
+            ],
+        )?;
+        written += 1;
+    }
+    Ok(written)
+}
+
 fn blocked_extraction_reason_blocking(state: &AppState) -> Option<String> {
     let guard = state.extraction_state.blocking_read();
     guard.as_ref().and_then(|es| {
@@ -634,6 +1758,32 @@ pub async fn remember(
                 .into_response();
         }
     };
+    let requested_created_at = match body.created_at.as_deref() {
+        Some(value) if chrono::DateTime::parse_from_rfc3339(value).is_err() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "createdAt must be a valid ISO timestamp" })),
+            )
+                .into_response();
+        }
+        Some(value) => Some(value.to_string()),
+        None => None,
+    };
+    let structured_payload = match body.structured.as_ref() {
+        Some(value) if !value.is_null() => {
+            match serde_json::from_value::<StructuredPayload>(value.clone()) {
+                Ok(payload) => Some(payload),
+                Err(_) => {
+                    let body = serde_json::json!({
+                        "error": "structured must be a valid structured payload"
+                    });
+                    return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+                }
+            }
+        }
+        _ => None,
+    };
+    let client_hints = body.hints.clone().unwrap_or_default();
 
     let metadata = body.metadata.clone();
     let who = normalize_optional_string(body.who).or_else(|| Some("daemon".to_string()));
@@ -710,10 +1860,7 @@ pub async fn remember(
         .and_then(|memory| memory.pipeline_v2.as_ref())
         .map(|pipeline| pipeline.guardrails.clone())
         .unwrap_or_default();
-    let has_structured = body
-        .structured
-        .as_ref()
-        .is_some_and(|value| !value.is_null());
+    let has_structured = structured_payload.is_some();
 
     if !has_structured && content.chars().count() > guardrails.max_content_chars {
         let chunk_plans = plan_chunks(&content, &guardrails, idempotency_key.as_deref());
@@ -932,7 +2079,11 @@ pub async fn remember(
                     }));
                 }
 
-                let blocked_reason = blocked_extraction_reason_blocking(&state);
+                let blocked_reason = if has_structured {
+                    None
+                } else {
+                    blocked_extraction_reason_blocking(&state)
+                };
                 let r = ingest_remember_with_blocked_guard(
                     conn,
                     &transactions::IngestInput {
@@ -957,6 +2108,48 @@ pub async fn remember(
                     blocked_reason.as_deref(),
                     extraction_max_attempts,
                 )?;
+                let created_at = requested_created_at
+                    .as_deref()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                let mut entities_linked = 0usize;
+                let mut hints_written = 0usize;
+                if r.duplicate_of.is_none() {
+                    if has_structured {
+                        conn.execute(
+                            "UPDATE memories
+                             SET extraction_status = 'complete',
+                                 extraction_model = 'structured-passthrough',
+                                 created_at = ?1,
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![created_at, r.id],
+                        )?;
+                    } else if requested_created_at.is_some() {
+                        conn.execute(
+                            "UPDATE memories SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                            params![created_at, r.id],
+                        )?;
+                    }
+                    if let Some(payload) = structured_payload.as_ref() {
+                        let structured = persist_structured_payload(
+                            conn,
+                            payload,
+                            &r.id,
+                            &content,
+                            &agent_id,
+                            &created_at,
+                        )?;
+                        entities_linked = structured.mentions_linked;
+                        let mut hints = payload.hints.clone();
+                        hints.extend(client_hints.iter().cloned());
+                        hints_written =
+                            write_memory_hints(conn, &r.id, &agent_id, &hints, &created_at)?;
+                    } else if !client_hints.is_empty() {
+                        hints_written =
+                            write_memory_hints(conn, &r.id, &agent_id, &client_hints, &created_at)?;
+                    }
+                }
                 let status = if r.duplicate_of.is_some() {
                     "duplicate"
                 } else {
@@ -968,11 +2161,32 @@ pub async fn remember(
                     "hash": r.hash,
                     "duplicateOf": r.duplicate_of,
                     "tags": tags_response,
+                    "type": memory_type,
+                    "pinned": pinned,
+                    "importance": importance,
+                    "content": content,
+                    "embedded": false,
+                    "entities_linked": entities_linked,
+                    "hints_written": hints_written,
+                    "structured": has_structured,
                 });
                 if r.duplicate_of.is_some()
                     && let Some(obj) = response.as_object_mut()
                 {
                     obj.insert("deduped".to_string(), Value::Bool(true));
+                }
+                if r.duplicate_of.is_none()
+                    && let Some(reason) = blocked_reason
+                    && let Some(obj) = response.as_object_mut()
+                {
+                    obj.insert(
+                        "__blockedExtractionReason".to_string(),
+                        Value::String(reason),
+                    );
+                    obj.insert(
+                        "__blockedExtractionMemoryId".to_string(),
+                        Value::String(r.id),
+                    );
                 }
                 Ok(response)
             }
@@ -981,6 +2195,14 @@ pub async fn remember(
 
     match result {
         Ok(mut val) => {
+            let blocked_reason = val
+                .get("__blockedExtractionReason")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let blocked_memory_id = val
+                .get("__blockedExtractionMemoryId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let status = val
                 .get("__status")
                 .and_then(Value::as_u64)
@@ -988,6 +2210,21 @@ pub async fn remember(
                 .unwrap_or(StatusCode::OK);
             if let Some(obj) = val.as_object_mut() {
                 obj.remove("__status");
+                obj.remove("__blockedExtractionReason");
+                obj.remove("__blockedExtractionMemoryId");
+            }
+            if status.is_success()
+                && let (Some(message), Some(memory_id)) = (blocked_reason, blocked_memory_id)
+            {
+                state.analytics.record_error(ErrorEntry {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    stage: "extraction".to_string(),
+                    code: "EXTRACTION_PROVIDER_BLOCKED".to_string(),
+                    message,
+                    request_id: None,
+                    memory_id: Some(memory_id),
+                    actor: Some("api".to_string()),
+                });
             }
             (status, Json(val)).into_response()
         }
@@ -1025,7 +2262,7 @@ mod tests {
 
     use crate::auth::rate_limiter::{AuthRateLimiter, default_limits};
     use crate::auth::types::AuthMode;
-    use crate::state::ExtractionRuntimeState;
+    use crate::state::{AuthRuntimeState, ExtractionRuntimeState};
 
     use super::{
         RememberBody, dead_letter_blocked_extraction_memory, normalize_scope, parse_remember_tags,
@@ -1411,7 +2648,7 @@ mod tests {
                 }),
             }),
             auth: Some(AuthConfig {
-                method: "token".to_string(),
+                method: Some("token".to_string()),
                 chain_id: None,
                 mode: Some("local".to_string()),
                 rate_limits: Some(HashMap::new()),
@@ -1433,10 +2670,12 @@ mod tests {
                 None,
                 None, // llm provider
                 None,
-                AuthMode::Local,
-                None,
-                AuthRateLimiter::from_rules(&rules),
-                AuthRateLimiter::from_rules(&rules),
+                AuthRuntimeState {
+                    mode: AuthMode::Local,
+                    secret: None,
+                    admin_limiter: AuthRateLimiter::from_rules(&rules),
+                    recall_llm_limiter: AuthRateLimiter::from_rules(&rules),
+                },
             )),
             dir,
         )
@@ -1480,6 +2719,7 @@ mod tests {
                 pinned: None,
                 source_type: None,
                 source_id: None,
+                created_at: None,
                 source_path: None,
                 runtime_path: None,
                 idempotency_key: None,
@@ -1489,6 +2729,7 @@ mod tests {
                 visibility: None,
                 scope: None,
                 session_key: None,
+                hints: None,
                 structured: None,
             }),
         )
@@ -1569,6 +2810,7 @@ mod tests {
                 pinned: None,
                 source_type: None,
                 source_id: None,
+                created_at: None,
                 source_path: None,
                 runtime_path: None,
                 idempotency_key: None,
@@ -1578,6 +2820,7 @@ mod tests {
                 visibility: None,
                 scope: None,
                 session_key: None,
+                hints: None,
                 structured: None,
             }),
         )
@@ -1661,6 +2904,7 @@ mod tests {
                 pinned: None,
                 source_type: None,
                 source_id: None,
+                created_at: None,
                 source_path: None,
                 runtime_path: None,
                 idempotency_key: None,
@@ -1670,6 +2914,7 @@ mod tests {
                 visibility: None,
                 scope: None,
                 session_key: None,
+                hints: None,
                 structured: None,
             }),
         )
@@ -1699,11 +2944,11 @@ mod tests {
 // DELETE /api/memory/:id
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub struct DeleteParams {
-    pub reason: Option<String>,
-    pub force: Option<String>,
-    pub if_version: Option<i64>,
+#[derive(Debug)]
+struct DeletePayload {
+    reason: Option<String>,
+    force: Option<bool>,
+    if_version: Option<i64>,
 }
 
 const MAX_FORGET_BATCH: usize = 200;
@@ -1742,6 +2987,108 @@ fn trim_opt(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn parse_delete_query(raw_query: Option<&str>) -> Result<DeletePayload, &'static str> {
+    let mut payload = DeletePayload {
+        reason: None,
+        force: None,
+        if_version: None,
+    };
+    let Some(raw_query) = raw_query else {
+        return Ok(payload);
+    };
+
+    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "reason" => {
+                payload.reason = trim_opt(Some(value.replace('+', " ")));
+            }
+            "force" => {
+                payload.force = Some(match value.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => false,
+                });
+            }
+            "if_version" => {
+                let Ok(version) = value.trim().parse::<i64>() else {
+                    return Err("if_version must be a positive integer");
+                };
+                if version <= 0 {
+                    return Err("if_version must be a positive integer");
+                }
+                payload.if_version = Some(version);
+            }
+            _ => {}
+        }
+    }
+    Ok(payload)
+}
+
+fn parse_delete_body(bytes: &Bytes) -> Result<DeletePayload, &'static str> {
+    if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(DeletePayload {
+            reason: None,
+            force: None,
+            if_version: None,
+        });
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return Err("Invalid JSON body");
+    };
+    let Some(payload) = value.as_object() else {
+        return Err("Invalid JSON body");
+    };
+
+    let reason = payload
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let force = if let Some(value) = payload.get("force") {
+        match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) if value.as_i64() == Some(1) => Some(true),
+            Value::Number(value) if value.as_i64() == Some(0) => Some(false),
+            Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" => Some(true),
+                "0" | "false" => Some(false),
+                _ => return Err("force must be a boolean"),
+            },
+            _ => return Err("force must be a boolean"),
+        }
+    } else {
+        None
+    };
+
+    let if_version = if let Some(value) = payload.get("if_version") {
+        let version = if let Some(version) = value.as_i64() {
+            version
+        } else if let Some(value) = value.as_str() {
+            let Ok(version) = value.trim().parse::<i64>() else {
+                return Err("if_version must be a positive integer");
+            };
+            version
+        } else {
+            return Err("if_version must be a positive integer");
+        };
+        if version <= 0 {
+            return Err("if_version must be a positive integer");
+        }
+        Some(version)
+    } else {
+        None
+    };
+
+    Ok(DeletePayload {
+        reason,
+        force,
+        if_version,
+    })
 }
 
 fn forget_confirm_token(ids: &[String]) -> String {
@@ -2038,19 +3385,52 @@ pub async fn forget_batch(
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    axum::extract::Query(params): axum::extract::Query<DeleteParams>,
+    RawQuery(raw_query): RawQuery,
+    bytes: Bytes,
 ) -> axum::response::Response {
     if let Some(resp) = check_mutations_frozen(&state) {
         return resp;
     }
 
-    let force = params
-        .force
-        .as_deref()
-        .map(|f| f == "1" || f == "true")
-        .unwrap_or(false);
-    let reason = params.reason;
-    let if_version = params.if_version;
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "memory id is required"})),
+        )
+            .into_response();
+    }
+
+    let body = match parse_delete_body(&bytes) {
+        Ok(body) => body,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": message})),
+            )
+                .into_response();
+        }
+    };
+    let query = match parse_delete_query(raw_query.as_deref()) {
+        Ok(query) => query,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": message})),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(reason) = body.reason.or(query.reason) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "reason is required"})),
+        )
+            .into_response();
+    };
+    let force = body.force.or(query.force).unwrap_or(false);
+    let if_version = body.if_version.or(query.if_version);
 
     let result = state
         .pool
@@ -2062,33 +3442,68 @@ pub async fn delete(
                     force,
                     if_version,
                     actor: "api",
-                    reason: reason.as_deref(),
+                    reason: Some(reason.as_str()),
                     actor_type: None,
                 },
             )?;
 
             match r {
                 transactions::ForgetResult::Deleted { new_version } => Ok(serde_json::json!({
+                    "id": id,
                     "status": "deleted",
+                    "currentVersion": new_version - 1,
                     "newVersion": new_version,
                 })),
-                transactions::ForgetResult::NotFound => {
-                    Ok(serde_json::json!({"status": "not_found", "_code": 404}))
-                }
+                transactions::ForgetResult::NotFound => Ok(serde_json::json!({
+                    "id": id,
+                    "status": "not_found",
+                    "error": "Not found",
+                    "_code": 404
+                })),
                 transactions::ForgetResult::AlreadyDeleted => {
-                    Ok(serde_json::json!({"status": "already_deleted"}))
+                    let current: Option<i64> = conn
+                        .query_row(
+                            "SELECT version FROM memories WHERE id = ?",
+                            params![id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    Ok(serde_json::json!({
+                        "id": id,
+                        "status": "already_deleted",
+                        "currentVersion": current,
+                        "_code": 409
+                    }))
                 }
                 transactions::ForgetResult::VersionConflict { current } => Ok(serde_json::json!({
-                    "status": "version_mismatch",
+                    "id": id,
+                    "status": "version_conflict",
                     "currentVersion": current,
+                    "error": "Version conflict",
                     "_code": 409,
                 })),
                 transactions::ForgetResult::PinnedRequiresForce => {
-                    Ok(serde_json::json!({"status": "pinned", "_code": 409}))
+                    let current: Option<i64> = conn
+                        .query_row(
+                            "SELECT version FROM memories WHERE id = ?",
+                            params![id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    Ok(serde_json::json!({
+                        "id": id,
+                        "status": "pinned_requires_force",
+                        "currentVersion": current,
+                        "error": "Pinned memories require force=true",
+                        "_code": 409
+                    }))
                 }
-                transactions::ForgetResult::AutonomousForceDenied => {
-                    Ok(serde_json::json!({"status": "autonomous_force_denied", "_code": 403}))
-                }
+                transactions::ForgetResult::AutonomousForceDenied => Ok(serde_json::json!({
+                    "id": id,
+                    "status": "autonomous_force_denied",
+                    "error": "Autonomous agents cannot force-delete pinned memories",
+                    "_code": 403
+                })),
             }
         })
         .await;

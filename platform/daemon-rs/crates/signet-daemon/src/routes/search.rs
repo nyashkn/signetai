@@ -39,6 +39,8 @@ pub struct RecallBody {
     pub importance_min: Option<f64>,
     pub since: Option<String>,
     pub until: Option<String>,
+    pub scope: Option<String>,
+    pub project: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +48,30 @@ pub struct RecallResponse {
     pub results: Vec<RecallHit>,
     pub query: String,
     pub method: String,
+    pub meta: RecallMeta,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallMeta {
+    pub total_returned: usize,
+    pub has_supplementary: bool,
+    pub no_hits: bool,
+    pub timings: RecallTimings,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallTimings {
+    pub total_ms: f64,
+    pub stages: Vec<RecallStageTiming>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallStageTiming {
+    pub name: String,
+    pub duration_ms: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,9 +89,39 @@ pub struct RecallHit {
     pub importance: f64,
     pub who: Option<String>,
     pub project: Option<String>,
+    pub visibility: Option<String>,
+    pub scope: Option<String>,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supplementary: Option<bool>,
+}
+
+fn recall_response(results: Vec<RecallHit>, query: String, method: String) -> RecallResponse {
+    let total_returned = results.len();
+    let has_supplementary = results.iter().any(|hit| hit.supplementary == Some(true));
+    RecallResponse {
+        results,
+        query,
+        method,
+        meta: RecallMeta {
+            total_returned,
+            has_supplementary,
+            no_hits: total_returned == 0,
+            timings: RecallTimings {
+                total_ms: 0.0,
+                stages: Vec::new(),
+            },
+        },
+    }
+}
+
+fn refresh_recall_meta(resp: &mut RecallResponse) {
+    resp.meta.total_returned = resp.results.len();
+    resp.meta.has_supplementary = resp
+        .results
+        .iter()
+        .any(|hit| hit.supplementary == Some(true));
+    resp.meta.no_hits = resp.results.is_empty();
 }
 
 pub async fn recall(
@@ -86,6 +142,7 @@ pub async fn recall(
     // Rate-limit LLM-enabled recall independently of plain recall.
     // Skipped in local auth mode; active in team/hybrid modes.
     {
+        let auth_runtime = state.auth_snapshot();
         let (reranker_enabled, use_extraction_model) = state
             .config
             .manifest
@@ -94,12 +151,12 @@ pub async fn recall(
             .and_then(|m| m.pipeline_v2.as_ref())
             .map(|p| (p.reranker.enabled, p.reranker.use_extraction_model))
             .unwrap_or((false, false));
-        if reranker_enabled && use_extraction_model && state.auth_mode != AuthMode::Local {
+        if reranker_enabled && use_extraction_model && auth_runtime.mode != AuthMode::Local {
             // authenticate_headers returns Err only for hard auth failures; in local
             // mode we already returned above, so unwrap_or with unauthenticated is safe.
             let auth = authenticate_headers(
-                state.auth_mode,
-                state.auth_secret.as_deref(),
+                auth_runtime.mode,
+                auth_runtime.secret.as_deref(),
                 &headers,
                 is_loopback(&peer),
             )
@@ -109,8 +166,8 @@ pub async fn recall(
             if let Err(resp) = require_rate_limit_guard(
                 &auth,
                 "recallLlm",
-                &state.recall_llm_limiter,
-                state.auth_mode,
+                &auth_runtime.recall_llm_limiter,
+                auth_runtime.mode,
                 None,
             ) {
                 return (*resp).into_response();
@@ -149,12 +206,45 @@ pub async fn recall(
     let importance_min = body.importance_min;
     let since = body.since.clone();
     let until = body.until.clone();
-    let agent_id = body.agent_id.clone();
+    let agent_id = body
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "default".to_string());
+    let scope = body
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let project = body
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let query_for_response = query.clone();
 
     let result = state
         .pool
         .read(move |conn| {
+            let read_policy: String = conn
+                .query_row(
+                    "SELECT read_policy FROM agents WHERE id = ?1",
+                    rusqlite::params![&agent_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "isolated".to_string());
+            let policy_group: Option<String> = conn
+                .query_row(
+                    "SELECT policy_group FROM agents WHERE id = ?1",
+                    rusqlite::params![&agent_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
             let filter = RecallFilter {
                 memory_type: mem_type.as_deref(),
                 tags: tags.as_deref(),
@@ -163,6 +253,11 @@ pub async fn recall(
                 importance_min,
                 since: since.as_deref(),
                 until: until.as_deref(),
+                scope: scope.as_deref(),
+                project: project.as_deref(),
+                agent_id: Some(agent_id.as_str()),
+                read_policy: Some(read_policy.as_str()),
+                policy_group: policy_group.as_deref(),
             };
 
             // FTS5 keyword search
@@ -170,7 +265,7 @@ pub async fn recall(
 
             // Vector KNN search
             let vec_hits = match &query_vec {
-                Some(v) => vec_search_scored(conn, v, top_k, mem_type.as_deref()),
+                Some(v) => vec_search_scored(conn, v, top_k, &filter),
                 None => vec![],
             };
 
@@ -179,86 +274,65 @@ pub async fn recall(
             scored.truncate(limit);
 
             if scored.is_empty() {
-                return Ok(RecallResponse {
-                    results: vec![],
-                    query: query_for_response,
-                    method: "hybrid".to_string(),
-                });
+                return Ok(recall_response(
+                    vec![],
+                    query_for_response,
+                    "hybrid".to_string(),
+                ));
             }
 
             // Fetch full rows with agent scope filtering
             let ids: Vec<&str> = scored.iter().map(|s| s.id.as_str()).collect();
-            let id_count = ids.len();
             let placeholders: String = ids
                 .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
+                .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(",");
 
-            // Build agent scope clause
-            let (agent_clause, agent_params) = if let Some(ref aid) = agent_id {
-                // Look up agent's read_policy
-                let policy: String = conn
-                    .query_row(
-                        "SELECT read_policy FROM agents WHERE id = ?1",
-                        rusqlite::params![aid],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or_else(|_| "isolated".to_string());
-
-                match policy.as_str() {
-                    "shared" => (
-                        format!(
-                            " AND (visibility = 'global' OR agent_id = ?{}) AND visibility != 'archived'",
-                            id_count + 1
-                        ),
-                        vec![aid.clone()],
-                    ),
+            let mut clauses = Vec::new();
+            let mut filter_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if let Some(scope) = &scope {
+                clauses.push("scope = ?");
+                filter_params.push(Box::new(scope.clone()));
+            } else {
+                clauses.push("scope IS NULL");
+            }
+            if let Some(project) = &project {
+                clauses.push("project = ?");
+                filter_params.push(Box::new(project.clone()));
+            }
+            {
+                let aid = &agent_id;
+                match read_policy.as_str() {
+                    "shared" => {
+                        clauses.push("(visibility = 'global' OR agent_id = ?) AND visibility != 'archived'");
+                        filter_params.push(Box::new(aid.clone()));
+                    }
                     "group" => {
-                        let group: Option<String> = conn
-                            .query_row(
-                                "SELECT policy_group FROM agents WHERE id = ?1",
-                                rusqlite::params![aid],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                            .flatten();
-                        if let Some(g) = group {
-                            (
-                                format!(
-                                    " AND ((visibility = 'global' AND agent_id IN (SELECT id FROM agents WHERE policy_group = ?{})) OR agent_id = ?{}) AND visibility != 'archived'",
-                                    id_count + 1,
-                                    id_count + 2,
-                                ),
-                                vec![g, aid.clone()],
-                            )
+                        if let Some(group) = &policy_group {
+                            clauses.push("((visibility = 'global' AND agent_id IN (SELECT id FROM agents WHERE policy_group = ?)) OR agent_id = ?) AND visibility != 'archived'");
+                            filter_params.push(Box::new(group.clone()));
+                            filter_params.push(Box::new(aid.clone()));
                         } else {
-                            // No group configured — fall back to isolated (own memories only)
-                            (
-                                format!(
-                                    " AND agent_id = ?{} AND visibility != 'archived'",
-                                    id_count + 1
-                                ),
-                                vec![aid.clone()],
-                            )
+                            clauses.push("agent_id = ? AND visibility != 'archived'");
+                            filter_params.push(Box::new(aid.clone()));
                         }
                     }
-                    _ => (
-                        format!(
-                            " AND agent_id = ?{} AND visibility != 'archived'",
-                            id_count + 1
-                        ),
-                        vec![aid.clone()],
-                    ),
+                    _ => {
+                        clauses.push("agent_id = ? AND visibility != 'archived'");
+                        filter_params.push(Box::new(aid.clone()));
+                    }
                 }
+            }
+            let filter_sql = if clauses.is_empty() {
+                String::new()
             } else {
-                (String::new(), vec![])
+                format!(" AND {}", clauses.join(" AND "))
             };
 
             let sql = format!(
-                "SELECT id, content, type, tags, pinned, importance, who, project, created_at
-                 FROM memories WHERE id IN ({placeholders}){agent_clause}"
+                "SELECT id, content, type, tags, pinned, importance, who, project, created_at, visibility, scope
+                 FROM memories WHERE id IN ({placeholders}){filter_sql}"
             );
 
             let mut stmt = conn.prepare(&sql)?;
@@ -266,9 +340,7 @@ pub async fn recall(
                 .iter()
                 .map(|s| Box::new(s.to_string()) as Box<dyn rusqlite::types::ToSql>)
                 .collect();
-            for p in &agent_params {
-                refs.push(Box::new(p.clone()));
-            }
+            refs.extend(filter_params);
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 refs.iter().map(|b| b.as_ref()).collect();
 
@@ -301,6 +373,8 @@ pub async fn recall(
                             who: row.get(6)?,
                             project: row.get(7)?,
                             created_at: row.get(8)?,
+                            visibility: row.get(9)?,
+                            scope: row.get(10)?,
                             supplementary: None,
                         },
                     ))
@@ -319,11 +393,7 @@ pub async fn recall(
                 .collect();
 
             let method = if has_vec { "hybrid" } else { "keyword" };
-            Ok(RecallResponse {
-                results,
-                query: query_for_response,
-                method: method.to_string(),
-            })
+            Ok(recall_response(results, query_for_response, method.to_string()))
         })
         .await;
 
@@ -445,6 +515,8 @@ pub async fn recall(
                                     importance: 0.9,
                                     who: None,
                                     project: None,
+                                    visibility: None,
+                                    scope: None,
                                     created_at: chrono::Utc::now().to_rfc3339(),
                                     supplementary: Some(true),
                                 },
@@ -453,6 +525,7 @@ pub async fn recall(
                     }
                 }
             }
+            refresh_recall_meta(&mut resp);
             Ok(resp)
         }
         other => other,
@@ -509,6 +582,8 @@ pub struct SearchParams {
     pub pinned: Option<String>,
     pub importance_min: Option<f64>,
     pub since: Option<String>,
+    pub scope: Option<String>,
+    pub project: Option<String>,
 }
 
 pub async fn search_get(
@@ -540,6 +615,8 @@ pub async fn search_get(
         importance_min: params.importance_min,
         since: params.since,
         until: None,
+        scope: params.scope,
+        project: params.project,
     };
 
     recall(State(state), ConnectInfo(peer), headers, Json(body))
@@ -584,6 +661,8 @@ pub async fn legacy_search(
         importance_min: None,
         since: None,
         until: None,
+        scope: None,
+        project: None,
     };
 
     recall(State(state), ConnectInfo(peer), headers, Json(body))
@@ -648,6 +727,410 @@ pub async fn embeddings_status(State(state): State<Arc<AppState>>) -> Json<serde
 
     status["tracker"] = serde_json::Value::Null;
     Json(status)
+}
+
+fn embedding_check_score(status: &str) -> f64 {
+    match status {
+        "ok" => 1.0,
+        "warn" => 0.5,
+        _ => 0.0,
+    }
+}
+
+fn embedding_score_status(score: f64) -> &'static str {
+    if score >= 0.8 {
+        "healthy"
+    } else if score >= 0.5 {
+        "degraded"
+    } else {
+        "unhealthy"
+    }
+}
+
+fn round_health_score(score: f64) -> f64 {
+    (score.clamp(0.0, 1.0) * 1000.0).round() / 1000.0
+}
+
+fn vec_runtime_detail(error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "sqlite": serde_json::Value::Null,
+        "sqliteAttempt": serde_json::Value::Null,
+        "sqliteWarning": serde_json::Value::Null,
+        "extensionPath": serde_json::Value::Null,
+        "extensionLoaded": false,
+        "extensionLoadError": serde_json::Value::Null,
+        "error": error,
+    })
+}
+
+fn missing_vec_table(error: &str) -> bool {
+    error.contains("no such table: vec_embeddings")
+        || error.contains("no such table: main.vec_embeddings")
+}
+
+pub async fn embeddings_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cfg = state.config.manifest.embedding.clone().unwrap_or_default();
+    let base_url = resolve_embedding_base_url(&cfg.provider, cfg.base_url.as_deref());
+    let provider_available = state.embedding.read().await.is_some();
+    let provider_error = if cfg.provider == "none" {
+        Some("Embedding provider set to 'none' — vector search disabled".to_string())
+    } else if provider_available {
+        None
+    } else {
+        Some("Embedding provider unavailable".to_string())
+    };
+
+    let report = state
+        .pool
+        .read({
+            let cfg = cfg.clone();
+            let base_url = base_url.clone();
+            move |conn| {
+                let provider_status = if provider_available { "ok" } else { "fail" };
+                let mut checks = vec![serde_json::json!({
+                    "name": "provider-available",
+                    "status": provider_status,
+                    "message": provider_error
+                        .clone()
+                        .unwrap_or_else(|| format!("{} ({}) is reachable", cfg.provider, cfg.model)),
+                    "detail": if provider_available {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!({
+                            "provider": cfg.provider,
+                            "base_url": base_url,
+                            "error": provider_error,
+                        })
+                    },
+                    "fix": if provider_available {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("Verify embedding provider configuration and connectivity")
+                    },
+                })];
+
+                let total: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE COALESCE(is_deleted, 0) = 0",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let embedded: i64 = if total == 0 {
+                    0
+                } else {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM memories m
+                         INNER JOIN embeddings e
+                           ON e.source_type = 'memory' AND e.source_id = m.id
+                         WHERE COALESCE(m.is_deleted, 0) = 0",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0)
+                };
+                let coverage = if total == 0 {
+                    1.0
+                } else {
+                    embedded as f64 / total as f64
+                };
+                let coverage_percent = (coverage * 1000.0).round() / 10.0;
+                let coverage_status = if coverage >= 0.95 {
+                    "ok"
+                } else if coverage >= 0.8 {
+                    "warn"
+                } else {
+                    "fail"
+                };
+                checks.push(serde_json::json!({
+                    "name": "coverage",
+                    "status": coverage_status,
+                    "message": if total == 0 {
+                        "No active memories to embed".to_string()
+                    } else if coverage_status == "ok" {
+                        format!("{coverage_percent}% of memories have embeddings")
+                    } else {
+                        format!(
+                            "{coverage_percent}% coverage — {} memories missing embeddings",
+                            total - embedded
+                        )
+                    },
+                    "detail": {
+                        "total": total,
+                        "embedded": embedded,
+                        "unembedded": total - embedded,
+                        "coverage": coverage_percent,
+                    },
+                }));
+
+                let dims = {
+                    let mut stmt = conn.prepare("SELECT DISTINCT dimensions FROM embeddings")?;
+                    stmt.query_map([], |r| r.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                let mismatched: Vec<i64> = dims
+                    .iter()
+                    .copied()
+                    .filter(|dim| *dim != cfg.dimensions as i64)
+                    .collect();
+                checks.push(if dims.is_empty() {
+                    serde_json::json!({
+                        "name": "dimension-mismatch",
+                        "status": "ok",
+                        "message": "No embeddings to check",
+                    })
+                } else if mismatched.is_empty() {
+                    serde_json::json!({
+                        "name": "dimension-mismatch",
+                        "status": "ok",
+                        "message": format!("All embeddings are {}-dimensional", cfg.dimensions),
+                    })
+                } else {
+                    serde_json::json!({
+                        "name": "dimension-mismatch",
+                        "status": "fail",
+                        "message": format!(
+                            "Found dimensions [{}] but config expects {}",
+                            dims.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                            cfg.dimensions
+                        ),
+                        "detail": {"expected": cfg.dimensions, "found": dims},
+                        "fix": "Re-embed affected memories with the correct model/dimensions",
+                    })
+                });
+
+                let models = {
+                    let mut stmt = conn.prepare(
+                        "SELECT DISTINCT embedding_model FROM memories WHERE embedding_model IS NOT NULL",
+                    )?;
+                    stmt.query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                checks.push(if models.len() <= 1 {
+                    serde_json::json!({
+                        "name": "model-drift",
+                        "status": "ok",
+                        "message": if let Some(model) = models.first() {
+                            format!("All memories use {model}")
+                        } else {
+                            "No embedding models recorded".to_string()
+                        },
+                    })
+                } else {
+                    serde_json::json!({
+                        "name": "model-drift",
+                        "status": "warn",
+                        "message": format!("Mixed embedding models: {}", models.join(", ")),
+                        "detail": {"models": models},
+                        "fix": "Re-embed older memories to unify to the current model",
+                    })
+                });
+
+                match conn.query_row(
+                    "SELECT COUNT(*) FROM embeddings e LEFT JOIN vec_embeddings v ON v.id = e.id WHERE v.id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                ) {
+                    Ok(0) => checks.push(serde_json::json!({
+                        "name": "null-vectors",
+                        "status": "ok",
+                        "message": "No null or empty vectors found",
+                    })),
+                    Ok(count) => checks.push(serde_json::json!({
+                        "name": "null-vectors",
+                        "status": "fail",
+                        "message": format!("{count} embedding(s) have null or empty vectors"),
+                        "detail": {"count": count},
+                        "fix": "Run re-embed repair to regenerate these vectors",
+                    })),
+                    Err(e) if missing_vec_table(&e.to_string()) => checks.push(serde_json::json!({
+                        "name": "null-vectors",
+                        "status": "warn",
+                        "message": "Cannot verify null vectors because vec_embeddings is unavailable",
+                        "detail": vec_runtime_detail(&e.to_string()),
+                        "fix": "Install sqlite-vec or restart daemon to initialize the vector table",
+                    })),
+                    Err(e) => checks.push(serde_json::json!({
+                        "name": "null-vectors",
+                        "status": "fail",
+                        "message": "Failed to verify vector row coverage",
+                        "detail": vec_runtime_detail(&e.to_string()),
+                        "fix": "Inspect SQLite schema integrity and repair the underlying query failure",
+                    })),
+                }
+
+                let emb_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+                    .unwrap_or(0);
+                match conn.query_row("SELECT COUNT(*) FROM vec_embeddings", [], |r| {
+                    r.get::<_, i64>(0)
+                }) {
+                    Ok(vec_count) if emb_count == vec_count => checks.push(serde_json::json!({
+                        "name": "vec-table-sync",
+                        "status": "ok",
+                        "message": format!("embeddings ({emb_count}) and vec_embeddings ({vec_count}) are in sync"),
+                    })),
+                    Ok(vec_count) => checks.push(serde_json::json!({
+                        "name": "vec-table-sync",
+                        "status": "warn",
+                        "message": format!("embeddings has {emb_count} rows but vec_embeddings has {vec_count}"),
+                        "detail": {"embeddings": emb_count, "vecEmbeddings": vec_count},
+                        "fix": "Run embedding repair to resync the vector index",
+                    })),
+                    Err(e) if missing_vec_table(&e.to_string()) => checks.push(serde_json::json!({
+                        "name": "vec-table-sync",
+                        "status": "warn",
+                        "message": "vec_embeddings table not found",
+                        "detail": vec_runtime_detail(&e.to_string()),
+                        "fix": "Install sqlite-vec or restart daemon to initialize the vector table",
+                    })),
+                    Err(e) => checks.push(serde_json::json!({
+                        "name": "vec-table-sync",
+                        "status": "fail",
+                        "message": "Failed to inspect vec_embeddings health",
+                        "detail": vec_runtime_detail(&e.to_string()),
+                        "fix": "Inspect SQLite schema integrity and repair the underlying query failure",
+                    })),
+                }
+
+                let orphaned: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM embeddings e
+                         LEFT JOIN memories m ON e.source_type = 'memory' AND e.source_id = m.id
+                         WHERE e.source_type = 'memory'
+                           AND (m.id IS NULL OR COALESCE(m.is_deleted, 0) = 1)",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                checks.push(if orphaned == 0 {
+                    serde_json::json!({
+                        "name": "orphaned-embeddings",
+                        "status": "ok",
+                        "message": "No orphaned embeddings found",
+                    })
+                } else {
+                    serde_json::json!({
+                        "name": "orphaned-embeddings",
+                        "status": "warn",
+                        "message": format!("{orphaned} embedding(s) point to deleted or missing memories"),
+                        "detail": {"count": orphaned},
+                        "fix": "Clean orphaned embeddings to reclaim space",
+                    })
+                });
+
+                let weights = [
+                    ("provider-available", 0.3),
+                    ("coverage", 0.25),
+                    ("dimension-mismatch", 0.15),
+                    ("model-drift", 0.1),
+                    ("null-vectors", 0.08),
+                    ("vec-table-sync", 0.07),
+                    ("orphaned-embeddings", 0.05),
+                ];
+                let score = weights
+                    .iter()
+                    .map(|(name, weight)| {
+                        checks
+                            .iter()
+                            .find(|check| check.get("name").and_then(|v| v.as_str()) == Some(*name))
+                            .and_then(|check| check.get("status").and_then(|v| v.as_str()))
+                            .map(|status| embedding_check_score(status) * weight)
+                            .unwrap_or(0.0)
+                    })
+                    .sum::<f64>();
+                let score = round_health_score(score);
+
+                Ok(serde_json::json!({
+                    "status": embedding_score_status(score),
+                    "score": score,
+                    "checkedAt": chrono::Utc::now().to_rfc3339(),
+                    "config": {
+                        "provider": cfg.provider,
+                        "model": cfg.model,
+                        "dimensions": cfg.dimensions,
+                    },
+                    "checks": checks,
+                }))
+            }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            serde_json::json!({
+                "status": "unhealthy",
+                "score": 0,
+                "checkedAt": chrono::Utc::now().to_rfc3339(),
+                "config": {
+                    "provider": cfg.provider,
+                    "model": cfg.model,
+                    "dimensions": cfg.dimensions,
+                },
+                "checks": [{
+                    "name": "database",
+                    "status": "fail",
+                    "message": format!("{e}"),
+                }],
+            })
+        });
+
+    Json(report)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectionQuery {
+    pub dimensions: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+fn bounded_i64(value: Option<i64>, min: i64, max: i64) -> Option<i64> {
+    value.map(|n| n.clamp(min, max))
+}
+
+pub async fn embeddings_projection(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> impl IntoResponse {
+    let dimensions = if query.dimensions.as_deref() == Some("3") {
+        3
+    } else {
+        2
+    };
+    let offset = bounded_i64(query.offset, 0, 100_000).unwrap_or(0);
+    let limit = bounded_i64(query.limit, 1, 5_000);
+
+    let result = state
+        .pool
+        .read(move |conn| {
+            let total: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM embeddings WHERE source_type = 'memory'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let effective_limit = limit.unwrap_or(total).max(0);
+            Ok(serde_json::json!({
+                "status": "ready",
+                "dimensions": dimensions,
+                "count": 0,
+                "total": total,
+                "limit": effective_limit,
+                "offset": offset,
+                "hasMore": offset + effective_limit < total,
+                "nodes": [],
+                "edges": [],
+            }))
+        })
+        .await;
+
+    match result {
+        Ok(body) => (StatusCode::OK, Json(body)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"status": "error", "message": format!("{e}")})),
+        ),
+    }
 }
 
 fn resolve_embedding_base_url(provider: &str, configured: Option<&str>) -> String {

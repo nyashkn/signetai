@@ -583,7 +583,7 @@ pub struct HooksConfig {
 pub struct UserPromptSubmitHookConfig {
     pub enabled: bool,
     pub recall_limit: usize,
-    pub max_inject_chars: usize,
+    pub max_inject_chars: Option<usize>,
     /// Minimum confidence score required to inject memories at prompt time.
     /// Clamped to [0, 1]. Default 0.8 — mirrors TS `hooks.userPromptSubmit.minScore`.
     pub min_score: f64,
@@ -594,7 +594,7 @@ impl Default for UserPromptSubmitHookConfig {
         Self {
             enabled: true,
             recall_limit: 10,
-            max_inject_chars: 500,
+            max_inject_chars: None,
             min_score: 0.8,
         }
     }
@@ -673,6 +673,21 @@ mod tests {
     fn rejects_base_path_parent_traversal() {
         assert!(validate_base_path(std::path::Path::new("../agents")).is_err());
         assert!(validate_base_path(std::path::Path::new("/tmp/agents")).is_ok());
+    }
+
+    #[test]
+    fn auth_mode_parses_without_legacy_method() {
+        let manifest = parse_manifest(
+            r#"
+auth:
+  mode: team
+"#,
+        )
+        .expect("parse manifest");
+
+        let auth = manifest.auth.expect("auth config");
+        assert_eq!(auth.method, None);
+        assert_eq!(auth.mode.as_deref(), Some("team"));
     }
 
     #[test]
@@ -975,6 +990,53 @@ memory:
             .and_then(|memory| memory.pipeline_v2)
             .expect("pipeline config");
         assert_eq!(flat_pipeline.extraction.fallback_provider, "none");
+    }
+
+    #[test]
+    fn skill_enrichment_manifest_fields_load_from_nested_config() {
+        let manifest = parse_manifest(
+            r#"
+agent:
+  name: test-agent
+  version: 1
+memory:
+  pipelineV2:
+    extractionProvider: openai-compatible
+    extractionModel: replay-llm
+    extractionEndpoint: http://127.0.0.1:43210
+    rerankerUseExtractionModel: true
+    extraction:
+      provider: openai-compatible
+      model: replay-llm
+      endpoint: http://127.0.0.1:43210
+      timeout: 5000
+    reranker:
+      enabled: true
+      useExtractionModel: true
+    procedural:
+      enabled: true
+      enrichOnInstall: true
+      enrichMinDescription: 50
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert_eq!(pipeline.extraction.provider, "openai-compatible");
+        assert_eq!(pipeline.extraction.model, "replay-llm");
+        assert_eq!(
+            pipeline.extraction.endpoint.as_deref(),
+            Some("http://127.0.0.1:43210")
+        );
+        assert_eq!(pipeline.extraction.timeout, 5000);
+        assert!(pipeline.reranker.enabled);
+        assert!(pipeline.reranker.use_extraction_model);
+        assert!(pipeline.procedural.enabled);
+        assert!(pipeline.procedural.enrich_on_install);
+        assert_eq!(pipeline.procedural.enrich_min_description, 50);
     }
 
     #[test]
@@ -1294,7 +1356,7 @@ pub struct HomeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    pub method: String,
+    pub method: Option<String>,
     #[serde(rename = "chainId")]
     pub chain_id: Option<u64>,
     pub mode: Option<String>,
@@ -1635,6 +1697,7 @@ pub struct GuardrailsConfig {
     pub max_content_chars: usize,
     pub chunk_target_chars: usize,
     pub recall_truncate_chars: usize,
+    pub context_budget_chars: usize,
 }
 
 impl Default for GuardrailsConfig {
@@ -1643,6 +1706,7 @@ impl Default for GuardrailsConfig {
             max_content_chars: 10_000,
             chunk_target_chars: 2_000,
             recall_truncate_chars: 50_000,
+            context_budget_chars: 4_000,
         }
     }
 }

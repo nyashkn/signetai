@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -21,12 +22,13 @@ use tracing::{info, warn};
 use signet_core::db::Priority;
 use signet_pipeline::memory_lineage::{
     ArtifactKind, SummaryArtifactInput, TranscriptArtifactInput, is_noise_session,
-    resolve_memory_sentence, upsert_thread_head, write_compaction_artifact,
-    write_memory_projection, write_transcript_artifact,
+    render_memory_projection, resolve_memory_sentence, upsert_thread_head,
+    write_compaction_artifact, write_memory_projection, write_transcript_artifact,
 };
 use signet_services::session::{ClaimResult, RuntimePath, SessionTracker};
 use signet_services::transactions;
 
+use crate::routes::plugins;
 use crate::state::AppState;
 use crate::workspace_paths;
 
@@ -108,6 +110,15 @@ fn normalize_agent_id(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn header_text(headers: &HeaderMap, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn build_signet_system_prompt() -> &'static str {
     "[signet active]\n\
 You have persistent memory managed by Signet.\n\
@@ -167,6 +178,247 @@ fn resolve_remember_agent(
         .or(header_agent)
         .or(bound)
         .unwrap_or_else(|| "default".to_string()))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct SynthesisRequestBody {
+    #[serde(rename = "agentId")]
+    agent_id_camel: Option<String>,
+    agent_id: Option<String>,
+    #[serde(rename = "sessionKey")]
+    session_key_camel: Option<String>,
+    session_key: Option<String>,
+}
+
+impl SynthesisRequestBody {
+    fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref().or(self.agent_id_camel.as_deref())
+    }
+
+    fn session_key(&self) -> Option<&str> {
+        self.session_key
+            .as_deref()
+            .or(self.session_key_camel.as_deref())
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct SynthesisCompleteBody {
+    content: Option<String>,
+    #[serde(rename = "agentId")]
+    agent_id_camel: Option<String>,
+    agent_id: Option<String>,
+    #[serde(rename = "sessionKey")]
+    session_key_camel: Option<String>,
+    session_key: Option<String>,
+}
+
+impl SynthesisCompleteBody {
+    fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref().or(self.agent_id_camel.as_deref())
+    }
+
+    fn session_key(&self) -> Option<&str> {
+        self.session_key
+            .as_deref()
+            .or(self.session_key_camel.as_deref())
+    }
+}
+
+fn resolve_synthesis_agent(
+    headers: &HeaderMap,
+    explicit: Option<&str>,
+    session_key: Option<&str>,
+) -> Result<String, &'static str> {
+    let header_agent = header_text(headers, "x-signet-agent-id");
+    let header_session_key = header_text(headers, "x-signet-session-key");
+    resolve_remember_agent(
+        explicit,
+        header_agent.as_deref(),
+        session_key.or(header_session_key.as_deref()),
+    )
+}
+
+fn synthesis_config_payload(state: &AppState) -> serde_json::Value {
+    state
+        .config
+        .manifest
+        .memory
+        .as_ref()
+        .and_then(|memory| memory.pipeline_v2.as_ref())
+        .and_then(|pipeline| serde_json::to_value(&pipeline.synthesis).ok())
+        .unwrap_or_else(|| {
+            serde_json::to_value(signet_core::config::SynthesisConfig::default())
+                .unwrap_or_else(|_| serde_json::json!({}))
+        })
+}
+
+pub async fn synthesis_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(synthesis_config_payload(&state))
+}
+
+pub async fn synthesis_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let running = state.synthesis_worker_handle.lock().await.is_some();
+    Json(serde_json::json!({
+        "running": running,
+        "lastRunAt": serde_json::Value::Null,
+        "config": synthesis_config_payload(&state),
+    }))
+}
+
+pub async fn synthesis_trigger(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.synthesis_worker_handle.lock().await.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Synthesis worker not running" })),
+        )
+            .into_response();
+    }
+    let root = state.config.base_path.clone();
+    match state
+        .pool
+        .write(Priority::Low, move |conn| {
+            let count: usize = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM session_summaries WHERE agent_id = ?1",
+                    ["default"],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if count == 0 {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "skipped": true,
+                    "reason": "No session summaries to synthesize"
+                }));
+            }
+            write_memory_projection(conn, &root, "default")
+                .map_err(signet_core::error::CoreError::Migration)?;
+            Ok(serde_json::json!({
+                "success": true,
+                "skipped": false
+            }))
+        })
+        .await
+    {
+        Ok(body) => Json(body).into_response(),
+        Err(error) => {
+            warn!(err = %error, "synthesis trigger failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Synthesis trigger failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn synthesis(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SynthesisRequestBody>,
+) -> impl IntoResponse {
+    let agent_id = match resolve_synthesis_agent(&headers, body.agent_id(), body.session_key()) {
+        Ok(agent_id) => agent_id,
+        Err(error) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
+    let root = state.config.base_path.clone();
+
+    match state
+        .pool
+        .write(Priority::Low, move |conn| {
+            let rendered = render_memory_projection(conn, &root, &agent_id)
+                .map_err(signet_core::error::CoreError::Migration)?;
+            Ok(serde_json::json!({
+                "harness": "daemon",
+                "model": "projection",
+                "prompt": rendered.content,
+                "fileCount": rendered.file_count,
+                "indexBlock": rendered.index_block,
+            }))
+        })
+        .await
+    {
+        Ok(body) => Json(body).into_response(),
+        Err(error) => {
+            warn!(err = %error, "synthesis request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Synthesis request failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn synthesis_complete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SynthesisCompleteBody>,
+) -> impl IntoResponse {
+    if body.content.as_deref().unwrap_or("").is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "content is required" })),
+        )
+            .into_response();
+    }
+    if let Err(error) = resolve_synthesis_agent(&headers, body.agent_id(), body.session_key()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response();
+    }
+    if state.synthesis_worker_handle.lock().await.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Synthesis worker not running" })),
+        )
+            .into_response();
+    }
+    let root = state.config.base_path.clone();
+    let Some(content) = body.content else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "content is required" })),
+        )
+            .into_response();
+    };
+    match write_memory_md_atomic(&root, &content) {
+        Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(error) => {
+            warn!(err = %error, "synthesis complete failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Failed to save MEMORY.md" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn write_memory_md_atomic(root: &Path, content: &str) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|err| err.to_string())?;
+    let path = root.join("MEMORY.md");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
+    let tmp = root.join(format!(".MEMORY.md.{nanos}.tmp"));
+    fs::write(&tmp, content).map_err(|err| err.to_string())?;
+    fs::rename(&tmp, &path).map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        err.to_string()
+    })
 }
 
 fn parse_visibility(value: Option<&str>) -> Result<String, &'static str> {
@@ -1195,13 +1447,60 @@ fn memory_embedding_score(
         .fold(0.0, f64::max)
 }
 
-fn build_entity_context_inject(metadata_header: &str, lines: &[String]) -> String {
+fn build_plugin_prompt_contribution_section(state: &AppState) -> String {
+    let contributions = plugins::active_prompt_contributions(state);
+    if contributions.is_empty() {
+        return String::new();
+    }
+
+    let mut parts = vec!["## Plugin Context".to_string(), String::new()];
+    for contribution in contributions {
+        let plugin_id = contribution
+            .get("pluginId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let id = contribution
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let target = contribution
+            .get("target")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let content = contribution
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim();
+        if plugin_id.is_empty() || id.is_empty() || target.is_empty() || content.is_empty() {
+            continue;
+        }
+        parts.push(format!(
+            "<signet-plugin-context plugin=\"{plugin_id}\" id=\"{id}\" target=\"{target}\">"
+        ));
+        parts.push(content.to_string());
+        parts.push("</signet-plugin-context>".to_string());
+        parts.push(String::new());
+    }
+
+    parts.join("\n").trim_end().to_string()
+}
+
+fn build_entity_context_inject(
+    metadata_header: &str,
+    lines: &[String],
+    plugin_context: &str,
+) -> String {
     let mut parts = vec![
         metadata_header.trim_end().to_string(),
         String::new(),
         "## Relevant Entity Context".to_string(),
         String::new(),
     ];
+    if !plugin_context.trim().is_empty() {
+        parts.push(plugin_context.trim_end().to_string());
+        parts.push(String::new());
+    }
     parts.extend_from_slice(lines);
     format!("{}\n", parts.join("\n").trim_end())
 }
@@ -1365,6 +1664,25 @@ pub async fn prompt_submit(
         }
     }
 
+    if state
+        .config
+        .manifest
+        .hooks
+        .as_ref()
+        .is_some_and(|hooks| !hooks.user_prompt_submit.enabled)
+    {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "inject": "",
+                "memoryCount": 0,
+                "queryTerms": query_terms,
+                "engine": "disabled",
+            })),
+        )
+            .into_response();
+    }
+
     if query_terms.is_empty() || is_low_signal_prompt(&cleaned) {
         return (
             StatusCode::OK,
@@ -1388,13 +1706,26 @@ pub async fn prompt_submit(
         .filter(|score| score.is_finite())
         .map(|score| score.clamp(0.0, 1.0))
         .unwrap_or(0.8);
+    let context_budget_chars = state
+        .config
+        .manifest
+        .memory
+        .as_ref()
+        .and_then(|memory| memory.pipeline_v2.as_ref())
+        .map(|pipeline| pipeline.guardrails.context_budget_chars)
+        .unwrap_or(4_000);
     let max_inject_chars = state
         .config
         .manifest
         .hooks
         .as_ref()
-        .map(|h| h.user_prompt_submit.max_inject_chars)
+        .map(|h| {
+            h.user_prompt_submit
+                .max_inject_chars
+                .unwrap_or(context_budget_chars)
+        })
         .unwrap_or(500);
+    let plugin_context = build_plugin_prompt_contribution_section(&state);
     let semantic_query = query_terms.clone();
     let embedding_provider = state.embedding.read().await.clone();
     let query_vector_for_scoring = match embedding_provider {
@@ -1807,7 +2138,7 @@ pub async fn prompt_submit(
                 }));
             }
 
-			let inject = build_entity_context_inject(&metadata_header, &lines);
+			let inject = build_entity_context_inject(&metadata_header, &lines, &plugin_context);
 			Ok(serde_json::json!({
 				"inject": cap_prompt_inject(&inject, max_inject_chars),
 				"memoryCount": lines.len(),
@@ -3373,7 +3704,7 @@ mod tests {
 
     use crate::auth::rate_limiter::{AuthRateLimiter, default_limits};
     use crate::auth::types::AuthMode;
-    use crate::state::AppState;
+    use crate::state::{AppState, AuthRuntimeState};
 
     use super::{
         CHECKPOINT_MIN_DELTA, CheckpointExtractBody, CompactionCompleteBody, PromptSubmitBody,
@@ -3460,16 +3791,20 @@ mod tests {
             None,
             None,
             None,
-            AuthMode::Local,
-            None,
-            AuthRateLimiter::from_rules(&default_limits()),
-            AuthRateLimiter::from_rules(&default_limits()),
+            AuthRuntimeState {
+                mode: AuthMode::Local,
+                secret: None,
+                admin_limiter: AuthRateLimiter::from_rules(&default_limits()),
+                recall_llm_limiter: AuthRateLimiter::from_rules(&default_limits()),
+            },
         ));
         (state, writer, tmp)
     }
 
     fn test_state(name: &str) -> (Arc<AppState>, tokio::task::JoinHandle<()>, TempDir) {
-        test_state_with_manifest(name, |_| {})
+        test_state_with_manifest(name, |manifest| {
+            manifest.hooks = Some(HooksConfig::default());
+        })
     }
 
     #[tokio::test]
@@ -5045,7 +5380,7 @@ mod tests {
             test_state_with_manifest("hooks-prompt-submit-max-inject-chars", |manifest| {
                 manifest.hooks = Some(HooksConfig {
                     user_prompt_submit: UserPromptSubmitHookConfig {
-                        max_inject_chars: 180,
+                        max_inject_chars: Some(180),
                         ..Default::default()
                     },
                 });

@@ -352,12 +352,16 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value>
 
 /// GET /api/plugins/prompt-contributions
 pub async fn prompt_contributions(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let contributions = if read_enabled(&state) {
+    let contributions = active_prompt_contributions(&state);
+    Json(serde_json::json!({"activeCount": contributions.len(), "contributions": contributions}))
+}
+
+pub(crate) fn active_prompt_contributions(state: &AppState) -> Vec<serde_json::Value> {
+    if read_enabled(state) {
         vec![prompt_contribution()]
     } else {
         Vec::new()
-    };
-    Json(serde_json::json!({"activeCount": contributions.len(), "contributions": contributions}))
+    }
 }
 
 /// GET /api/plugins/audit
@@ -503,14 +507,15 @@ fn require_admin_mutation(
     headers: &HeaderMap,
 ) -> Result<(), Response> {
     let is_local = peer.ip().is_loopback();
+    let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
-        state.auth_mode,
-        state.auth_secret.as_deref(),
+        auth_runtime.mode,
+        auth_runtime.secret.as_deref(),
         headers,
         is_local,
     )
     .map_err(|resp| *resp)?;
-    require_permission_guard(&auth, Permission::Admin, state.auth_mode, is_local)
+    require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)
         .map_err(|resp| *resp)
 }
 
@@ -520,13 +525,14 @@ fn require_audit_read(
     headers: &HeaderMap,
 ) -> Result<(), Response> {
     let is_local = peer.ip().is_loopback();
+    let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
-        state.auth_mode,
-        state.auth_secret.as_deref(),
+        auth_runtime.mode,
+        auth_runtime.secret.as_deref(),
         headers,
         is_local,
     )
     .map_err(|resp| *resp)?;
-    require_permission_guard(&auth, Permission::Analytics, state.auth_mode, is_local)
+    require_permission_guard(&auth, Permission::Analytics, auth_runtime.mode, is_local)
         .map_err(|resp| *resp)
 }

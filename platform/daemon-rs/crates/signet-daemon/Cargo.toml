@@ -14,6 +14,7 @@ signet-services = { workspace = true }
 signet-pipeline = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 tower = { workspace = true }
 tower-http = { workspace = true }
 rusqlite = { workspace = true }
@@ -33,6 +34,8 @@ getrandom = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 libc = "0.2"
+notify = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

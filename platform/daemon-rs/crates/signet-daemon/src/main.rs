@@ -1,18 +1,19 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
-use axum::{Router, extract::State, response::Json, routing::get};
+use axum::{Router, extract::State, middleware, response::Json, routing::get};
 use chrono::{SecondsFormat, Utc};
 use signet_core::config::{DaemonConfig, network_mode_from_bind};
+use signet_core::constants::DEFAULT_EMBEDDING_DIMENSIONS;
 use signet_core::db::DbPool;
 use tokio::signal;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
+mod analytics;
 #[allow(dead_code)] // Auth module built but not wired into routes until later phases
 mod auth;
 mod feedback;
@@ -21,47 +22,10 @@ mod reranker;
 mod routes;
 mod service;
 mod state;
+mod watcher;
 mod workspace_paths;
 
-use auth::rate_limiter::{AuthRateLimiter, RateLimitRule, default_limits};
-use auth::tokens::load_or_create_secret;
-use auth::types::AuthMode;
-use state::{AppState, ExtractionRuntimeState, derive_initial_extraction_state};
-
-fn read_auth_mode(config: &DaemonConfig) -> AuthMode {
-    config
-        .manifest
-        .auth
-        .as_ref()
-        .and_then(|auth| auth.mode.as_deref())
-        .map(AuthMode::from_str_lossy)
-        .unwrap_or_default()
-}
-
-fn merge_rate_limits(config: &DaemonConfig) -> HashMap<String, RateLimitRule> {
-    let mut rules = default_limits();
-
-    let Some(auth) = config.manifest.auth.as_ref() else {
-        return rules;
-    };
-    let Some(raw) = auth.rate_limits.as_ref() else {
-        return rules;
-    };
-
-    for (name, cfg) in raw {
-        let Some(rule) = rules.get_mut(name) else {
-            continue;
-        };
-        if let Some(window_ms) = cfg.window_ms.filter(|n| *n > 0) {
-            rule.window_ms = window_ms;
-        }
-        if let Some(max) = cfg.max.filter(|n| *n > 0) {
-            rule.max = max;
-        }
-    }
-
-    rules
-}
+use state::{AppState, AuthRuntimeState, ExtractionRuntimeState, derive_initial_extraction_state};
 
 fn dashboard_dir() -> Option<PathBuf> {
     let candidates = [
@@ -124,7 +88,9 @@ async fn main() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--check-migrations") {
         let start = Instant::now();
         std::fs::create_dir_all(config.memory_dir())?;
-        let (_pool, _handle) = DbPool::open(&config.db_path).context("failed to open database")?;
+        let (_pool, _handle) =
+            DbPool::open_with_embedding_dimensions(&config.db_path, embedding_dimensions(&config))
+                .context("failed to open database")?;
         let elapsed = start.elapsed();
         info!(
             elapsed_ms = elapsed.as_millis(),
@@ -148,7 +114,9 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(config.logs_dir())?;
 
     // Open database (runs migrations, starts writer task)
-    let (pool, writer_handle) = DbPool::open(&config.db_path).context("failed to open database")?;
+    let (pool, writer_handle) =
+        DbPool::open_with_embedding_dimensions(&config.db_path, embedding_dimensions(&config))
+            .context("failed to open database")?;
 
     // Initialize embedding and LLM providers
     let pipeline_paused = config
@@ -177,7 +145,10 @@ async fn main() -> anyhow::Result<()> {
         .memory
         .as_ref()
         .and_then(|m| m.pipeline_v2.as_ref())
-        .filter(|p| p.reranker.enabled && p.reranker.use_extraction_model)
+        .filter(|p| {
+            (p.reranker.enabled && p.reranker.use_extraction_model)
+                || (p.procedural.enabled && p.procedural.enrich_on_install)
+        })
         .map(|p| {
             let provider = p.extraction.provider.clone();
             let endpoint = p.extraction.endpoint.clone();
@@ -194,19 +165,10 @@ async fn main() -> anyhow::Result<()> {
             })
         });
 
-    let auth_mode = read_auth_mode(&config);
-    let auth_secret = if auth_mode == AuthMode::Local {
+    let auth = AuthRuntimeState::from_config(&config).context("failed to load auth runtime")?;
+    if auth.mode == auth::types::AuthMode::Local {
         info!("auth mode local, admin routes unrestricted on loopback runtime");
-        None
-    } else {
-        let path = config.base_path.join(".daemon").join("auth-secret");
-        Some(load_or_create_secret(&path).context("failed to load auth secret")?)
-    };
-    let merged = merge_rate_limits(&config);
-    let auth_admin_limiter = AuthRateLimiter::from_rules(&merged);
-    // Independent limiter for LLM-enabled recall — separate from admin so
-    // the two buckets don't share state and operators can tune them independently.
-    let recall_llm_limiter = AuthRateLimiter::from_rules(&merged);
+    }
 
     let extraction_worker_stats: Option<signet_pipeline::worker::SharedWorkerRuntimeStats> = None;
 
@@ -217,10 +179,7 @@ async fn main() -> anyhow::Result<()> {
         embedding,
         llm_startup,
         extraction_worker_stats,
-        auth_mode,
-        auth_secret,
-        auth_admin_limiter,
-        recall_llm_limiter,
+        auth,
     ));
 
     // Run extraction preflight synchronously before serving requests.
@@ -230,22 +189,39 @@ async fn main() -> anyhow::Result<()> {
 
     // Start pipeline workers and wire their live runtime state into AppState.
     let _ = start_extraction_worker_inner(state.as_ref(), true).await;
+    let _ = start_document_worker(state.as_ref()).await;
     let _ = start_summary_worker(state.as_ref()).await;
     let _ = start_synthesis_worker(state.as_ref()).await;
+
+    match watcher::sync_harness_configs(&config.base_path).await {
+        Ok(summary) => info!(?summary, "initial workspace sync completed"),
+        Err(err) => warn!(error = %err, "initial workspace sync failed"),
+    }
+    let file_watcher =
+        watcher::start_file_watcher(state.clone()).context("failed to start file watcher")?;
+    info!("file watcher started");
 
     // Build router
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/status", get(status))
         .route("/api/auth/whoami", get(routes::auth::whoami))
+        .route("/api/auth/token", axum::routing::post(routes::auth::token))
         // Memory read routes
         .route("/api/memories", get(routes::memory::list))
         .route("/api/memories/most-used", get(routes::memory::most_used))
         .route(
             "/api/memory/{id}",
-            get(routes::memory::get).delete(routes::write::delete),
+            get(routes::memory::get)
+                .patch(routes::write::patch)
+                .delete(routes::write::delete),
         )
         .route("/api/memory/{id}/history", get(routes::memory::history))
+        .route(
+            "/api/memory/review-queue",
+            get(routes::memory::review_queue),
+        )
+        .route("/api/memory/jobs/{id}", get(routes::memory::job))
         // Search routes
         .route(
             "/api/memory/recall",
@@ -253,15 +229,28 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/memory/search", get(routes::search::search_get))
         .route("/memory/search", get(routes::search::legacy_search))
+        .route("/memory/similar", get(routes::memory::similar))
         .route("/api/embeddings", get(routes::search::embeddings_stats))
         .route(
             "/api/embeddings/status",
             get(routes::search::embeddings_status),
         )
+        .route(
+            "/api/embeddings/health",
+            get(routes::search::embeddings_health),
+        )
+        .route(
+            "/api/embeddings/projection",
+            get(routes::search::embeddings_projection),
+        )
         // Write routes
         .route(
             "/api/memory/remember",
             axum::routing::post(routes::write::remember),
+        )
+        .route(
+            "/api/memory/codex-native-note",
+            axum::routing::post(routes::write::codex_native_note),
         )
         .route(
             "/api/memory/save",
@@ -292,12 +281,58 @@ async fn main() -> anyhow::Result<()> {
             "/api/config",
             get(routes::config::get_config).post(routes::config::save_config),
         )
+        .route(
+            "/api/config/provider-safety",
+            get(routes::config::provider_safety),
+        )
+        .route(
+            "/api/config/provider-safety/rollback",
+            axum::routing::post(routes::config::provider_safety_rollback),
+        )
+        .route("/api/reflections/today", get(routes::reflections::today))
+        .route("/api/reflections", get(routes::reflections::list))
+        .route(
+            "/api/reflections/generate",
+            axum::routing::post(routes::reflections::generate),
+        )
+        .route(
+            "/api/reflections/{id}/answer",
+            axum::routing::post(routes::reflections::answer),
+        )
         .route("/api/harnesses", get(routes::harnesses::list))
+        .route(
+            "/api/harnesses/regenerate",
+            axum::routing::post(routes::harnesses::regenerate),
+        )
         // Source configuration routes
         .route("/api/sources", get(routes::sources::list))
         .route(
             "/api/sources/obsidian",
             axum::routing::post(routes::sources::add_obsidian),
+        )
+        .route(
+            "/api/sources/pick-directory",
+            axum::routing::post(routes::sources::pick_directory),
+        )
+        .route(
+            "/api/sources/discord",
+            axum::routing::post(routes::sources::add_discord),
+        )
+        .route(
+            "/api/sources/github",
+            axum::routing::post(routes::sources::add_github),
+        )
+        .route(
+            "/api/sources/{source_id}/snapshot",
+            get(routes::sources::snapshot),
+        )
+        .route(
+            "/api/sources/{source_id}/health",
+            get(routes::sources::health),
+        )
+        .route(
+            "/api/sources/{source_id}/snapshot/import",
+            axum::routing::post(routes::sources::import_snapshot),
         )
         .route(
             "/api/sources/{id}",
@@ -338,6 +373,26 @@ async fn main() -> anyhow::Result<()> {
             "/api/hooks/session-checkpoint-extract",
             axum::routing::post(routes::hooks::session_checkpoint_extract),
         )
+        .route(
+            "/api/hooks/synthesis",
+            axum::routing::post(routes::hooks::synthesis),
+        )
+        .route(
+            "/api/hooks/synthesis/complete",
+            axum::routing::post(routes::hooks::synthesis_complete),
+        )
+        .route(
+            "/api/hooks/synthesis/config",
+            get(routes::hooks::synthesis_config),
+        )
+        .route(
+            "/api/synthesis/status",
+            get(routes::hooks::synthesis_status),
+        )
+        .route(
+            "/api/synthesis/trigger",
+            axum::routing::post(routes::hooks::synthesis_trigger),
+        )
         // Inference routes
         .route("/api/inference/status", get(routes::inference::status))
         .route("/api/inference/history", get(routes::inference::history))
@@ -373,7 +428,15 @@ async fn main() -> anyhow::Result<()> {
         )
         // Session routes
         .route("/api/sessions", get(routes::sessions::list))
+        .route(
+            "/api/sessions/search",
+            axum::routing::post(routes::sessions::search),
+        )
         .route("/api/sessions/summaries", get(routes::sessions::summaries))
+        .route(
+            "/api/sessions/summaries/expand",
+            axum::routing::post(routes::sessions::summary_expand),
+        )
         .route(
             "/api/sessions/checkpoints",
             get(routes::sessions::checkpoints),
@@ -384,8 +447,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/sessions/{key}", get(routes::sessions::get))
         .route(
+            "/api/sessions/{key}/transcript",
+            get(routes::sessions::transcript),
+        )
+        .route(
             "/api/sessions/{key}/bypass",
             axum::routing::post(routes::sessions::bypass),
+        )
+        .route(
+            "/api/sessions/{key}/renew",
+            axum::routing::post(routes::sessions::renew),
         )
         // Knowledge graph routes
         .route(
@@ -393,8 +464,49 @@ async fn main() -> anyhow::Result<()> {
             get(routes::knowledge::list_entities),
         )
         .route(
+            "/api/knowledge/navigation/entities",
+            get(routes::knowledge::navigation_entities),
+        )
+        .route(
+            "/api/knowledge/navigation/entity",
+            get(routes::knowledge::navigation_entity),
+        )
+        .route(
+            "/api/knowledge/navigation/tree",
+            get(routes::knowledge::navigation_tree),
+        )
+        .route(
+            "/api/knowledge/navigation/aspects",
+            get(routes::knowledge::navigation_aspects),
+        )
+        .route(
+            "/api/knowledge/navigation/groups",
+            get(routes::knowledge::navigation_groups),
+        )
+        .route(
+            "/api/knowledge/navigation/claims",
+            get(routes::knowledge::navigation_claims),
+        )
+        .route(
+            "/api/knowledge/navigation/attributes",
+            get(routes::knowledge::navigation_attributes),
+        )
+        .route(
             "/api/knowledge/entities/pinned",
             get(routes::knowledge::list_pinned),
+        )
+        .route(
+            "/api/knowledge/entities/health",
+            get(routes::knowledge::entity_health),
+        )
+        .route("/api/knowledge/hygiene", get(routes::knowledge::hygiene))
+        .route(
+            "/api/knowledge/communities",
+            get(routes::knowledge::communities),
+        )
+        .route(
+            "/api/knowledge/traversal/status",
+            get(routes::knowledge::traversal_status),
         )
         .route(
             "/api/knowledge/entities/{id}",
@@ -430,6 +542,27 @@ async fn main() -> anyhow::Result<()> {
             "/api/knowledge/expand/session",
             axum::routing::post(routes::knowledge::expand_session),
         )
+        .route(
+            "/api/graph/impact",
+            axum::routing::post(routes::knowledge::graph_impact),
+        )
+        .route("/api/graphiq/status", get(routes::graphiq::status))
+        .route(
+            "/api/graphiq/install",
+            axum::routing::post(routes::graphiq::install),
+        )
+        .route(
+            "/api/graphiq/update",
+            axum::routing::post(routes::graphiq::update),
+        )
+        .route(
+            "/api/graphiq/uninstall",
+            axum::routing::post(routes::graphiq::uninstall),
+        )
+        .route(
+            "/api/graphiq/index",
+            axum::routing::post(routes::graphiq::index),
+        )
         // Ontology native routes
         .route(
             "/api/ontology/proposals",
@@ -446,6 +579,54 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/ontology/proposals/repair/duplicates",
             axum::routing::post(routes::ontology::repair_duplicates),
+        )
+        .route(
+            "/api/ontology/proposals/repair/merge-plan",
+            axum::routing::post(routes::ontology::repair_merge_plan),
+        )
+        .route(
+            "/api/ontology/entities/{id}/aliases",
+            get(routes::ontology::entity_aliases).post(routes::ontology::entity_alias_create),
+        )
+        .route(
+            "/api/ontology/entities/{id}/aliases/{alias_id}",
+            axum::routing::delete(routes::ontology::entity_alias_delete),
+        )
+        .route(
+            "/api/ontology/claims/versions",
+            get(routes::ontology::claim_versions),
+        )
+        .route(
+            "/api/ontology/claims/version",
+            get(routes::ontology::claim_version),
+        )
+        .route(
+            "/api/ontology/assertions",
+            get(routes::ontology::assertions_list).post(routes::ontology::assertions_create),
+        )
+        .route(
+            "/api/ontology/assertions/{id}",
+            get(routes::ontology::assertion_get),
+        )
+        .route(
+            "/api/ontology/assertions/{id}/archive",
+            axum::routing::post(routes::ontology::assertion_archive),
+        )
+        .route(
+            "/api/ontology/assertions/{id}/link-claim",
+            axum::routing::post(routes::ontology::assertion_link_claim),
+        )
+        .route(
+            "/api/ontology/assertions/{id}/supersede",
+            axum::routing::post(routes::ontology::assertion_supersede),
+        )
+        .route(
+            "/api/ontology/operations/apply",
+            axum::routing::post(routes::ontology::operations_apply),
+        )
+        .route(
+            "/api/ontology/operations/batch",
+            axum::routing::post(routes::ontology::operations_batch),
         )
         .route(
             "/api/ontology/proposals/{id}/evidence",
@@ -485,6 +666,19 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/pipeline/resume",
             axum::routing::post(routes::pipeline::resume),
+        )
+        .route(
+            "/api/pipeline/nudge",
+            axum::routing::post(routes::pipeline::nudge),
+        )
+        .route("/api/dream/status", get(routes::dream::status))
+        .route(
+            "/api/dream/trigger",
+            axum::routing::post(routes::dream::trigger),
+        )
+        .route(
+            "/api/dream/promote",
+            axum::routing::post(routes::dream::promote),
         )
         .route("/api/pipeline/models", get(routes::pipeline::models))
         .route(
@@ -557,6 +751,38 @@ async fn main() -> anyhow::Result<()> {
             "/api/repair/structural-backfill",
             axum::routing::post(routes::repair::structural_backfill),
         )
+        .route(
+            "/api/repair/prune-generic-entities",
+            axum::routing::post(routes::repair::prune_generic_entities),
+        )
+        .route(
+            "/api/repair/cluster-entities",
+            axum::routing::post(routes::repair::cluster_entities),
+        )
+        .route(
+            "/api/repair/relink-entities",
+            axum::routing::post(routes::repair::relink_entities),
+        )
+        .route(
+            "/api/repair/backfill-hints",
+            axum::routing::post(routes::repair::backfill_hints),
+        )
+        .route(
+            "/api/repair/dead-memories",
+            get(routes::repair::dead_memories),
+        )
+        .route(
+            "/api/repair/dead-memories/forget",
+            axum::routing::post(routes::repair::forget_dead_memories),
+        )
+        .route(
+            "/api/troubleshoot/commands",
+            get(routes::repair::troubleshoot_commands),
+        )
+        .route(
+            "/api/troubleshoot/exec",
+            axum::routing::post(routes::repair::troubleshoot_exec),
+        )
         .route("/api/repair/cold-stats", get(routes::repair::cold_stats))
         // MCP endpoint
         .route("/mcp", axum::routing::post(mcp::transport::handle))
@@ -580,6 +806,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/marketplace/mcp/call",
             axum::routing::post(routes::marketplace::call_tool),
+        )
+        .route(
+            "/api/marketplace/mcp/read-resource",
+            axum::routing::post(routes::marketplace::read_resource),
         )
         .route(
             "/api/marketplace/mcp/register",
@@ -611,10 +841,54 @@ async fn main() -> anyhow::Result<()> {
                 .patch(routes::marketplace_reviews::patch_config),
         )
         .route(
+            "/api/marketplace/reviews/sync",
+            axum::routing::post(routes::marketplace_reviews::sync_reviews),
+        )
+        .route(
+            "/api/marketplace/reviews/{id}",
+            axum::routing::patch(routes::marketplace_reviews::patch_review)
+                .delete(routes::marketplace_reviews::delete_review),
+        )
+        .route(
             "/api/marketplace/mcp/{id}",
             get(routes::marketplace::get_server)
                 .patch(routes::marketplace::update_server)
                 .delete(routes::marketplace::delete_server),
+        )
+        // OS/dashboard integration routes
+        .route("/api/os/events", get(routes::os::events))
+        .route("/api/os/events/stream", get(routes::os::events_stream))
+        .route("/api/os/context", get(routes::os::context))
+        .route("/api/os/events/stats", get(routes::os::event_stats))
+        .route("/api/os/agent-sessions", get(routes::os::agent_sessions))
+        .route("/api/os/agent-events", get(routes::os::agent_events))
+        .route(
+            "/api/os/agent-execute",
+            axum::routing::post(routes::os::agent_execute),
+        )
+        .route(
+            "/api/os/agent-state",
+            axum::routing::post(routes::os::agent_state),
+        )
+        .route("/api/os/chat", axum::routing::post(routes::os::chat))
+        .route("/api/os/tray", get(routes::os::tray))
+        .route(
+            "/api/os/tray/{id}",
+            get(routes::os::tray_get).patch(routes::os::tray_patch),
+        )
+        .route("/api/os/tray/{id}/probe", get(routes::os::tray_probe))
+        .route(
+            "/api/os/tray/{id}/reprobe",
+            axum::routing::post(routes::os::tray_reprobe),
+        )
+        .route("/api/os/install", axum::routing::post(routes::os::install))
+        .route(
+            "/api/os/widget/generate",
+            axum::routing::post(routes::os::widget_generate),
+        )
+        .route(
+            "/api/os/widget/{id}",
+            get(routes::os::widget_get).delete(routes::os::widget_delete),
         )
         // Secrets routes
         .route("/api/secrets", get(routes::secrets::list))
@@ -623,8 +897,50 @@ async fn main() -> anyhow::Result<()> {
             get(routes::secrets::onepassword_status),
         )
         .route(
+            "/api/secrets/bitwarden/status",
+            get(routes::secrets::bitwarden_status),
+        )
+        .route(
+            "/api/secrets/bitwarden/connect",
+            axum::routing::post(routes::secrets::bitwarden_connect)
+                .delete(routes::secrets::bitwarden_disconnect),
+        )
+        .route(
+            "/api/secrets/bitwarden/provider",
+            axum::routing::post(routes::secrets::bitwarden_provider),
+        )
+        .route(
+            "/api/secrets/bitwarden/folders",
+            get(routes::secrets::bitwarden_folders),
+        )
+        .route(
+            "/api/secrets/bitwarden/migrate",
+            axum::routing::post(routes::secrets::bitwarden_migrate),
+        )
+        .route(
+            "/api/secrets/1password/connect",
+            axum::routing::post(routes::secrets::onepassword_connect)
+                .delete(routes::secrets::onepassword_disconnect),
+        )
+        .route(
+            "/api/secrets/1password/vaults",
+            get(routes::secrets::onepassword_vaults),
+        )
+        .route(
+            "/api/secrets/1password/import",
+            axum::routing::post(routes::secrets::onepassword_import),
+        )
+        .route(
             "/api/secrets/exec",
             axum::routing::post(routes::secrets::run_with_secrets),
+        )
+        .route(
+            "/api/secrets/exec/{job_id}",
+            get(routes::secrets::exec_status),
+        )
+        .route(
+            "/api/secrets/{name}/exec",
+            axum::routing::post(routes::secrets::run_named_secret),
         )
         .route(
             "/api/secrets/{name}",
@@ -646,6 +962,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(routes::scheduler::trigger),
         )
         .route("/api/tasks/{id}/runs", get(routes::scheduler::runs))
+        .route("/api/tasks/{id}/stream", get(routes::scheduler::stream))
         .route(
             "/api/skills/analytics",
             get(routes::skill_analytics::summary),
@@ -699,18 +1016,31 @@ async fn main() -> anyhow::Result<()> {
             "/api/cross-agent/messages",
             get(routes::crossagent::list_messages).post(routes::crossagent::send_message),
         )
+        .route("/api/cross-agent/stream", get(routes::crossagent::stream))
         // Connector routes
         .route(
             "/api/connectors",
             get(routes::connectors::list).post(routes::connectors::create),
         )
         .route(
+            "/api/connectors/resync",
+            axum::routing::post(routes::connectors::resync),
+        )
+        .route(
             "/api/connectors/{id}",
             get(routes::connectors::get).delete(routes::connectors::delete),
         )
         .route(
+            "/api/connectors/{id}/health",
+            get(routes::connectors::health),
+        )
+        .route(
             "/api/connectors/{id}/sync",
             axum::routing::post(routes::connectors::sync),
+        )
+        .route(
+            "/api/connectors/{id}/sync/full",
+            axum::routing::post(routes::connectors::sync_full),
         )
         // Document routes
         .route(
@@ -725,6 +1055,18 @@ async fn main() -> anyhow::Result<()> {
         // Diagnostics routes
         .route("/api/diagnostics", get(routes::diagnostics::report))
         .route(
+            "/api/home/greeting",
+            get(routes::diagnostics::home_greeting),
+        )
+        .route(
+            "/api/diagnostics/openclaw",
+            get(routes::diagnostics::openclaw_health),
+        )
+        .route(
+            "/api/diagnostics/openclaw/heartbeat",
+            axum::routing::post(routes::diagnostics::openclaw_heartbeat),
+        )
+        .route(
             "/api/telemetry/memory-search",
             get(routes::telemetry::memory_search),
         )
@@ -732,13 +1074,66 @@ async fn main() -> anyhow::Result<()> {
             "/api/telemetry/memory-search/export",
             get(routes::telemetry::memory_search_export),
         )
+        .route("/api/telemetry/events", get(routes::telemetry::events))
+        .route("/api/telemetry/stats", get(routes::telemetry::stats))
+        .route("/api/telemetry/export", get(routes::telemetry::export))
+        .route("/api/analytics/usage", get(routes::telemetry::usage))
+        .route("/api/analytics/errors", get(routes::telemetry::errors))
+        .route("/api/analytics/latency", get(routes::telemetry::latency))
+        .route("/api/analytics/logs", get(routes::telemetry::logs))
+        .route("/api/mcp/analytics", get(routes::telemetry::mcp_analytics))
+        .route(
+            "/api/mcp/analytics/{server}",
+            get(routes::telemetry::mcp_server_analytics),
+        )
+        .route(
+            "/api/analytics/memory-safety",
+            get(routes::telemetry::memory_safety),
+        )
+        .route(
+            "/api/analytics/continuity",
+            get(routes::telemetry::continuity),
+        )
+        .route(
+            "/api/analytics/continuity/latest",
+            get(routes::telemetry::continuity_latest),
+        )
+        .route(
+            "/api/checkpoints",
+            get(routes::telemetry::checkpoints_by_project),
+        )
+        .route(
+            "/api/checkpoints/{session_key}",
+            get(routes::telemetry::checkpoints_by_session),
+        )
         .route(
             "/api/diagnostics/{domain}",
             get(routes::diagnostics::domain),
         )
+        .route(
+            "/api/diagnostics/database/schema",
+            get(routes::diagnostics::database_schema),
+        )
+        .route(
+            "/api/diagnostics/database/tables/{table}/sample",
+            get(routes::diagnostics::database_table_sample),
+        )
         .route("/api/logs", get(routes::diagnostics::logs))
+        .route("/api/logs/stream", get(routes::diagnostics::logs_stream))
         .route("/api/version", get(routes::diagnostics::version))
-        .route("/api/update", get(routes::diagnostics::update_status));
+        .route("/api/update", get(routes::diagnostics::update_status))
+        .route("/api/update/check", get(routes::diagnostics::update_check))
+        .route(
+            "/api/update/config",
+            get(routes::diagnostics::update_config).post(routes::diagnostics::update_config_save),
+        )
+        .route(
+            "/api/update/run",
+            axum::routing::post(routes::diagnostics::update_run),
+        )
+        .route("/api/changelog", get(routes::changelog::changelog))
+        .route("/api/roadmap", get(routes::changelog::roadmap))
+        .route("/api/readme", get(routes::changelog::readme));
 
     let app = if let Some(dashboard_dir) = dashboard_dir() {
         info!(path = %dashboard_dir.display(), "serving dashboard assets");
@@ -747,10 +1142,14 @@ async fn main() -> anyhow::Result<()> {
                 .fallback(ServeFile::new(dashboard_dir.join("index.html"))),
         )
     } else {
-        warn!("dashboard assets not found; root dashboard route disabled");
-        app
+        warn!("dashboard assets not found; serving root fallback");
+        app.route("/", get(routes::diagnostics::dashboard_unavailable))
     }
     .with_state(state.clone());
+    let app = app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        analytics::analytics_middleware,
+    ));
 
     // Bind — use string form so "localhost" resolves via DNS
     let bind_host = config.bind.as_deref().unwrap_or(&config.host);
@@ -774,8 +1173,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
 
+    file_watcher.stop().await;
     stop_synthesis_worker(state.as_ref()).await;
     stop_summary_worker(state.as_ref()).await;
+    stop_document_worker(state.as_ref()).await;
     stop_extraction_worker(state.as_ref()).await;
 
     // Drop state to close DB channels, then await writer
@@ -784,6 +1185,15 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutdown complete");
     Ok(())
+}
+
+fn embedding_dimensions(config: &DaemonConfig) -> usize {
+    config
+        .manifest
+        .embedding
+        .as_ref()
+        .map(|embedding| embedding.dimensions)
+        .unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS)
 }
 
 async fn shutdown_signal() {
@@ -856,7 +1266,7 @@ fn resolve_runtime_extraction_endpoint(
 }
 
 fn worker_supports_extraction_provider(provider: &str) -> bool {
-    matches!(provider, "ollama" | "anthropic")
+    matches!(provider, "ollama" | "anthropic" | "openai-compatible")
 }
 
 fn provider_is_unsupported_for_daemon_startup_preflight(provider: &str) -> bool {
@@ -1027,6 +1437,7 @@ async fn start_extraction_worker_inner(state: &AppState, dead_letter_on_blocked:
         shadow_mode: pipeline.shadow_mode,
         graph_enabled: pipeline.graph.enabled,
         structural_enabled: pipeline.structural.enabled,
+        ..signet_pipeline::worker::WorkerConfig::default()
     };
 
     let handle =
@@ -1060,6 +1471,75 @@ pub(crate) async fn stop_extraction_worker(state: &AppState) {
     }
 
     *state.extraction_worker_stats.write().await = None;
+}
+
+pub(crate) async fn start_document_worker(state: &AppState) -> bool {
+    {
+        let handle = state.document_worker_handle.lock().await;
+        if handle.is_some() {
+            return true;
+        }
+    }
+
+    let Some(pipeline) = state
+        .config
+        .manifest
+        .memory
+        .as_ref()
+        .and_then(|memory| memory.pipeline_v2.as_ref())
+    else {
+        return false;
+    };
+
+    if !pipeline.enabled || pipeline.paused || state.pipeline_paused() {
+        return false;
+    }
+
+    let Some(provider) = state.embedding.read().await.clone() else {
+        return false;
+    };
+
+    let embedding_model = state
+        .config
+        .manifest
+        .embedding
+        .as_ref()
+        .map(|embedding| embedding.model.clone());
+    let handle = signet_pipeline::document::start(
+        state.pool.clone(),
+        provider,
+        signet_pipeline::document::DocumentConfig {
+            poll_ms: pipeline.documents.worker_interval_ms,
+            max_retries: pipeline.worker.max_retries,
+            chunk_size: pipeline.documents.chunk_size,
+            chunk_overlap: pipeline.documents.chunk_overlap,
+            max_chunks: usize::MAX,
+            extraction_timeout_ms: pipeline.extraction.timeout,
+            extraction_max_tokens: 2048,
+            embedding_model,
+        },
+    );
+
+    let mut slot = state.document_worker_handle.lock().await;
+    if slot.is_none() {
+        *slot = Some(handle);
+        true
+    } else {
+        drop(slot);
+        handle.stop().await;
+        true
+    }
+}
+
+pub(crate) async fn stop_document_worker(state: &AppState) {
+    let handle = {
+        let mut slot = state.document_worker_handle.lock().await;
+        slot.take()
+    };
+
+    if let Some(handle) = handle {
+        handle.stop().await;
+    }
 }
 
 /// Resolve the API key env var for a given provider name.
@@ -1663,7 +2143,7 @@ async fn dead_letter_pending_extraction_jobs(state: &AppState, reason: &str, now
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "status": "ok",
+        "status": "healthy",
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
@@ -1765,7 +2245,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .unwrap_or_else(|_| serde_json::json!({"error": "db unavailable"}));
 
     Json(serde_json::json!({
-        "status": "ok",
+        "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "port": state.config.port,
         "host": state.config.host,
@@ -1797,7 +2277,7 @@ mod tests {
 
     use crate::auth::rate_limiter::{AuthRateLimiter, default_limits};
     use crate::auth::types::AuthMode;
-    use crate::state::{AppState, ExtractionRuntimeState};
+    use crate::state::{AppState, AuthRuntimeState, ExtractionRuntimeState};
 
     use super::{
         append_api_path, dead_letter_pending_extraction_jobs, host_in_trusted_override_list,
@@ -1852,7 +2332,7 @@ mod tests {
                 pipeline_v2: Some(pipeline),
             }),
             auth: Some(ManifestAuthConfig {
-                method: "token".to_string(),
+                method: Some("token".to_string()),
                 chain_id: None,
                 mode: Some("local".to_string()),
                 rate_limits: Some(limits),
@@ -1884,10 +2364,12 @@ mod tests {
             Some(signet_pipeline::worker::new_runtime_stats_handle(
                 0.8, 30_000,
             )),
-            AuthMode::Local,
-            None,
-            AuthRateLimiter::from_rules(&rules),
-            AuthRateLimiter::from_rules(&rules),
+            AuthRuntimeState {
+                mode: AuthMode::Local,
+                secret: None,
+                admin_limiter: AuthRateLimiter::from_rules(&rules),
+                recall_llm_limiter: AuthRateLimiter::from_rules(&rules),
+            },
         ))
     }
 
@@ -2234,6 +2716,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_compatible_active_provider_starts_without_fallback() {
+        let state =
+            test_state_with_extraction("openai-compatible", "none", Some("http://127.0.0.1:9"));
+
+        let started = start_extraction_worker(state.as_ref()).await;
+        assert!(started);
+
+        let provider = state.llm.read().await.clone().expect("llm provider");
+        assert_eq!(provider.name(), "openai-compatible");
+
+        stop_synthesis_worker(state.as_ref()).await;
+        stop_summary_worker(state.as_ref()).await;
+        stop_extraction_worker(state.as_ref()).await;
+    }
+
+    #[tokio::test]
     async fn startup_worker_block_dead_letters_pending_jobs_when_provider_becomes_blocked() {
         let state = test_state_with_extraction("claude-code", "none", None);
 
@@ -2490,9 +2988,10 @@ mod tests {
     }
 
     #[test]
-    fn worker_supports_only_ollama_and_anthropic_providers() {
+    fn worker_supports_http_and_anthropic_extraction_providers() {
         assert!(worker_supports_extraction_provider("ollama"));
         assert!(worker_supports_extraction_provider("anthropic"));
+        assert!(worker_supports_extraction_provider("openai-compatible"));
         assert!(!worker_supports_extraction_provider("claude-code"));
         assert!(!worker_supports_extraction_provider("codex"));
         assert!(!worker_supports_extraction_provider("opencode"));

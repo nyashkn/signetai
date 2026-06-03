@@ -19,10 +19,94 @@ const TS_MEMORY_SEARCH_TELEMETRY_VERSION: u32 = 66;
 const TS_MEMORY_SEARCH_TELEMETRY_NAME: &str = "memory-search-telemetry";
 const TS_ONTOLOGY_PROPOSALS_VERSION: u32 = 67;
 const TS_ONTOLOGY_PROPOSALS_NAME: &str = "ontology-proposals";
+const TS_AGENTS_TABLE_VERSION: u32 = 43;
+const TS_AGENTS_TABLE_NAME: &str = "agents-table";
+const TS_MCP_INVOCATIONS_VERSION: u32 = 52;
+const TS_MCP_INVOCATIONS_NAME: &str = "mcp-invocations";
+const TS_PATH_FEEDBACK_VERSION: u32 = 41;
+const TS_PATH_FEEDBACK_NAME: &str = "path-feedback";
+const TS_DREAMING_STATE_VERSION: u32 = 55;
+const TS_DREAMING_STATE_NAME: &str = "dreaming-state";
 const TS_AGENT_SCOPED_IDEMPOTENCY_VERSION: u32 = 72;
 const TS_AGENT_SCOPED_IDEMPOTENCY_NAME: &str = "agent-scoped-idempotency-key";
 const TS_ENTITY_ALIASES_VERSION: u32 = 77;
 const TS_ENTITY_ALIASES_NAME: &str = "entity-aliases";
+const TS_DAILY_REFLECTIONS_VERSION: u32 = 68;
+const TS_DAILY_REFLECTIONS_NAME: &str = "daily-reflections";
+const TS_DAILY_REFLECTIONS_MULTI_VERSION: u32 = 69;
+const TS_DAILY_REFLECTIONS_MULTI_NAME: &str = "daily-reflections-multiple-insights";
+const TS_EMBEDDINGS_VECTOR_VERSION: u32 = 32;
+const TS_EMBEDDINGS_VECTOR_NAME: &str = "embeddings-vector-column";
+const TS_SCOPE_VERSION: u32 = 33;
+const TS_SCOPE_NAME: &str = "scope";
+const TS_SCOPE_AWARE_DEDUP_VERSION: u32 = 34;
+const TS_SCOPE_AWARE_DEDUP_NAME: &str = "scope-aware-dedup";
+const TS_ENTITY_FTS_VERSION: u32 = 35;
+const TS_ENTITY_FTS_NAME: &str = "entity-fts";
+const TS_DEPENDENCY_CONFIDENCE_VERSION: u32 = 36;
+const TS_DEPENDENCY_CONFIDENCE_NAME: &str = "dependency-confidence";
+const TS_ENTITY_COMMUNITIES_VERSION: u32 = 37;
+const TS_ENTITY_COMMUNITIES_NAME: &str = "entity-communities";
+const TS_MEMORY_HINTS_VERSION: u32 = 38;
+const TS_MEMORY_HINTS_NAME: &str = "memory-hints";
+const TS_DEDUP_ENTITY_DEPS_VERSION: u32 = 39;
+const TS_DEDUP_ENTITY_DEPS_NAME: &str = "dedup-entity-dependencies";
+const TS_SESSION_TRANSCRIPTS_VERSION: u32 = 40;
+const TS_SESSION_TRANSCRIPTS_NAME: &str = "session-transcripts";
+const TS_SESSION_MEMORIES_AGENT_VERSION: u32 = 42;
+const TS_SESSION_MEMORIES_AGENT_NAME: &str = "session-memories-agent-id";
+const TS_MEMORY_MD_TEMPORAL_HEAD_VERSION: u32 = 44;
+const TS_MEMORY_MD_TEMPORAL_HEAD_NAME: &str = "memory-md-temporal-head";
+const TS_LOSSLESS_HARDENING_VERSION: u32 = 45;
+const TS_LOSSLESS_HARDENING_NAME: &str = "lossless-working-memory-hardening";
+const TS_SESSION_SUMMARY_UNIQUENESS_VERSION: u32 = 46;
+const TS_SESSION_SUMMARY_UNIQUENESS_NAME: &str = "session-summary-uniqueness";
+const TS_AGENT_TEMPORAL_UNIQUENESS_VERSION: u32 = 47;
+const TS_AGENT_TEMPORAL_UNIQUENESS_NAME: &str = "agent-scoped-temporal-uniqueness";
+const TS_THREAD_HEADS_VERSION: u32 = 48;
+const TS_THREAD_HEADS_NAME: &str = "thread-heads";
+const TS_SESSION_EXTRACT_CURSORS_VERSION: u32 = 49;
+const TS_SESSION_EXTRACT_CURSORS_NAME: &str = "session-extract-cursors";
+const TS_RELATED_TO_AUDIT_VERSION: u32 = 50;
+const TS_RELATED_TO_AUDIT_NAME: &str = "related-to-audit";
+const TS_MEMORY_MD_LINEAGE_VERSION: u32 = 51;
+const TS_MEMORY_MD_LINEAGE_NAME: &str = "memory-md-rolling-window-lineage";
+const TS_SKILL_INVOCATIONS_VERSION: u32 = 53;
+const TS_SKILL_INVOCATIONS_NAME: &str = "skill-invocations";
+const TS_TASK_AGENT_SCOPE_VERSION: u32 = 54;
+const TS_TASK_AGENT_SCOPE_NAME: &str = "task-agent-scope";
+const TS_AGENT_CONTENT_HASH_VERSION: u32 = 56;
+const TS_AGENT_CONTENT_HASH_NAME: &str = "agent-scoped-content-hash";
+const TS_FTS_TOKENIZER_REPAIR_VERSION: u32 = 57;
+const TS_FTS_TOKENIZER_REPAIR_NAME: &str = "memories-fts-tokenizer-repair";
+const TS_KG_INDICES_VERSION: u32 = 58;
+const TS_KG_INDICES_NAME: &str = "knowledge-graph-indices";
+const TS_ATTR_CLAIM_KEY_VERSION: u32 = 59;
+const TS_ATTR_CLAIM_KEY_NAME: &str = "entity-attribute-claim-key";
+const TS_ATTR_GROUP_KEY_VERSION: u32 = 60;
+const TS_ATTR_GROUP_KEY_NAME: &str = "entity-attribute-group-key";
+const TS_ARTIFACT_SOURCE_MTIME_VERSION: u32 = 61;
+const TS_ARTIFACT_SOURCE_MTIME_NAME: &str = "memory-artifact-source-mtime";
+const TS_ARTIFACT_SOFT_DELETE_VERSION: u32 = 62;
+const TS_ARTIFACT_SOFT_DELETE_NAME: &str = "memory-artifact-soft-delete";
+const TS_FTS_CONTENT_UPDATE_VERSION: u32 = 63;
+const TS_FTS_CONTENT_UPDATE_NAME: &str = "content-only-memories-fts-update";
+const TS_SOURCE_GRAPH_PROVENANCE_VERSION: u32 = 64;
+const TS_SOURCE_GRAPH_PROVENANCE_NAME: &str = "source-graph-provenance";
+const TS_SOURCE_EMBEDDING_SCOPE_VERSION: u32 = 65;
+const TS_SOURCE_EMBEDDING_SCOPE_NAME: &str = "source-embedding-agent-scope";
+const TS_ONTOLOGY_CP_STATE_VERSION: u32 = 70;
+const TS_ONTOLOGY_CP_STATE_NAME: &str = "ontology-control-plane-state";
+const TS_EPISTEMIC_ASSERTIONS_VERSION: u32 = 71;
+const TS_EPISTEMIC_ASSERTIONS_NAME: &str = "epistemic-assertions";
+const TS_RECALL_DEDUPE_VERSION: u32 = 73;
+const TS_RECALL_DEDUPE_NAME: &str = "recall-context-dedupe";
+const TS_AGGREGATE_LINKS_VERSION: u32 = 74;
+const TS_AGGREGATE_LINKS_NAME: &str = "aggregate-memory-links";
+const TS_ARTIFACT_SOURCE_PROVENANCE_VERSION: u32 = 75;
+const TS_ARTIFACT_SOURCE_PROVENANCE_NAME: &str = "memory-artifact-source-provenance";
+const TS_TEMPORAL_EDGES_VERSION: u32 = 76;
+const TS_TEMPORAL_EDGES_NAME: &str = "temporal-edges";
 
 /// Simple checksum matching the TS implementation (hash of "version:name").
 fn checksum(version: u32, name: &str) -> String {
@@ -60,10 +144,29 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, CoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
+}
+
 /// Historical per-migration compatibility shims are best-effort because some
 /// older SQL files can legitimately skip the target table. Required runtime
 /// parity repair uses `add_column_if_missing` directly and fails startup.
 fn add_column_if_missing_best_effort(conn: &Connection, table: &str, column: &str, typedef: &str) {
+    match table_exists(conn, table) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(%table, %column, %typedef, "skipping optional migration column repair for missing table");
+            return;
+        }
+        Err(err) => {
+            warn!(%table, %column, %typedef, err = %err, "skipping optional migration column repair after table lookup failed");
+            return;
+        }
+    }
     if let Err(err) = add_column_if_missing(conn, table, column, typedef) {
         warn!(%table, %column, %typedef, err = %err, "skipping optional migration column repair");
     }
@@ -385,15 +488,188 @@ pub fn run(conn: &Connection) -> Result<(), CoreError> {
 /// absent in fresh or TS-created databases whose historical migrations stamped
 /// versions before Rust learned about the extra columns.
 fn ensure_cross_daemon_parity_tables(conn: &Connection) -> Result<(), CoreError> {
+    // Existing parity SQL files (040-047)
     conn.execute_batch(include_str!("sql/040-memory-search-telemetry.sql"))?;
     conn.execute_batch(include_str!("sql/041-ontology-proposals.sql"))?;
     conn.execute_batch(include_str!("sql/042-entity-aliases.sql"))?;
+    conn.execute_batch(include_str!("sql/043-mcp-invocations.sql"))?;
+    conn.execute_batch(include_str!("sql/044-dreaming-state.sql"))?;
+    conn.execute_batch(include_str!("sql/045-agents-table.sql"))?;
+    conn.execute_batch(include_str!("sql/046-cross-agent-runtime.sql"))?;
+    conn.execute_batch(include_str!("sql/047-daily-reflections.sql"))?;
+    // New parity SQL files (048-057) covering missing TS migrations
+    conn.execute_batch(include_str!("sql/048-entity-communities.sql"))?;
+    conn.execute_batch(include_str!("sql/049-memory-hints.sql"))?;
+    conn.execute_batch(include_str!("sql/050-path-feedback.sql"))?;
+    conn.execute_batch(include_str!("sql/051-epistemic-assertions.sql"))?;
+    conn.execute_batch(include_str!("sql/052-session-context-dedupe.sql"))?;
+    conn.execute_batch(include_str!("sql/053-aggregate-memory-links.sql"))?;
+    conn.execute_batch(include_str!("sql/054-temporal-edges.sql"))?;
+    conn.execute_batch(include_str!("sql/055-thread-heads.sql"))?;
+    conn.execute_batch(include_str!("sql/056-entity-fts.sql"))?;
+    conn.execute_batch(include_str!("sql/057-session-summary-uniqueness.sql"))?;
+
+    // Stamp all TS migration versions whose artifacts are already present in a
+    // Rust-created database. The TS migration runner skips by version and then
+    // uses phantom-artifact detection before applying anything; compatibility
+    // depends on the artifact contract below, not on matching Rust migration
+    // names/checksums for version slots that predate TS/Rust divergence.
+    stamp_typescript_parity_migration(conn, TS_AGENTS_TABLE_VERSION, TS_AGENTS_TABLE_NAME)?;
     stamp_typescript_parity_migration(
         conn,
         TS_MEMORY_SEARCH_TELEMETRY_VERSION,
         TS_MEMORY_SEARCH_TELEMETRY_NAME,
     )?;
+    stamp_typescript_parity_migration(conn, TS_MCP_INVOCATIONS_VERSION, TS_MCP_INVOCATIONS_NAME)?;
+    stamp_typescript_parity_migration(conn, TS_DREAMING_STATE_VERSION, TS_DREAMING_STATE_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_DAILY_REFLECTIONS_VERSION,
+        TS_DAILY_REFLECTIONS_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_DAILY_REFLECTIONS_MULTI_VERSION,
+        TS_DAILY_REFLECTIONS_MULTI_NAME,
+    )?;
     stamp_typescript_parity_migration(conn, TS_ENTITY_ALIASES_VERSION, TS_ENTITY_ALIASES_NAME)?;
+    // TS 32-39 share version slots with Rust 32-39. Do not overwrite Rust's
+    // local rows; the compatibility invariant is that the TS-declared
+    // artifacts for those versions exist before the TS daemon opens the DB.
+    stamp_typescript_parity_migration(
+        conn,
+        TS_EMBEDDINGS_VECTOR_VERSION,
+        TS_EMBEDDINGS_VECTOR_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_SCOPE_VERSION, TS_SCOPE_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SCOPE_AWARE_DEDUP_VERSION,
+        TS_SCOPE_AWARE_DEDUP_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_ENTITY_FTS_VERSION, TS_ENTITY_FTS_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_DEPENDENCY_CONFIDENCE_VERSION,
+        TS_DEPENDENCY_CONFIDENCE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ENTITY_COMMUNITIES_VERSION,
+        TS_ENTITY_COMMUNITIES_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_MEMORY_HINTS_VERSION, TS_MEMORY_HINTS_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_DEDUP_ENTITY_DEPS_VERSION,
+        TS_DEDUP_ENTITY_DEPS_NAME,
+    )?;
+    // TS 40-42, 44-51, 53-54, 56-65, 70-76
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SESSION_TRANSCRIPTS_VERSION,
+        TS_SESSION_TRANSCRIPTS_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_PATH_FEEDBACK_VERSION, TS_PATH_FEEDBACK_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SESSION_MEMORIES_AGENT_VERSION,
+        TS_SESSION_MEMORIES_AGENT_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_MEMORY_MD_TEMPORAL_HEAD_VERSION,
+        TS_MEMORY_MD_TEMPORAL_HEAD_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_LOSSLESS_HARDENING_VERSION,
+        TS_LOSSLESS_HARDENING_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SESSION_SUMMARY_UNIQUENESS_VERSION,
+        TS_SESSION_SUMMARY_UNIQUENESS_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_AGENT_TEMPORAL_UNIQUENESS_VERSION,
+        TS_AGENT_TEMPORAL_UNIQUENESS_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_THREAD_HEADS_VERSION, TS_THREAD_HEADS_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SESSION_EXTRACT_CURSORS_VERSION,
+        TS_SESSION_EXTRACT_CURSORS_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_RELATED_TO_AUDIT_VERSION, TS_RELATED_TO_AUDIT_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_MEMORY_MD_LINEAGE_VERSION,
+        TS_MEMORY_MD_LINEAGE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SKILL_INVOCATIONS_VERSION,
+        TS_SKILL_INVOCATIONS_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_TASK_AGENT_SCOPE_VERSION, TS_TASK_AGENT_SCOPE_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_AGENT_CONTENT_HASH_VERSION,
+        TS_AGENT_CONTENT_HASH_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_FTS_TOKENIZER_REPAIR_VERSION,
+        TS_FTS_TOKENIZER_REPAIR_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_KG_INDICES_VERSION, TS_KG_INDICES_NAME)?;
+    stamp_typescript_parity_migration(conn, TS_ATTR_CLAIM_KEY_VERSION, TS_ATTR_CLAIM_KEY_NAME)?;
+    stamp_typescript_parity_migration(conn, TS_ATTR_GROUP_KEY_VERSION, TS_ATTR_GROUP_KEY_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ARTIFACT_SOURCE_MTIME_VERSION,
+        TS_ARTIFACT_SOURCE_MTIME_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ARTIFACT_SOFT_DELETE_VERSION,
+        TS_ARTIFACT_SOFT_DELETE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_FTS_CONTENT_UPDATE_VERSION,
+        TS_FTS_CONTENT_UPDATE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SOURCE_GRAPH_PROVENANCE_VERSION,
+        TS_SOURCE_GRAPH_PROVENANCE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_SOURCE_EMBEDDING_SCOPE_VERSION,
+        TS_SOURCE_EMBEDDING_SCOPE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ONTOLOGY_CP_STATE_VERSION,
+        TS_ONTOLOGY_CP_STATE_NAME,
+    )?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_EPISTEMIC_ASSERTIONS_VERSION,
+        TS_EPISTEMIC_ASSERTIONS_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_RECALL_DEDUPE_VERSION, TS_RECALL_DEDUPE_NAME)?;
+    stamp_typescript_parity_migration(conn, TS_AGGREGATE_LINKS_VERSION, TS_AGGREGATE_LINKS_NAME)?;
+    stamp_typescript_parity_migration(
+        conn,
+        TS_ARTIFACT_SOURCE_PROVENANCE_VERSION,
+        TS_ARTIFACT_SOURCE_PROVENANCE_NAME,
+    )?;
+    stamp_typescript_parity_migration(conn, TS_TEMPORAL_EDGES_VERSION, TS_TEMPORAL_EDGES_NAME)?;
     Ok(())
 }
 
@@ -518,6 +794,190 @@ fn ensure_cross_daemon_parity_columns(conn: &Connection) -> Result<(), CoreError
         conn,
         TS_AGENT_SCOPED_IDEMPOTENCY_VERSION,
         TS_AGENT_SCOPED_IDEMPOTENCY_NAME,
+    )?;
+
+    // --- Columns from TS migrations 32-76 not yet covered above ---
+    // TS 032: embeddings.vector
+    add_column_if_missing(conn, "embeddings", "vector", "BLOB")?;
+    // TS 033: memories.scope index
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memories_scope
+            ON memories(scope) WHERE scope IS NOT NULL;",
+    )?;
+    // TS 037: entities.community_id
+    add_column_if_missing(conn, "entities", "community_id", "TEXT")?;
+    // TS 041: session_memories.path_json
+    add_column_if_missing(conn, "session_memories", "path_json", "TEXT")?;
+    // TS 042: session_memories.agent_id
+    add_column_if_missing(
+        conn,
+        "session_memories",
+        "agent_id",
+        "TEXT NOT NULL DEFAULT 'default'",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_session_memories_agent_session
+            ON session_memories(agent_id, session_key);",
+    )?;
+    // TS 045: session_transcripts.updated_at, session_scores.agent_id
+    add_column_if_missing(conn, "session_transcripts", "updated_at", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "session_scores",
+        "agent_id",
+        "TEXT NOT NULL DEFAULT 'default'",
+    )?;
+    conn.execute_batch(
+        "UPDATE session_transcripts
+            SET updated_at = COALESCE(updated_at, created_at)
+          WHERE updated_at IS NULL;
+         UPDATE session_scores
+            SET agent_id = COALESCE(agent_id, 'default')
+          WHERE agent_id IS NULL OR agent_id = '';
+         CREATE INDEX IF NOT EXISTS idx_st_agent_updated
+            ON session_transcripts(agent_id, updated_at);
+         CREATE INDEX IF NOT EXISTS idx_session_scores_agent_session
+            ON session_scores(agent_id, session_key, created_at);",
+    )?;
+    // TS 058: knowledge graph indices
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entities_order
+            ON entities(agent_id, pinned DESC, pinned_at DESC, mentions DESC, updated_at DESC, name);
+         CREATE INDEX IF NOT EXISTS idx_entities_extracted_mentions
+            ON entities(entity_type, mentions)
+            WHERE entity_type = 'extracted';",
+    )?;
+    // TS 059-060: claim_key/group_key indexes
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entity_attributes_claim_key
+            ON entity_attributes(agent_id, aspect_id, claim_key, status)
+            WHERE claim_key IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_entity_attributes_group_key
+            ON entity_attributes(agent_id, aspect_id, group_key, status)
+            WHERE group_key IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_entity_attributes_group_claim
+            ON entity_attributes(agent_id, aspect_id, group_key, claim_key, status)
+            WHERE claim_key IS NOT NULL;",
+    )?;
+    // TS 061-062: memory_artifacts columns
+    add_column_if_missing(conn, "memory_artifacts", "source_mtime_ms", "REAL")?;
+    add_column_if_missing(
+        conn,
+        "memory_artifacts",
+        "is_deleted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "memory_artifacts", "deleted_at", "TEXT")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_artifacts_agent_deleted
+            ON memory_artifacts(agent_id, is_deleted, deleted_at);",
+    )?;
+    // TS 063: content-only FTS trigger
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memories_au;
+         CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content)
+            VALUES('delete', old.rowid, old.content);
+            INSERT INTO memories_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+         END;",
+    )?;
+    // TS 064: source graph provenance columns on entities
+    add_column_if_missing(conn, "entities", "source_id", "TEXT")?;
+    add_column_if_missing(conn, "entities", "source_kind", "TEXT")?;
+    add_column_if_missing(conn, "entities", "source_path", "TEXT")?;
+    add_column_if_missing(conn, "entities", "source_root", "TEXT")?;
+    add_column_if_missing(conn, "entity_communities", "source_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_communities", "source_kind", "TEXT")?;
+    add_column_if_missing(conn, "entity_communities", "source_path", "TEXT")?;
+    add_column_if_missing(conn, "entity_communities", "source_root", "TEXT")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_entities_source
+            ON entities(agent_id, source_id, source_path);
+         CREATE INDEX IF NOT EXISTS idx_entity_communities_source
+            ON entity_communities(agent_id, source_id, source_path);
+         CREATE INDEX IF NOT EXISTS idx_entity_attributes_source
+            ON entity_attributes(agent_id, source_id, source_path);
+         CREATE INDEX IF NOT EXISTS idx_entity_dependencies_source_origin
+            ON entity_dependencies(agent_id, source_id, source_path);",
+    )?;
+    // TS 069: daily_reflections.content_key
+    add_column_if_missing(conn, "daily_reflections", "content_key", "TEXT")?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_daily_reflections_agent_date;
+         CREATE INDEX IF NOT EXISTS idx_daily_reflections_agent_created
+            ON daily_reflections(agent_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_daily_reflections_agent_date
+            ON daily_reflections(agent_id, date, created_at DESC);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_reflections_agent_content_key
+            ON daily_reflections(agent_id, date, content_key)
+            WHERE content_key IS NOT NULL;",
+    )?;
+    // TS 070: ontology control plane state columns
+    add_column_if_missing(conn, "entities", "archived_at", "TEXT")?;
+    add_column_if_missing(conn, "entities", "archived_by", "TEXT")?;
+    add_column_if_missing(conn, "entities", "archive_reason", "TEXT")?;
+    add_column_if_missing(conn, "entities", "proposal_id", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "entities",
+        "proposal_evidence",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(conn, "entity_aspects", "archived_at", "TEXT")?;
+    add_column_if_missing(conn, "entity_aspects", "archived_by", "TEXT")?;
+    add_column_if_missing(conn, "entity_aspects", "archive_reason", "TEXT")?;
+    add_column_if_missing(conn, "entity_aspects", "proposal_id", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "entity_aspects",
+        "proposal_evidence",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(
+        conn,
+        "entity_dependencies",
+        "status",
+        "TEXT NOT NULL DEFAULT 'active'",
+    )?;
+    add_column_if_missing(conn, "entity_dependencies", "archived_at", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "archived_by", "TEXT")?;
+    add_column_if_missing(conn, "entity_dependencies", "archive_reason", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "version_root_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "previous_attribute_id", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "archived_at", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "archived_by", "TEXT")?;
+    add_column_if_missing(conn, "entity_attributes", "archive_reason", "TEXT")?;
+    conn.execute_batch(
+        "UPDATE entity_attributes
+            SET version_root_id = id
+          WHERE version_root_id IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_entities_status
+            ON entities(agent_id, status, updated_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_entity_aspects_status
+            ON entity_aspects(agent_id, entity_id, status);
+         CREATE INDEX IF NOT EXISTS idx_entity_attributes_version_root
+            ON entity_attributes(agent_id, version_root_id, version DESC);
+         CREATE INDEX IF NOT EXISTS idx_entity_attributes_claim_version
+            ON entity_attributes(agent_id, aspect_id, group_key, claim_key, version DESC);
+         CREATE INDEX IF NOT EXISTS idx_entity_dependencies_status
+            ON entity_dependencies(agent_id, status, updated_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_entities_proposal
+            ON entities(agent_id, proposal_id);
+         CREATE INDEX IF NOT EXISTS idx_entity_aspects_proposal
+            ON entity_aspects(agent_id, proposal_id);",
+    )?;
+    // TS 075: memory_artifacts source provenance
+    add_column_if_missing(conn, "memory_artifacts", "source_id", "TEXT")?;
+    add_column_if_missing(conn, "memory_artifacts", "source_root", "TEXT")?;
+    add_column_if_missing(conn, "memory_artifacts", "source_external_id", "TEXT")?;
+    add_column_if_missing(conn, "memory_artifacts", "source_parent_path", "TEXT")?;
+    add_column_if_missing(conn, "memory_artifacts", "source_meta_json", "TEXT")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_artifacts_agent_source
+            ON memory_artifacts(agent_id, source_id, source_external_id);
+         CREATE INDEX IF NOT EXISTS idx_memory_artifacts_agent_source_root
+            ON memory_artifacts(agent_id, source_id, source_root);",
     )?;
 
     Ok(())
@@ -1006,6 +1466,42 @@ fn repair_bogus_version(conn: &Connection) -> Result<(), CoreError> {
 mod tests {
     use super::*;
 
+    fn assert_table_exists(conn: &Connection, table: &str) {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(exists, 1, "{table} should exist");
+    }
+
+    fn assert_column_exists(conn: &Connection, table: &str, column: &str) {
+        let exists = conn
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+            .expect("prepare table_info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table_info")
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+        assert!(exists, "{table}.{column} should exist");
+    }
+
+    fn assert_migration_stamped(conn: &Connection, version: i64) {
+        let stamped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .expect("query schema_migrations");
+        assert_eq!(
+            stamped, 1,
+            "TS migration {version} should be recorded in schema_migrations"
+        );
+    }
+
     #[test]
     fn backfills_connector_settings_from_config_json_when_default_empty_object_exists() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -1124,63 +1620,125 @@ mod tests {
     }
 
     #[test]
-    fn records_ts_parity_migrations_without_colliding_rust_versions() {
+    fn records_ts_parity_migrations_with_artifact_backing() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         run(&conn).expect("initial migrations run");
 
         for (version, table) in [
+            (43_i64, "agents"),
+            (52_i64, "mcp_invocations"),
+            (55_i64, "dreaming_state"),
             (66_i64, "memory_search_telemetry"),
             (67_i64, "ontology_proposals"),
+            (68_i64, "daily_reflections"),
+            (69_i64, "daily_reflections"),
+            (77_i64, "entity_aliases"),
         ] {
-            let exists: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .expect("query sqlite_master");
-            assert_eq!(
-                exists, 1,
-                "{table} should be created by migration {version}"
-            );
-
-            let stamped: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                    [version],
-                    |row| row.get(0),
-                )
-                .expect("query schema_migrations");
-            assert_eq!(
-                stamped, 1,
-                "migration {version} should be recorded in schema_migrations"
-            );
+            assert_table_exists(&conn, table);
+            assert_migration_stamped(&conn, version);
         }
 
-        let idempotency_stamped: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 72",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query schema_migrations");
-        assert_eq!(
-            idempotency_stamped, 1,
-            "migration 72 should be recorded in schema_migrations"
-        );
+        assert_migration_stamped(&conn, 72);
 
-        for version in [40_i64, 41_i64] {
-            let stamped: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                    [version],
-                    |row| row.get(0),
-                )
-                .expect("query schema_migrations");
-            assert_eq!(
-                stamped, 0,
-                "Rust must not stamp local parity DDL as TS migration {version}"
-            );
+        // Rust-created databases should present a complete TS migration ledger
+        // through the current TS schema when every TS-declared artifact exists.
+        for version in 32_i64..=77_i64 {
+            assert_migration_stamped(&conn, version);
+        }
+    }
+
+    #[test]
+    fn rust_created_schema_satisfies_typescript_migration_artifacts() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        run(&conn).expect("initial migrations run");
+
+        for table in [
+            "entity_communities",
+            "memory_hints",
+            "session_transcripts",
+            "path_feedback_events",
+            "path_feedback_stats",
+            "entity_retrieval_stats",
+            "entity_cooccurrence",
+            "path_feedback_sessions",
+            "agents",
+            "memory_thread_heads",
+            "session_extract_cursors",
+            "entity_dependency_history",
+            "memory_artifacts",
+            "memory_artifact_tombstones",
+            "memory_artifacts_fts",
+            "mcp_invocations",
+            "skill_invocations",
+            "task_scope_hints",
+            "dreaming_state",
+            "dreaming_passes",
+            "memory_search_telemetry",
+            "ontology_proposals",
+            "daily_reflections",
+            "epistemic_assertions",
+            "session_context_epochs",
+            "session_recall_events",
+            "aggregate_memory_sources",
+            "temporal_edges",
+            "entity_aliases",
+        ] {
+            assert_table_exists(&conn, table);
+        }
+
+        for (table, column) in [
+            ("embeddings", "vector"),
+            ("memories", "scope"),
+            ("entity_dependencies", "confidence"),
+            ("entities", "community_id"),
+            ("session_memories", "path_json"),
+            ("session_memories", "agent_id"),
+            ("memories", "agent_id"),
+            ("memories", "visibility"),
+            ("session_summaries", "source_type"),
+            ("session_summaries", "source_ref"),
+            ("session_summaries", "meta_json"),
+            ("session_transcripts", "updated_at"),
+            ("summary_jobs", "agent_id"),
+            ("session_scores", "agent_id"),
+            ("summary_jobs", "session_id"),
+            ("summary_jobs", "trigger"),
+            ("summary_jobs", "captured_at"),
+            ("summary_jobs", "started_at"),
+            ("summary_jobs", "ended_at"),
+            ("entity_attributes", "claim_key"),
+            ("entity_attributes", "group_key"),
+            ("memory_artifacts", "source_mtime_ms"),
+            ("memory_artifacts", "is_deleted"),
+            ("memory_artifacts", "deleted_at"),
+            ("entities", "source_path"),
+            ("entity_communities", "source_path"),
+            ("entity_attributes", "source_path"),
+            ("entity_dependencies", "source_path"),
+            ("embeddings", "agent_id"),
+            ("entity_attributes", "proposal_id"),
+            ("entity_attributes", "proposal_evidence"),
+            ("entity_dependencies", "proposal_id"),
+            ("entity_dependencies", "proposal_evidence"),
+            ("entities", "status"),
+            ("entity_aspects", "status"),
+            ("entity_attributes", "version"),
+            ("entity_attributes", "version_root_id"),
+            ("entity_attributes", "previous_attribute_id"),
+            ("entity_dependencies", "status"),
+            ("memories", "idempotency_key"),
+            ("memories", "runtime_path"),
+            ("memory_artifacts", "source_id"),
+            ("memory_artifacts", "source_root"),
+            ("memory_artifacts", "source_external_id"),
+            ("memory_artifacts", "source_parent_path"),
+            ("memory_artifacts", "source_meta_json"),
+        ] {
+            assert_column_exists(&conn, table, column);
+        }
+
+        for version in 32_i64..=77_i64 {
+            assert_migration_stamped(&conn, version);
         }
     }
 

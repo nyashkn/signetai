@@ -37,10 +37,34 @@
 				"arrayOrdering": "ordered"
 			},
 			"POST /api/memory/recall": {
-				"deterministic": ["results.*.id"],
-				"ignoreFields": ["results.*.score"],
+				"deterministic": [
+					"results.*.content",
+					"results.*.project",
+					"results.*.scope",
+					"results.*.visibility",
+					"meta.totalReturned",
+					"meta.hasSupplementary",
+					"meta.noHits"
+				],
+				"ignoreFields": [
+					"meta.timings",
+					"results.*.created_at",
+					"results.*.id",
+					"results.*.score"
+				],
 				"tolerance": { "score": 0.05 },
 				"arrayOrdering": "unordered"
+			},
+			"POST /mcp": {
+				"deterministic": [
+					"jsonrpc",
+					"result.protocolVersion",
+					"result.capabilities.tools.listChanged",
+					"result.serverInfo.name",
+					"error.code",
+					"error.message"
+				],
+				"ignoreFields": ["result.serverInfo.version"]
 			},
 			"GET /api/memory/search": {
 				"deterministic": ["results.*.id"],
@@ -80,9 +104,15 @@
 				"ignoreFields": []
 			},
 			"POST /api/memory/feedback": {
-				"deterministic": ["ok", "recorded", "accepted"],
-				"ignoreFields": ["propagated", "cooccurrenceUpdated", "dependenciesUpdated"],
-				"note": "Rust currently applies feedback to session memories; full path propagation parity is pending."
+				"deterministic": [
+					"ok",
+					"recorded",
+					"accepted",
+					"propagated",
+					"cooccurrenceUpdated",
+					"dependenciesUpdated"
+				],
+				"ignoreFields": []
 			},
 			"DELETE /api/memory/:id": {
 				"deterministic": ["deleted"],
@@ -105,9 +135,8 @@
 				"ignoreFields": []
 			},
 			"GET /api/harnesses": {
-				"deterministic": ["harnesses.*.id", "harnesses.*.exists"],
-				"ignoreFields": ["harnesses.*.lastSeen", "harnesses.*.path", "harnesses.*.name"],
-				"note": "daemon-rs shadow currently reports harness file presence but does not own the TS watcher-driven identity sync pipeline (batched propagation, queued reruns, SIGNET-ARCHITECTURE refresh); degraded-mode documentation in docs/HARNESSES.md is the source of truth until the parity wave lands."
+				"deterministic": ["harnesses.*.name", "harnesses.*.id", "harnesses.*.path", "harnesses.*.exists"],
+				"ignoreFields": ["harnesses.*.lastSeen"]
 			},
 			"POST /api/hooks/session-start": {
 				"deterministic": ["injections"],
@@ -115,9 +144,8 @@
 				"note": "Injections content must match semantically"
 			},
 			"POST /api/hooks/user-prompt-submit": {
-				"deterministic": [],
-				"ignoreFields": ["inject", "injections"],
-				"note": "TS gates on calibrated hybridRecall score; daemon-rs gates on term-coverage proxy. Both respect hooks.userPromptSubmit.minScore (default 0.8) but may inject different sets, so inject content is excluded from deterministic comparison until Rust integrates full hybrid scoring. Re-enable when scoring paths unify."
+				"deterministic": ["engine", "memoryCount", "queryTerms", "inject"],
+				"ignoreFields": []
 			},
 			"POST /api/hooks/session-end": {
 				"deterministic": ["status"],
@@ -255,12 +283,12 @@
 			"GET /api/dream/status": {
 				"deterministic": ["enabled", "state.tokensSinceLastPass", "state.lastPassAt"],
 				"ignoreFields": ["worker", "passes.*.completedAt"],
-				"note": "Dreaming consolidation — not yet implemented in daemon-rs. Stub returns enabled:false until Rust parity wave."
+				"note": "Dreaming worker state and pass timestamps are runtime-specific."
 			},
 			"POST /api/dream/trigger": {
 				"deterministic": ["accepted", "status", "mode"],
 				"ignoreFields": ["passId"],
-				"note": "Dreaming consolidation — not yet implemented in daemon-rs. Stub returns 501 until Rust parity wave."
+				"note": "Generated pass identifiers are runtime-specific."
 			}
 		}
 	},

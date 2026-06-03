@@ -199,6 +199,7 @@ async fn apply_pause_state(state: &AppState, paused: bool) {
     // mirroring the JS daemon's restartPipelineRuntime behavior.
     if paused {
         crate::stop_extraction_worker(state).await;
+        crate::stop_document_worker(state).await;
         crate::stop_summary_worker(state).await;
         crate::stop_synthesis_worker(state).await;
 
@@ -222,6 +223,7 @@ async fn apply_pause_state(state: &AppState, paused: bool) {
         // an intentional pause should be preserved for draining.
         crate::resume_extraction_check(state).await;
         let _ = crate::start_extraction_worker(state).await;
+        let _ = crate::start_document_worker(state).await;
         let _ = crate::start_summary_worker(state).await;
         let _ = crate::start_synthesis_worker(state).await;
     }
@@ -233,18 +235,19 @@ fn guard_admin(
     peer: &SocketAddr,
 ) -> Result<(), Box<Response>> {
     let is_local = is_loopback(peer);
+    let auth_runtime = state.auth_snapshot();
     let auth = authenticate_headers(
-        state.auth_mode,
-        state.auth_secret.as_deref(),
+        auth_runtime.mode,
+        auth_runtime.secret.as_deref(),
         headers,
         is_local,
     )?;
-    require_permission_guard(&auth, Permission::Admin, state.auth_mode, is_local)?;
+    require_permission_guard(&auth, Permission::Admin, auth_runtime.mode, is_local)?;
     require_rate_limit_guard(
         &auth,
         "admin",
-        &state.auth_admin_limiter,
-        state.auth_mode,
+        &auth_runtime.admin_limiter,
+        auth_runtime.mode,
         None,
     )?;
     Ok(())
@@ -340,6 +343,18 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<serde_json::Valu
             "coldStartExited": false,
         },
     }))
+}
+
+/// POST /api/pipeline/nudge — wake the extraction worker if it is running.
+pub async fn nudge(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.extraction_worker_handle.lock().await.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Extraction worker not running"})),
+        );
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"nudged": true})))
 }
 
 /// GET /api/pipeline/models — list available LLM models.
@@ -502,7 +517,7 @@ mod tests {
     use crate::auth::rate_limiter::{AuthRateLimiter, default_limits};
     use crate::auth::tokens::{create_token, generate_secret};
     use crate::auth::types::{AuthMode, TokenRole, TokenScope};
-    use crate::state::AppState;
+    use crate::state::{AppState, AuthRuntimeState};
 
     use super::{
         find_config_file, format_pipeline_mode, pause, read_pipeline_mode, resume,
@@ -567,7 +582,7 @@ mod tests {
                 }),
             }),
             auth: Some(ManifestAuthConfig {
-                method: "token".to_string(),
+                method: Some("token".to_string()),
                 chain_id: None,
                 mode: Some(mode_name(mode)),
                 rate_limits: Some(limits),
@@ -607,10 +622,12 @@ mod tests {
             embedding,
             None, // llm provider
             None,
-            mode,
-            secret.clone(),
-            AuthRateLimiter::from_rules(&rules),
-            AuthRateLimiter::from_rules(&rules),
+            AuthRuntimeState {
+                mode,
+                secret: secret.clone(),
+                admin_limiter: AuthRateLimiter::from_rules(&rules),
+                recall_llm_limiter: AuthRateLimiter::from_rules(&rules),
+            },
         ));
 
         TestState {

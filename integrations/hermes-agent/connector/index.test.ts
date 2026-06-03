@@ -13,6 +13,7 @@ const originalEnv = {
 	SIGNET_AGENT_ID: process.env.SIGNET_AGENT_ID,
 	SIGNET_AGENT_WORKSPACE: process.env.SIGNET_AGENT_WORKSPACE,
 	SIGNET_DAEMON_URL: process.env.SIGNET_DAEMON_URL,
+	SIGNET_TRUSTED_DAEMON_ORIGINS: process.env.SIGNET_TRUSTED_DAEMON_ORIGINS,
 	SIGNET_TOKEN: process.env.SIGNET_TOKEN,
 	SIGNET_AGENT_READ_POLICY: process.env.SIGNET_AGENT_READ_POLICY,
 	SIGNET_AGENT_MEMORY_POLICY: process.env.SIGNET_AGENT_MEMORY_POLICY,
@@ -160,6 +161,8 @@ beforeEach(() => {
 	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_DAEMON_URL;
 	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
+	delete process.env.SIGNET_TRUSTED_DAEMON_ORIGINS;
+	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_TOKEN;
 	// biome-ignore lint/performance/noDelete: ensure no stale value from outer env
 	delete process.env.SIGNET_AGENT_READ_POLICY;
@@ -179,6 +182,7 @@ afterEach(() => {
 	restoreEnv("SIGNET_AGENT_ID");
 	restoreEnv("SIGNET_AGENT_WORKSPACE");
 	restoreEnv("SIGNET_DAEMON_URL");
+	restoreEnv("SIGNET_TRUSTED_DAEMON_ORIGINS");
 	restoreEnv("SIGNET_TOKEN");
 	restoreEnv("SIGNET_AGENT_READ_POLICY");
 	restoreEnv("SIGNET_AGENT_MEMORY_POLICY");
@@ -658,6 +662,7 @@ describe("HermesAgentConnector.install()", () => {
 		process.env.HERMES_REPO = hermesRepo;
 		process.env.HERMES_HOME = hermesHome;
 		process.env.SIGNET_DAEMON_URL = "http://127.0.0.1:9999";
+		process.env.SIGNET_TRUSTED_DAEMON_ORIGINS = " https://daemon.example.test:8443 \n";
 
 		const result = await new HermesAgentConnector().install(tmpRoot);
 
@@ -666,6 +671,7 @@ describe("HermesAgentConnector.install()", () => {
 		expect(existsSync(envPath)).toBe(true);
 		const envContent = await Bun.file(envPath).text();
 		expect(envContent).toContain("SIGNET_DAEMON_URL=http://127.0.0.1:9999");
+		expect(envContent).toContain("SIGNET_TRUSTED_DAEMON_ORIGINS=https://daemon.example.test:8443");
 	});
 
 	it("derives SIGNET_AGENT_WORKSPACE for named agents", async () => {
@@ -796,6 +802,17 @@ describe("Hermes Agent bundled plugin", () => {
 		expect(plugin).toContain("self._prefetch_generation += 1");
 	});
 
+	it("invalidates stale prefetch results for every queued recall", () => {
+		const plugin = readFileSync(join(import.meta.dir, "hermes-plugin", "__init__.py"), "utf-8");
+		const queuePrefetchFn = plugin.slice(plugin.indexOf("def queue_prefetch"), plugin.indexOf("def on_turn_start"));
+		const generationIncrement = queuePrefetchFn.indexOf("self._prefetch_generation += 1");
+
+		expect(queuePrefetchFn).toContain("with self._prefetch_lock:");
+		expect(queuePrefetchFn).toContain('self._prefetch_result = ""');
+		expect(generationIncrement).toBeGreaterThan(-1);
+		expect(generationIncrement).toBeLessThan(queuePrefetchFn.indexOf("def _run"));
+	});
+
 	it("accepts latest Hermes lifecycle calls with the daemon offline", () => {
 		const fixture = join(tmpRoot, "python-lifecycle-fixture");
 		cpSync(join(import.meta.dir, "hermes-plugin"), join(fixture, "plugins", "memory", "signet"), { recursive: true });
@@ -870,6 +887,44 @@ describe("Hermes Agent bundled plugin", () => {
 		expect(result.stdout).toContain('"context:foreground"');
 		expect(result.stdout).toContain('"platform:cli"');
 		expect(result.stdout).toContain('"session:session-a"');
+	});
+
+	it("stores Hermes delegation memories with project scope", () => {
+		const fixture = join(tmpRoot, "python-delegation-fixture");
+		cpSync(join(import.meta.dir, "hermes-plugin"), join(fixture, "plugins", "memory", "signet"), { recursive: true });
+		mkdirSync(join(fixture, "agent"), { recursive: true });
+		writeFileSync(join(fixture, "agent", "__init__.py"), "");
+		writeFileSync(join(fixture, "plugins", "__init__.py"), "");
+		writeFileSync(join(fixture, "plugins", "memory", "__init__.py"), "");
+		writeFileSync(join(fixture, "agent", "memory_provider.py"), "class MemoryProvider:\n    pass\n");
+
+		const result = spawnSync(
+			"python",
+			[
+				"-c",
+				[
+					"import json, time",
+					"from plugins.memory.signet import SignetMemoryProvider",
+					"class FakeClient:",
+					"    def __init__(self): self.calls = []",
+					"    def remember(self, content, **kwargs): self.calls.append({'content': content, **kwargs})",
+					"provider = SignetMemoryProvider()",
+					"provider._client = FakeClient()",
+					"provider._project = '/tmp/delegated-project'",
+					"provider.on_delegation('inspect branch', 'found the issue')",
+					"for _ in range(50):",
+					"    if provider._client.calls: break",
+					"    time.sleep(0.02)",
+					"provider._client.calls and print(json.dumps(provider._client.calls[0], sort_keys=True))",
+				].join("\n"),
+			],
+			{ env: { ...process.env, PYTHONPATH: fixture }, encoding: "utf-8" },
+		);
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain('"project": "/tmp/delegated-project"');
+		expect(result.stdout).toContain('"delegation"');
+		expect(result.stdout).toContain('"subagent"');
 	});
 
 	it("registers Signet tools with a Hermes-style memory manager before daemon initialization", () => {
@@ -973,6 +1028,49 @@ describe("Hermes Agent bundled plugin", () => {
 		expect(client).toContain("if agent_scoped and self._agent_id:");
 		expect(client).toContain('body["agentId"] = self._agent_id');
 		expect(client).not.toContain('"agentId": self._agent_id,\\n        }\\n        if min_score');
+	});
+
+	it("only forwards SIGNET_TOKEN to trusted daemon origins", () => {
+		const clientPath = join(import.meta.dir, "hermes-plugin", "client.py");
+		const result = spawnSync(
+			"python",
+			[
+				"-c",
+				[
+					"import importlib.util, json, os",
+					"from pathlib import Path",
+					`client_path = Path(${JSON.stringify(clientPath)})`,
+					"spec = importlib.util.spec_from_file_location('signet_client', client_path)",
+					"mod = importlib.util.module_from_spec(spec)",
+					"spec.loader.exec_module(mod)",
+					"def headers_for(url='', trusted=''):",
+					"    for key in ['SIGNET_DAEMON_URL', 'SIGNET_HOST', 'SIGNET_PORT', 'SIGNET_TOKEN', 'SIGNET_TRUSTED_DAEMON_ORIGINS']:",
+					"        os.environ.pop(key, None)",
+					"    if url:",
+					"        os.environ['SIGNET_DAEMON_URL'] = url",
+					"    os.environ['SIGNET_TOKEN'] = 'review-token'",
+					"    if trusted:",
+					"        os.environ['SIGNET_TRUSTED_DAEMON_ORIGINS'] = trusted",
+					"    client = mod.SignetClient()",
+					"    return {'base': client.base_url, 'auth': client._headers().get('Authorization')}",
+					"print(json.dumps({",
+					"    'default': headers_for(),",
+					"    'loopback': headers_for('http://127.0.0.1:3850/'),",
+					"    'remote': headers_for('https://daemon.example.test:8443/'),",
+					"    'trusted_remote': headers_for('https://daemon.example.test:8443/', 'https://daemon.example.test:8443'),",
+					"}, sort_keys=True))",
+				].join("\n"),
+			],
+			{ encoding: "utf-8" },
+		);
+
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({
+			default: { auth: "Bearer review-token", base: "http://localhost:3850" },
+			loopback: { auth: "Bearer review-token", base: "http://127.0.0.1:3850" },
+			remote: { auth: null, base: "https://daemon.example.test:8443" },
+			trusted_remote: { auth: "Bearer review-token", base: "https://daemon.example.test:8443" },
+		});
 	});
 
 	it("lets explicit recall requests opt into agent scoping", () => {
@@ -1221,6 +1319,7 @@ describe("HermesAgentConnector.uninstall()", () => {
 			[
 				"KEEP_ME=1",
 				"SIGNET_DAEMON_URL=http://localhost:3850",
+				"SIGNET_TRUSTED_DAEMON_ORIGINS=https://daemon.example.test:8443",
 				"SIGNET_AGENT_ID=dot",
 				"SIGNET_AGENT_WORKSPACE=/tmp/dot",
 				"SIGNET_TOKEN=secret-token",
@@ -1235,6 +1334,7 @@ describe("HermesAgentConnector.uninstall()", () => {
 		const envContent = readFileSync(envPath, "utf-8");
 		expect(envContent).toContain("KEEP_ME=1");
 		expect(envContent).not.toContain("SIGNET_DAEMON_URL");
+		expect(envContent).not.toContain("SIGNET_TRUSTED_DAEMON_ORIGINS");
 		expect(envContent).not.toContain("SIGNET_AGENT_ID");
 		expect(envContent).not.toContain("SIGNET_AGENT_WORKSPACE");
 		expect(envContent).not.toContain("SIGNET_TOKEN");
