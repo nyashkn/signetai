@@ -36,10 +36,10 @@ transcripts, source records, provenance, agent instructions, secrets, and
 repair tools in infrastructure you control.
 
 Hosted memory APIs are fastest until memory becomes part of your product
-contract: deletion, provenance, repair, portability, and private context
-custody. Signet is for that moment.
+contract: deletion, provenance, repair, portability, and custody of private
+context. Signet is for that moment.
 
-Not another hosted memory API. Not another harness-specific plugin. Signet is
+Not a hosted memory API. Not a harness-specific plugin. Signet is
 the durable layer underneath your agents.
 
 ## Why Signet
@@ -113,10 +113,6 @@ Daemon lifecycle: modify · forget · recover
 | Vector/RAG memory | Searching notes and documents | Signet keeps transcripts, identity, source records, repair history, and scoped recall |
 | Lightweight local stores | Simple private persistence | Signet adds provenance, dashboard inspection, team policy, connectors, MCP, SDKs, and daemon APIs |
 
-Hosted memory APIs are great for prototypes. They get uncomfortable when
-memory becomes part of your product contract: storage, recall policy,
-deletion, provenance, and portability all matter.
-
 | Stay hosted if... | Switch to Signet when... |
 |---|---|
 | You need the fastest managed API path | Memory has to live in infrastructure you control |
@@ -125,25 +121,18 @@ deletion, provenance, and portability all matter.
 | Vendor-managed ranking is acceptable | You need to inspect and tune recall policy around your own sources |
 | You cannot run a daemon or own backups yet | You need an exportable workspace you can inspect, back up, and move |
 
-## Switching cost
+## Operating tradeoff
 
-Signet is infrastructure, so it has a real operating surface:
-- a local or self-hosted daemon
-- an embedding provider
-- a SQLite-backed workspace to back up
-- harness connectors, hooks, MCP servers, or SDK calls depending on your stack
+Signet is infrastructure, not a hosted shortcut. You run a local or self-hosted
+daemon, choose an embedding provider, back up `$SIGNET_WORKSPACE/`, and connect
+your harnesses through hooks, MCP, connectors, or SDKs.
 
 The trade is deliberate: you operate the memory layer, and in return you can
-inspect, repair, scope, self-host, and move the context your agents depend on.
+inspect, repair, scope, self-host, back up, and move the context your agents
+depend on.
 
-Day two is bounded: keep the daemon healthy, back up `$SIGNET_WORKSPACE/`,
-rerun setup when harness integrations change, and use local/team/hybrid auth
-mode based on how the daemon is exposed. The upside is that failures remain
-inspectable because the data plane is still yours.
-
-For a single-developer install, day two usually means `signet status`, backing
-up one workspace directory, and rerunning setup only when you add or replace an
-agent harness.
+For a single-developer install, day two is usually `signet status`, a workspace
+backup, and rerunning setup when you add or replace an agent harness.
 
 ## Is Signet right for you?
 
@@ -165,11 +154,11 @@ the tools people already use and gives them one owned memory layer.
 |---|---|---|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Hooks + MCP | Direct `/remember` and `/recall` skills |
 | [OpenCode](https://github.com/sst/opencode) | Plugin + hooks | Runtime plugin with lifecycle support |
-| [OpenClaw](https://github.com/openclaw/openclaw) | Runtime plugin | Flagship path; legacy hooks remain compatibility-only |
-| [Codex](https://github.com/openai/codex) | MCP + compatibility hooks | Plugin bundle when available; degraded compaction fidelity |
+| [OpenClaw](https://github.com/openclaw/openclaw) | Runtime plugin | Flagship path; hooks available for legacy setups |
+| [Codex](https://github.com/openai/codex) | MCP + compatibility hooks | MCP-first integration; plugin bundle when available |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Memory provider plugin | `memory_*`, `recall`, and `remember` tools |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | Extension + hooks | Memory commands and agent-callable tools |
-| Oh My Pi | Managed extension | Lifecycle recall injection; no `/remember` or `/recall` commands yet |
+| Oh My Pi | Managed extension | Lifecycle recall injection through the managed extension |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | MCP + GEMINI.md sync | On-demand tools plus identity sync |
 
 
@@ -180,8 +169,9 @@ the tools people already use and gives them one owned memory layer.
 Signet's latest tracked MemoryBench run averages **97.6% LongMemEval answer
 accuracy** under the `rules` profile.
 
-The benchmark matters because Signet is not only governable memory. It also
-retrieves the right facts across long-running, multi-session conversations.
+The benchmark matters because local custody should not mean weak recall.
+Signet is designed to retrieve the right facts across long-running,
+multi-session conversations while keeping memory inspectable and repairable.
 
 That profile keeps the benchmark contract strict: memories are ingested through
 `/api/memory/remember`, recalled through `/api/memory/recall`, and answered
@@ -330,39 +320,10 @@ Connectors
   hermes-agent
 ```
 
-## Packages
+## Repository map
 
-| Package | Role |
-|---|---|
-| [`@signet/core`](./platform/core) | Types, identity, SQLite, hybrid + graph search |
-| [`@signet/cli`](./surfaces/cli) | CLI, setup wizard, dashboard |
-| [`@signet/daemon`](./platform/daemon) | API server, distillation layer, auth, analytics, diagnostics |
-| [`platform/daemon-rs`](./platform/daemon-rs) | Rust shadow runtime and parity logging |
-| [`signet-dashboard`](./surfaces/dashboard) | Svelte dashboard built to static assets and served by the daemon |
-| [`@signet/sdk`](./libs/sdk) | Typed client, React hooks, Vercel AI SDK middleware |
-| [`@signet/connector-base`](./libs/connector-base) | Shared connector primitives and utilities |
-| [`@signet/connector-claude-code`](./integrations/claude-code/connector) | Claude Code integration |
-| [`@signet/connector-opencode`](./integrations/opencode/connector) | OpenCode integration |
-| [`@signet/connector-openclaw`](./integrations/openclaw/connector) | OpenClaw integration |
-| [`@signet/connector-codex`](./integrations/codex/connector) | Codex CLI integration |
-| [`@signet/connector-gemini`](./integrations/gemini/connector) | Gemini CLI integration |
-| [`@signet/connector-oh-my-pi`](./integrations/oh-my-pi/connector) | Oh My Pi integration |
-| [`@signet/connector-hermes-agent`](./integrations/hermes-agent/connector) | Hermes Agent integration |
-| [`@signet/connector-pi`](./integrations/pi/connector) | Pi coding agent integration |
-| [`@signet/oh-my-pi-extension`](./integrations/oh-my-pi/extension) | Oh My Pi extension bridge |
-| [`@signet/pi-extension-base`](./integrations/pi/extension-base) | Shared Pi and Oh My Pi extension utilities |
-| [`@signet/pi-extension`](./integrations/pi/extension) | Pi extension — memory tools, lifecycle, and session hooks |
-| [`@signet/opencode-plugin`](./integrations/opencode/plugin) | OpenCode runtime plugin — memory tools and session hooks |
-| [`@signetai/signet-memory-openclaw`](./integrations/openclaw/memory-adapter) | OpenClaw runtime plugin |
-| [`@signet/extension`](./surfaces/browser-extension) | Browser extension for Chrome and Firefox |
-| [`@signet/desktop`](./surfaces/desktop) | Electron desktop application |
-| [`@signet/tray`](./surfaces/tray) | Shared tray/menu bar utilities |
-| [`@signet/native`](./platform/native) | Native accelerators |
-| [`signetai`](./dist/signetai) | npm/Bun wrapper for the compiled Signet binary |
-| [`@signet/web`](./web/marketing) | Astro marketing site deployed to Cloudflare Pages |
-| [`reviews-worker`](./web/workers/reviews) | Cloudflare Worker for review automation |
-| [`signet.secrets`](./plugins/core/secrets) | Core Signet-native secrets plugin |
-| [`memorybench`](./memorybench) | Benchmark harness, datasets, providers, reports, and local benchmark UI |
+See [Repository Map](./docs/REPO_MAP.md) for package layout, internal
+surfaces, and ownership boundaries.
 
 ## Documentation
 
