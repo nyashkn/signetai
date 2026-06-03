@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-03
 - Bug fixes: bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
+- Refactoring: replace TypeScript runtime with Rust parity daemon.
 - Docs: tighten positioning flow; sharpen context custody pitch.
 
 ### 2026-06-02
@@ -31,6 +32,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: remove critical audit advisories.
 
 ## Release Ledger
+
+## [0.138.15] - 2026-06-03
+
+Release summary: 1 refactor.
+Tag range: `v0.138.14..v0.138.15`.
+
+### Refactoring
+
+- **daemon**: replace TypeScript runtime with Rust parity daemon
 
 ## [0.138.14] - 2026-06-03
 
