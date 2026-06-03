@@ -1,6 +1,6 @@
 {
   "name": "signetai",
-  "version": "0.138.11",
+  "version": "0.138.12",
   "description": "Signet native CLI installer wrapper",
   "type": "module",
   "bin": {
@@ -22,11 +22,11 @@
     "postinstall": "node scripts/install-native.js"
   },
   "optionalDependencies": {
-    "@signetai/signetai-linux-x64": "0.138.11",
-    "@signetai/signetai-linux-arm64": "0.138.11",
-    "@signetai/signetai-darwin-x64": "0.138.11",
-    "@signetai/signetai-darwin-arm64": "0.138.11",
-    "@signetai/signetai-win32-x64": "0.138.11"
+    "@signetai/signetai-linux-x64": "0.138.12",
+    "@signetai/signetai-linux-arm64": "0.138.12",
+    "@signetai/signetai-darwin-x64": "0.138.12",
+    "@signetai/signetai-darwin-arm64": "0.138.12",
+    "@signetai/signetai-win32-x64": "0.138.12"
   },
   "keywords": [
     "ai",
