@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-04
+- Bug fixes: embed memory writes.
+
 ### 2026-06-03
 - Bug fixes: embed native cli version; keep rust daemon runtime opt-in; pack native tarballs from local paths; publish native npm assets as release tarballs; bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
 - Refactoring: replace TypeScript runtime with Rust parity daemon.
@@ -28,10 +31,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: gate prompt injection on entity context.
 - Bug fixes: queue aggregate recall extraction; harden prompt entity context filtering; restrict prompt entity injection types; route prompt context through attributes.
 
-### 2026-05-27
-- Bug fixes: remove critical audit advisories.
-
 ## Release Ledger
+
+## [0.138.20] - 2026-06-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.138.19..v0.138.20`.
+
+### Bug Fixes
+
+- **daemon-rs**: embed memory writes (#810)
 
 ## [0.138.19] - 2026-06-03
 
