@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-09
 - Bug fixes: restore signet-mcp stdio JSON-RPC server (#826).
+- Docs: rewrite root vision and agents policy for current surface.
 
 ### 2026-06-04
 - Bug fixes: recover reset summaries from prompt transcripts; embed memory writes.
@@ -31,6 +32,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: show macos window on launch.
 
 ## Release Ledger
+
+## [0.138.24] - 2026-06-09
+
+Release summary: 1 docs update.
+Tag range: `v0.138.23..v0.138.24`.
+
+### Docs
+
+- rewrite root vision and agents policy for current surface (#829)
 
 ## [0.138.23] - 2026-06-09
 
