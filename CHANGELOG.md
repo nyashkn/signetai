@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-10
-- Bug fixes: reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
+- Bug fixes: restore connector tarball and manifest to verify expected list; reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
 - Performance: batch graph traversal queries and cache secrets.
 
 ### 2026-06-09
@@ -33,6 +33,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: nitpick; add missing contributors.
 
 ## Release Ledger
+
+## [0.138.32] - 2026-06-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.138.31..v0.138.32`.
+
+### Bug Fixes
+
+- **ci**: restore connector tarball and manifest to verify expected list
 
 ## [0.138.31] - 2026-06-10
 
