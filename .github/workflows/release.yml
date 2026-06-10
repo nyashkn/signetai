@@ -275,9 +275,6 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ASSETS < <(gh release view "v${NEW_VERSION}" --json assets --jq '.assets[].name')
-          # Only verify assets uploaded by the build-native matrix jobs.
-          # signet-connectors-*.tar.gz and native-manifest.json are generated
-          # and uploaded by the "Generate and upload native manifest" step below.
           expected=(
             signet-linux-x64
             signet-linux-x64.sha256
@@ -289,6 +286,8 @@ jobs:
             signet-darwin-x64.sha256
             signet-win32-x64.exe
             signet-win32-x64.exe.sha256
+            signet-connectors-${NEW_VERSION}.tar.gz
+            native-manifest.json
           )
           for asset in "${expected[@]}"; do
             if ! printf '%s\n' "${ASSETS[@]}" | grep -Fxq "$asset"; then
