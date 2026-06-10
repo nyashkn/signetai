@@ -335,6 +335,10 @@ jobs:
             "optionalDependencies.signetai-darwin-x64=${release_url}/signetai-darwin-x64-${NEW_VERSION}.tgz" \
             "optionalDependencies.signetai-darwin-arm64=${release_url}/signetai-darwin-arm64-${NEW_VERSION}.tgz" \
             "optionalDependencies.signetai-win32-x64=${release_url}/signetai-win32-x64-${NEW_VERSION}.tgz"
+          # The install-native.js postinstall reads native-manifest.json from the
+          # wrapper package root to download connector assets. The generate step
+          # writes it to dist/native/; copy it into the wrapper before publish.
+          cp dist/native/native-manifest.json dist/signetai/native-manifest.json
 
       - name: Validate publish manifests
         run: bun scripts/check-publish-manifests.ts
