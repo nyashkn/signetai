@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-10
+- Bug fixes: ship connector plugin assets + rename session_search (#831).
+
 ### 2026-06-09
 - Bug fixes: correct repo URL to Signet-AI/signetai; restore signet-mcp stdio JSON-RPC server (#826).
 - Docs: rewrite root vision and agents policy for current surface.
@@ -28,10 +31,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: remove forge runtime.
 - Docs: nitpick; add missing contributors.
 
-### 2026-05-30
-- Bug fixes: show macos window on launch.
-
 ## Release Ledger
+
+## [0.138.27] - 2026-06-10
+
+Release summary: 1 bug fix.
+Tag range: `v0.138.26..v0.138.27`.
+
+### Bug Fixes
+
+- **hermes-agent**: ship connector plugin assets + rename session_search (#831) (#833)
 
 ## [0.138.26] - 2026-06-09
 
