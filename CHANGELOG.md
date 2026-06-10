@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-10
 - Bug fixes: expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
+- Performance: batch graph traversal queries and cache secrets.
 
 ### 2026-06-09
 - Bug fixes: correct repo URL to Signet-AI/signetai; restore signet-mcp stdio JSON-RPC server (#826).
@@ -32,6 +33,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: nitpick; add missing contributors.
 
 ## Release Ledger
+
+## [0.138.29] - 2026-06-10
+
+Release summary: 1 performance improvement.
+Tag range: `v0.138.28..v0.138.29`.
+
+### Performance
+
+- **session-start**: batch graph traversal queries and cache secrets (#835)
 
 ## [0.138.28] - 2026-06-10
 
