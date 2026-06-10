@@ -1,6 +1,6 @@
 {
   "name": "@signet/connector-codex",
-  "version": "0.138.32",
+  "version": "0.138.33",
   "description": "Signet connector for Codex CLI",
   "type": "module",
   "main": "./dist/index.js",
