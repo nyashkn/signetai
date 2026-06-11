@@ -3,7 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { parseRecallPayload } from "@signet/core";
-import SignetPiExtension, { loadConfig, parseRememberArgs, recallMemories, rememberContent } from "./src/index.js";
+import SignetPiExtension, {
+	loadConfig,
+	parseRememberArgs,
+	recallMemories,
+	rememberContent,
+	searchSessions,
+	searchSourceArtifacts,
+} from "./src/index.js";
 
 // ============================================================================
 // Helpers
@@ -288,6 +295,74 @@ describe("recallMemories", () => {
 });
 
 // ============================================================================
+// searchSourceArtifacts and searchSessions
+// ============================================================================
+
+describe("Signet search helpers", () => {
+	it("source search posts sourceOnly recall requests", async () => {
+		let capturedPath: string | undefined;
+		let capturedBody: Record<string, unknown> = {};
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				capturedPath = new URL(req.url).pathname;
+				capturedBody = (await req.json()) as Record<string, unknown>;
+				return Response.json({ results: [] });
+			},
+		});
+		servers.push(server);
+
+		await searchSourceArtifacts(`http://127.0.0.1:${server.port}`, "obsidian note", {
+			agentId: "agent-pi",
+			sessionKey: "session-pi",
+			project: "/tmp/project",
+			limit: 3,
+		});
+
+		expect(capturedPath).toBe("/api/memory/recall");
+		expect(capturedBody.query).toBe("obsidian note");
+		expect(capturedBody.sourceOnly).toBe(true);
+		expect(capturedBody.agentId).toBe("agent-pi");
+		expect(capturedBody.sessionKey).toBe("session-pi");
+		expect(capturedBody.project).toBe("/tmp/project");
+		expect(capturedBody.limit).toBe(3);
+	});
+
+	it("session search posts to the transcript search endpoint", async () => {
+		let capturedPath: string | undefined;
+		let capturedBody: Record<string, unknown> = {};
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				capturedPath = new URL(req.url).pathname;
+				capturedBody = (await req.json()) as Record<string, unknown>;
+				return Response.json({ results: [{ sessionKey: "session-pi" }] });
+			},
+		});
+		servers.push(server);
+
+		const result = await searchSessions(`http://127.0.0.1:${server.port}`, "what happened", {
+			sessionKey: "specific-session",
+			currentSessionKey: "current-session",
+			agentId: "agent-pi",
+			project: "/tmp/project",
+			limit: 2,
+		});
+
+		expect(capturedPath).toBe("/api/sessions/search");
+		expect(capturedBody).toEqual({
+			query: "what happened",
+			sessionKey: "specific-session",
+			currentSessionKey: "current-session",
+			agentId: "agent-pi",
+			project: "/tmp/project",
+			limit: 2,
+		});
+		expect(result).toEqual({ results: [{ sessionKey: "session-pi" }] });
+	});
+});
+
+// ============================================================================
 // rememberContent (regression: must include harness field)
 // ============================================================================
 
@@ -414,6 +489,25 @@ describe("SignetPiExtension", () => {
 		// Commands and tools should still be registered
 		expect(commandCount).toBeGreaterThan(0);
 		expect(toolCount).toBeGreaterThan(0);
+	});
+
+	it("registers the Signet-facing Pi tool surface without memory feedback", () => {
+		const toolNames: string[] = [];
+		const pi = {
+			on(_event: string, _handler: unknown) {},
+			registerCommand(_name: string, _opts: unknown) {},
+			registerTool(opts: { name: string }) {
+				toolNames.push(opts.name);
+			},
+		};
+
+		SignetPiExtension(pi as never);
+
+		expect(toolNames).toContain("signet_recall");
+		expect(toolNames).toContain("signet_source_search");
+		expect(toolNames).toContain("signet_session_search");
+		expect(toolNames).toContain("signet_remember");
+		expect(toolNames).not.toContain("signet_memory_feedback");
 	});
 
 	it("context injection end-to-end: session context and recall are delivered via context event", async () => {

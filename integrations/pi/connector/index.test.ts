@@ -165,6 +165,12 @@ describe("EXTENSION_BUNDLE integrity", () => {
 		expect(EXTENSION_BUNDLE).toMatch(/hooks\/remember[\s\S]{0,200}harness:/);
 	});
 
+	it("ships source and session search tools without the memory feedback tool", () => {
+		expect(EXTENSION_BUNDLE).toContain("signet_source_search");
+		expect(EXTENSION_BUNDLE).toContain("signet_session_search");
+		expect(EXTENSION_BUNDLE).not.toContain("signet_memory_feedback");
+	});
+
 	it("uses 127.0.0.1 for the default daemon URL (not localhost)", () => {
 		expect(EXTENSION_BUNDLE).toContain("127.0.0.1");
 		expect(EXTENSION_BUNDLE).not.toContain("localhost");

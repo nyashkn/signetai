@@ -10,6 +10,7 @@ Integrates Signet's memory system with Pi via its extension mechanism.
 - Configures the agent workspace path in Pi's config
 - Detects and resolves multiple candidate agent directories
 - Ships a bundled extension that is written to disk on install
+- Exposes Signet-specific tools: `signet_recall`, `signet_source_search`, `signet_session_search`, and `signet_remember`
 
 ## Installation
 

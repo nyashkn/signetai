@@ -199,29 +199,74 @@ export async function rememberContent(
 		throw new Error(`Remember failed: ${error}`);
 	}
 }
-export async function sendMemoryFeedback(
+export async function searchSourceArtifacts(
 	daemonUrl: string,
-	sessionKey: string,
-	ratings: Record<string, number>,
-	options: { agentId?: string } = {},
-): Promise<{ recorded: number; accepted?: number }> {
-	const response = await fetch(`${daemonUrl}/api/memory/feedback`, {
+	query: string,
+	options: {
+		limit?: number;
+		agentId?: string;
+		sessionKey?: string;
+		includeRecalled?: boolean;
+		project?: string;
+	} = {},
+): Promise<RecallPayload> {
+	const { limit = 10, agentId, sessionKey, includeRecalled, project } = options;
+
+	const response = await fetch(`${daemonUrl}/api/memory/recall`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			sessionKey,
-			agentId: options.agentId ?? "default",
-			feedback: ratings,
+			...buildRecallRequestBody(query, {
+				limit,
+				agentId,
+				sessionKey,
+				includeRecalled,
+				project,
+			}),
+			sourceOnly: true,
 		}),
-		signal: AbortSignal.timeout(WRITE_TIMEOUT),
+		signal: AbortSignal.timeout(READ_TIMEOUT),
 	});
 
 	if (!response.ok) {
 		const error = await response.text();
-		throw new Error(`Feedback failed: ${error}`);
+		throw new Error(`Source search failed: ${error}`);
 	}
 
-	return (await response.json()) as { recorded: number; accepted?: number };
+	return (await response.json()) as RecallPayload;
+}
+
+export async function searchSessions(
+	daemonUrl: string,
+	query: string,
+	options: {
+		sessionKey?: string;
+		currentSessionKey?: string;
+		agentId?: string;
+		project?: string;
+		limit?: number;
+	} = {},
+): Promise<unknown> {
+	const response = await fetch(`${daemonUrl}/api/sessions/search`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			query,
+			sessionKey: options.sessionKey,
+			currentSessionKey: options.currentSessionKey,
+			agentId: options.agentId,
+			project: options.project,
+			limit: options.limit,
+		}),
+		signal: AbortSignal.timeout(READ_TIMEOUT),
+	});
+
+	if (!response.ok) {
+		const error = await response.text();
+		throw new Error(`Session search failed: ${error}`);
+	}
+
+	return await response.json();
 }
 
 function updateStatus(ctx: PiExtensionContext): void {
@@ -588,6 +633,162 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 		},
 	});
 
+	// signet_source_search tool
+	pi.registerTool({
+		name: "signet_source_search",
+		label: "Signet Source Search",
+		description:
+			"Search Signet source-backed artifacts such as Codex native memory, Obsidian, imported docs, and transcripts.",
+		promptSnippet:
+			"Search source-backed artifacts when the answer should come from imported files, notes, docs, transcripts, or other provenance-backed sources rather than ordinary saved memories",
+		promptGuidelines: [
+			"Use this when the user asks about source-backed documents, notes, imported files, or provenance-specific context",
+			"Keep source search separate from ordinary memory recall; prefer signet_recall for preferences, decisions, and remembered facts",
+		],
+		parameters: Type.Object({
+			query: Type.String({
+				description: "Natural-language source search query",
+			}),
+			limit: Type.Optional(
+				Type.Number({
+					description: "Maximum number of source results to return (default: 10)",
+					default: 10,
+				}),
+			),
+			project: Type.Optional(
+				Type.String({
+					description: "Optional project path filter",
+				}),
+			),
+			includeRecalled: Type.Optional(
+				Type.Boolean({
+					description: "Include rows already recalled in this context",
+					default: false,
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const healthy = await checkDaemonHealth(daemonUrl);
+			if (!healthy) {
+				return {
+					content: [{ type: "text", text: "Signet daemon not running. Source search unavailable." }],
+					details: { error: "daemon_offline" },
+				};
+			}
+
+			try {
+				const session = currentSessionRef(ctx);
+				const query = String(params.query || "");
+				const limit = typeof params.limit === "number" ? params.limit : 10;
+				const project = typeof params.project === "string" ? params.project : undefined;
+				const recall = await searchSourceArtifacts(daemonUrl, query, {
+					limit,
+					agentId,
+					sessionKey: readTrimmedString(session.sessionId),
+					includeRecalled: params.includeRecalled === true,
+					project,
+				});
+				const parsed = parseRecallPayload(recall);
+
+				if (parsed.rows.length === 0) {
+					return {
+						content: [{ type: "text", text: "No relevant source artifacts found for this query." }],
+						details: { sourcesFound: 0 },
+					};
+				}
+
+				return {
+					content: [{ type: "text", text: formatRecallText(recall) }],
+					details: { sourcesFound: parsed.rows.length, sources: parsed.rows, meta: parsed.meta },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: `Error searching sources: ${message}` }],
+					details: { error: message },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	// signet_session_search tool
+	pi.registerTool({
+		name: "signet_session_search",
+		label: "Signet Session Search",
+		description:
+			"Search active or completed Signet session transcripts. This is transcript-only and separate from memory recall.",
+		promptSnippet:
+			"Search Signet session transcripts when prior conversation evidence matters; keep transcript lookup separate from memory recall",
+		promptGuidelines: [
+			"Use this when the user asks what happened in a prior session, wants transcript evidence, or needs exact conversational context",
+			"Prefer signet_recall for durable remembered facts and signet_source_search for source-backed artifacts",
+		],
+		parameters: Type.Object({
+			query: Type.String({
+				description: "Natural language or keyword query",
+			}),
+			sessionKey: Type.Optional(
+				Type.String({
+					description: "Specific transcript session key to search",
+				}),
+			),
+			currentSessionKey: Type.Optional(
+				Type.String({
+					description: "Current session key; sub-agent lineage may resolve this to the parent session",
+				}),
+			),
+			agentId: Type.Optional(
+				Type.String({
+					description: "Agent scope; defaults to the configured SIGNET_AGENT_ID when set",
+				}),
+			),
+			project: Type.Optional(
+				Type.String({
+					description: "Optional project path filter",
+				}),
+			),
+			limit: Type.Optional(
+				Type.Number({
+					description: "Max results to return (default 10, max 20)",
+					default: 10,
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const healthy = await checkDaemonHealth(daemonUrl);
+			if (!healthy) {
+				return {
+					content: [{ type: "text", text: "Signet daemon not running. Session search unavailable." }],
+					details: { error: "daemon_offline" },
+				};
+			}
+
+			try {
+				const query = String(params.query || "");
+				const result = await searchSessions(daemonUrl, query, {
+					sessionKey: typeof params.sessionKey === "string" ? params.sessionKey : undefined,
+					currentSessionKey: typeof params.currentSessionKey === "string" ? params.currentSessionKey : undefined,
+					agentId: typeof params.agentId === "string" ? params.agentId : agentId,
+					project: typeof params.project === "string" ? params.project : undefined,
+					limit: typeof params.limit === "number" ? params.limit : undefined,
+				});
+
+				return {
+					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+					details: { result },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: `Error searching sessions: ${message}` }],
+					details: { error: message },
+					isError: true,
+				};
+			}
+		},
+	});
+
 	// signet_remember tool
 	pi.registerTool({
 		name: "signet_remember",
@@ -648,68 +849,6 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 		},
 	});
 
-	// signet_memory_feedback tool
-	pi.registerTool({
-		name: "signet_memory_feedback",
-		label: "Memory Feedback",
-		description:
-			"Rate how relevant injected memories were to the conversation. " +
-			"Scores from -1 (harmful) to 1 (directly helpful). 0 = unused.",
-		promptSnippet:
-			"After each turn where injected memories are present, rate every memory's relevance " +
-			"so future recall improves. Always call this tool — do not skip feedback.",
-		promptGuidelines: [
-			"Call this tool EVERY turn that includes injected Signet memories",
-			"Rate each memory ID: 1 = directly helpful, 0 = unused, -1 = harmful/misleading",
-			"Do not wait for the user to ask — proactively rate memories after using them",
-			"Include ALL injected memory IDs in the ratings map, even unused ones (rate 0)",
-		],
-		parameters: Type.Object({
-			ratings: Type.Record(Type.String(), Type.Number(), {
-				description: "Map of memory ID to relevance score (-1 to 1)",
-			}),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const healthy = await checkDaemonHealth(daemonUrl);
-			if (!healthy) {
-				return {
-					content: [{ type: "text", text: "Signet daemon not running. Cannot record feedback." }],
-					details: { error: "daemon_offline" },
-				};
-			}
-
-			try {
-				const ratings = params.ratings as Record<string, number>;
-				const session = currentSessionRef(ctx);
-				const sessionKey = readTrimmedString(session.sessionId);
-				if (!sessionKey) {
-					return {
-						content: [{ type: "text", text: "Cannot record feedback: session not initialized." }],
-						details: { error: "no_session" },
-					};
-				}
-
-				const result = await sendMemoryFeedback(daemonUrl, sessionKey, ratings, { agentId });
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Recorded feedback for ${result.recorded} memories (${result.accepted ?? result.recorded} accepted).`,
-						},
-					],
-					details: result,
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: `Error recording feedback: ${message}` }],
-					details: { error: message },
-					isError: true,
-				};
-			}
-		},
-	});
 }
 
 // ============================================================================
