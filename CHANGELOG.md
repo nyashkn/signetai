@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-11
+- Features: support portable remote daemon auth.
 - Bug fixes: expose source and session search tools.
 
 ### 2026-06-10
@@ -32,6 +33,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: make transcript recapture idempotent; preserve setup onboarding; repair summary_jobs migration columns.
 
 ## Release Ledger
+
+## [0.139.0] - 2026-06-11
+
+Release summary: 1 feature.
+Tag range: `v0.138.34..v0.139.0`.
+
+### Features
+
+- **connectors**: support portable remote daemon auth (#836)
 
 ## [0.138.34] - 2026-06-11
 
