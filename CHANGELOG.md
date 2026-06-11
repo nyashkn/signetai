@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-11
+- Bug fixes: expose source and session search tools.
+
 ### 2026-06-10
 - Bug fixes: copy native-manifest.json into npm wrapper before publish; restore connector tarball and manifest to verify expected list; reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
 - Performance: batch graph traversal queries and cache secrets.
@@ -28,11 +31,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-06-01
 - Bug fixes: make transcript recapture idempotent; preserve setup onboarding; repair summary_jobs migration columns.
 
-### 2026-05-31
-- Refactoring: remove forge runtime.
-- Docs: nitpick; add missing contributors.
-
 ## Release Ledger
+
+## [0.138.34] - 2026-06-11
+
+Release summary: 1 bug fix.
+Tag range: `v0.138.33..v0.138.34`.
+
+### Bug Fixes
+
+- **pi**: expose source and session search tools
 
 ## [0.138.33] - 2026-06-10
 
