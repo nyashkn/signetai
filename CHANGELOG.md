@@ -8,7 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-11
 - Features: publish npm installer packages; support portable remote daemon auth.
-- Bug fixes: expose source and session search tools.
+- Bug fixes: stage connector packages for signetai npm scope; publish connector packages under signetai scope; expose source and session search tools.
 
 ### 2026-06-10
 - Bug fixes: copy native-manifest.json into npm wrapper before publish; restore connector tarball and manifest to verify expected list; reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
@@ -33,6 +33,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: make transcript recapture idempotent; preserve setup onboarding; repair summary_jobs migration columns.
 
 ## Release Ledger
+
+## [0.140.1] - 2026-06-11
+
+Release summary: 2 bug fixes.
+Tag range: `v0.140.0..v0.140.1`.
+
+### Bug Fixes
+
+- **release**: stage connector packages for signetai npm scope (#840)
+- **release**: publish connector packages under signetai scope (#838)
 
 ## [0.140.0] - 2026-06-11
 
