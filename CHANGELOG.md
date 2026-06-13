@@ -6,6 +6,10 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-13
+- Refactoring: modularize hooks architecture.
+- Docs: add remote harness setup guide.
+
 ### 2026-06-11
 - Features: publish npm installer packages; support portable remote daemon auth.
 - Bug fixes: stage connector packages for signetai npm scope; publish connector packages under signetai scope; expose source and session search tools.
@@ -29,10 +33,20 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-06-02
 - Bug fixes: decouple summary worker from pipelineV2 so dreaming gets summaries.
 
-### 2026-06-01
-- Bug fixes: make transcript recapture idempotent; preserve setup onboarding; repair summary_jobs migration columns.
-
 ## Release Ledger
+
+## [0.140.2] - 2026-06-13
+
+Release summary: 1 refactor and 1 docs update.
+Tag range: `v0.140.1..v0.140.2`.
+
+### Refactoring
+
+- **daemon**: modularize hooks architecture (#846)
+
+### Docs
+
+- **connectors**: add remote harness setup guide (#841)
 
 ## [0.140.1] - 2026-06-11
 
