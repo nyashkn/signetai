@@ -1487,3 +1487,30 @@ __pycache__/
 *.pyc
 *.log
 ```
+
+### Watcher ignore file
+
+Create `$SIGNET_WORKSPACE/.sigignore` to keep local runtime files in the
+Signet workspace without triggering daemon watcher work or git auto-commits.
+Patterns are matched relative to the workspace root and support common
+gitignore-style globs such as `*`, `?`, `**`, directory prefixes, comments
+with `#`, and later `!` negation inside the same file.
+
+When no `.sigignore` exists, the daemon creates one with sensible defaults
+covering known runtime artifacts (for example Fly harness homes). Example:
+
+```gitignore
+# Harness runtimes and sockets
+agents/*/.fly-*-home/
+*.sock
+
+# Keep a specific socket visible to the watcher
+!agents/<agent-name>/keep.sock
+```
+
+The `.sigignore` file itself is still watched, and new ignore patterns take
+effect without a daemon restart. If you remove a pattern that previously hid a
+whole existing directory, restart the daemon to guarantee that subtree is added
+back to the watcher. Signet also always ignores its managed source checkout,
+memory database files, generated memory artifacts, and per-agent generated
+`workspace/AGENTS.md`.

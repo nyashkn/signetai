@@ -893,7 +893,9 @@ signet api-key revoke <id-or-prefix>
 ```
 
 The raw `sig_sk_...` key is printed once. Store it on the remote machine as
-`SIGNET_API_KEY`.
+`SIGNET_API_KEY`. `--agent-id` creates an auth-enforced agent scope: a key
+created with `--agent-id <agent-name>` defaults requests to that agent and rejects requests
+for other agents.
 
 ---
 
@@ -907,6 +909,9 @@ machine setup, see [[remote-connectors|Remote Harness Connectors]].
 ```bash
 signet connector install pi
 signet connector install pi --url https://signet-home.tailnet:3850 --api-key sig_sk_... --agent-id pi-work-laptop
+signet connect codex --url https://signet-home.tailnet:3850 --api-key sig_sk_...
+# For a Codex client scoped to one agent:
+signet api-key create --name "codex tailnet" --connector codex --agent-id <agent-name>
 signet connect codex --url https://signet-home.tailnet:3850 --api-key sig_sk_...
 ```
 
@@ -925,6 +930,7 @@ hook/MCP config as `signet connect codex`:
 
 ```bash
 npx -y @signetai/codex-plugin install --url https://signet-home.tailnet:3850 --api-key sig_sk_...
+# Use a key created with --agent-id <agent-name> to scope this Codex install to that agent.
 ```
 
 ---

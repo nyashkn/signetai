@@ -713,7 +713,20 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		try {
 			const raw = Number.parseInt(c.req.query("tzOffset") || "0", 10);
 			const tzOffsetMin = Number.isNaN(raw) ? 0 : Math.max(-840, Math.min(840, raw));
-			const timeline = getDbAccessor().withReadDb((db) => buildMemoryTimeline(db, { tzOffsetMin }));
+			const scopedAgent = resolveMemoryScopedAgentId(c, {
+				agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
+				sessionKey: c.req.header("x-signet-session-key"),
+			});
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentScope = getAgentScope(scopedAgent.agentId);
+			const timeline = getDbAccessor().withReadDb((db) =>
+				buildMemoryTimeline(db, {
+					tzOffsetMin,
+					agentId: shouldEnforceAuthScope(c) ? scopedAgent.agentId : undefined,
+					readPolicy: agentScope.readPolicy,
+					policyGroup: agentScope.policyGroup ?? undefined,
+				}),
+			);
 			return c.json(timeline);
 		} catch (e) {
 			logger.error("memory", "Error building memory timeline", e as Error);
@@ -739,21 +752,33 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	// =========================================================================
 	app.get("/api/memory/review-queue", (c) => {
 		try {
+			const scopedAgent = resolveMemoryScopedAgentId(c, {
+				agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
+				sessionKey: c.req.header("x-signet-session-key"),
+			});
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentScope = getAgentScope(scopedAgent.agentId);
+			const access = buildAgentScopeClause(scopedAgent.agentId, agentScope.readPolicy, agentScope.policyGroup);
+			const scopeProject = c.get("auth")?.claims?.scope?.project;
+			const projectSql = scopeProject ? " AND m.project = ?" : "";
+			const scopeArgs = scopeProject ? [...access.args, scopeProject] : access.args;
+			const scopePredicate = shouldEnforceAuthScope(c) ? `${access.sql}${projectSql}` : "";
 			const rows = getDbAccessor().withReadDb((db) => {
 				return db
 					.prepare(
 						`SELECT h.id, h.memory_id, h.event, h.old_content, h.new_content,
-					        h.reason, h.metadata, h.created_at, h.session_id,
-					        m.content AS current_content, m.type AS memory_type,
-					        m.importance
+						        h.reason, h.metadata, h.created_at, h.session_id,
+						        m.content AS current_content, m.type AS memory_type,
+						        m.importance
 					 FROM memory_history h
 					 LEFT JOIN memories m ON m.id = h.memory_id
 					 WHERE h.event IN ('DEDUP', 'REVIEW_NEEDED', 'BLOCKED_DESTRUCTIVE')
 					   AND h.created_at > datetime('now', '-30 days')
+					   ${scopePredicate}
 					 ORDER BY h.created_at DESC
 					 LIMIT 200`,
 					)
-					.all();
+					.all(...(shouldEnforceAuthScope(c) ? scopeArgs : []));
 			});
 			return c.json({ items: rows });
 		} catch (e) {
@@ -2631,7 +2656,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				save_aggregate: body.save_aggregate ?? body.saveAggregate,
 				agentId,
 				readPolicy: agentScope.readPolicy,
-				policyGroup: agentScope.policyGroup,
+				policyGroup: agentScope.policyGroup ?? undefined,
 				sessionKey: sessionKeyRaw,
 				includeRecalled: body.includeRecalled === true,
 				recallSurface: "api.memory.recall",
@@ -2705,7 +2730,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				project,
 				agentId,
 				readPolicy: agentScope.readPolicy,
-				policyGroup: agentScope.policyGroup,
+				policyGroup: agentScope.policyGroup ?? undefined,
 				sessionKey: sessionKeyRaw,
 				includeRecalled: includeRecalled === "1" || includeRecalled === "true",
 				recallSurface: "api.memory.search",
@@ -3204,6 +3229,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	// GET /api/documents — list documents
 	// =========================================================================
 	app.get("/api/documents", (c) => {
+		if (shouldEnforceAuthScope(c)) {
+			return c.json({ error: "documents list requires unscoped credentials" }, 403);
+		}
 		const status = c.req.query("status");
 		const limit = Math.min(Math.max(1, Number.parseInt(c.req.query("limit") ?? "50", 10) || 50), 500);
 		const offset = Math.max(0, Number.parseInt(c.req.query("offset") ?? "0", 10) || 0);
@@ -3242,6 +3270,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	// GET /api/documents/:id — single document details
 	// =========================================================================
 	app.get("/api/documents/:id", (c) => {
+		if (shouldEnforceAuthScope(c)) {
+			return c.json({ error: "document access requires unscoped credentials" }, 403);
+		}
 		const id = c.req.param("id");
 		try {
 			const accessor = getDbAccessor();
@@ -3262,6 +3293,17 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	app.get("/api/documents/:id/chunks", (c) => {
 		const id = c.req.param("id");
 		try {
+			const scopedAgent = resolveMemoryScopedAgentId(c, {
+				agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
+				sessionKey: c.req.header("x-signet-session-key"),
+			});
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentScope = getAgentScope(scopedAgent.agentId);
+			const access = buildAgentScopeClause(scopedAgent.agentId, agentScope.readPolicy, agentScope.policyGroup);
+			const scopeProject = c.get("auth")?.claims?.scope?.project;
+			const projectSql = scopeProject ? " AND m.project = ?" : "";
+			const scopeArgs = scopeProject ? [...access.args, scopeProject] : access.args;
+			const scopePredicate = shouldEnforceAuthScope(c) ? `${access.sql}${projectSql}` : "";
 			const accessor = getDbAccessor();
 			const chunks = accessor.withReadDb((db) => {
 				return db
@@ -3270,10 +3312,11 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					        dm.chunk_index
 					 FROM document_memories dm
 					 JOIN memories m ON m.id = dm.memory_id
-					 WHERE dm.document_id = ? AND m.is_deleted = 0
+						 WHERE dm.document_id = ? AND m.is_deleted = 0
+						   ${scopePredicate}
 					 ORDER BY dm.chunk_index ASC`,
 					)
-					.all(id);
+					.all(id, ...(shouldEnforceAuthScope(c) ? scopeArgs : []));
 			});
 			return c.json({ chunks, count: chunks.length });
 		} catch (e) {
@@ -3302,13 +3345,28 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			const now = new Date().toISOString();
 			const actor = resolveMutationActor(c, "document-api");
 
+			const delScopedAgent = resolveMemoryScopedAgentId(c, {
+				agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
+				sessionKey: c.req.header("x-signet-session-key"),
+			});
+			if (delScopedAgent.error) return c.json({ error: delScopedAgent.error }, 403);
+			const delAgentScope = getAgentScope(delScopedAgent.agentId);
+			const delAccess = buildAgentScopeClause(
+				delScopedAgent.agentId,
+				delAgentScope.readPolicy,
+				delAgentScope.policyGroup,
+			);
+			const delScopeProject = c.get("auth")?.claims?.scope?.project;
+			const delProjectSql = delScopeProject ? " AND m.project = ?" : "";
+			const delScopeArgs = delScopeProject ? [...delAccess.args, delScopeProject] : delAccess.args;
 			const linkedMemories = accessor.withReadDb((db) => {
 				return db
 					.prepare(
-						`SELECT memory_id FROM document_memories
-						 WHERE document_id = ?`,
+						`SELECT dm.memory_id FROM document_memories dm
+						 WHERE dm.document_id = ?
+						 ${shouldEnforceAuthScope(c) ? `AND EXISTS (SELECT 1 FROM memories m WHERE m.id = dm.memory_id AND m.is_deleted = 0${delAccess.sql}${delProjectSql})` : ""}`,
 					)
-					.all(id) as ReadonlyArray<{ memory_id: string }>;
+					.all(id, ...(shouldEnforceAuthScope(c) ? delScopeArgs : [])) as ReadonlyArray<{ memory_id: string }>;
 			});
 
 			let memoriesRemoved = 0;
@@ -3336,6 +3394,10 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 
 					memoriesRemoved++;
 				});
+			}
+
+			if (shouldEnforceAuthScope(c) && linkedMemories.length === 0) {
+				return c.json({ error: "document not found" }, 404);
 			}
 
 			accessor.withWriteTx((db) => {
