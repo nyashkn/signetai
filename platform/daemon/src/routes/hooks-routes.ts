@@ -5,7 +5,7 @@ import type { Context } from "hono";
 import type { Hono } from "hono";
 import { getAgentScope, resolveAgentId } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
-import { requirePermission, requireRateLimit } from "../auth";
+import { checkScope, requirePermission, requireRateLimit } from "../auth";
 import {
 	type AgentMessage,
 	type AgentMessageType,
@@ -482,10 +482,11 @@ function registerRemember(app: Hono): void {
 				return c.json({ success: true, memories: [], bypassed: true });
 			}
 
+			const headers: Record<string, string> = { "Content-Type": "application/json" };
 			const auth = c.req.header("authorization");
-			const headers: Record<string, string> = auth
-				? { "Content-Type": "application/json", Authorization: auth }
-				: { "Content-Type": "application/json" };
+			if (auth) headers["Authorization"] = auth;
+			const sessionKey = c.req.header("x-signet-session-key") ?? body.sessionKey;
+			if (sessionKey) headers["x-signet-session-key"] = sessionKey;
 			return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
 				method: "POST",
 				headers,
@@ -539,6 +540,26 @@ function registerRecall(app: Hono): void {
 				agentId: body.agentId ?? c.req.header("x-signet-agent-id"),
 				sessionKey: body.sessionKey,
 			});
+
+			// When aggregate save is requested, enforce scope for non-admin tokens.
+			if (aggregateSaveRequested) {
+				const aggAuth = c.get("auth");
+				if (aggAuth?.claims && aggAuth.claims.role !== "admin") {
+					const tokenProject = aggAuth.claims.scope?.project;
+					if (tokenProject && (!body.project || body.project !== tokenProject)) {
+						return c.json({ error: `scope restricted to project '${tokenProject}'` }, 403);
+					}
+					const scopeDecision = checkScope(
+						aggAuth.claims,
+						{ agent: agentId, project: body.project ?? undefined },
+						authConfig.mode,
+					);
+					if (!scopeDecision.allowed) {
+						return c.json({ error: scopeDecision.reason ?? "scope violation" }, 403);
+					}
+				}
+			}
+
 			const agentScope = getAgentScope(agentId);
 			const cfg = loadMemoryConfig(AGENTS_DIR);
 			if (body.aggregate === true && authConfig.mode !== "local") {
