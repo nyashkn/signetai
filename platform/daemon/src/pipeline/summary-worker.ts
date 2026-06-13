@@ -13,15 +13,16 @@
 import type { Database } from "bun:sqlite";
 import { spawn as nodeSpawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LlmProvider } from "@signet/core";
+import { resolveDefaultBasePath } from "@signet/core";
 import { normalizeAndHashContent } from "../content-normalization";
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import { countChanges } from "../db-helpers";
-import { inferType, isDuplicate } from "../hooks";
 import { getInferenceProvider } from "../llm";
 import { logger } from "../logger";
+import { inferType, isDuplicate } from "../memory-classification";
 import { loadMemoryConfig } from "../memory-config";
 import { IMMUTABLE_ARTIFACT_ERROR_PREFIX, writeSummaryArtifact } from "../memory-lineage";
 import { isNoiseSession } from "../session-noise";
@@ -129,7 +130,7 @@ function isContentHashUniqueError(err: unknown): boolean {
 // Config
 // ---------------------------------------------------------------------------
 
-const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
+const AGENTS_DIR = resolveDefaultBasePath();
 const POLL_INTERVAL_MS = 5_000;
 
 // Cached schema probe: true when summary_jobs has the new-schema columns
