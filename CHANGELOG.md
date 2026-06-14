@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-14
+- Bug fixes: reject invalid workspace config.
+
 ### 2026-06-13
 - Bug fixes: enforce scoped connector memory access; enforce scope checks on remember and aggregate-save routes.
 - Refactoring: modularize hooks architecture.
@@ -31,10 +34,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Refactoring: replace TypeScript runtime with Rust parity daemon.
 - Docs: tighten positioning flow; sharpen context custody pitch.
 
-### 2026-06-02
-- Bug fixes: decouple summary worker from pipelineV2 so dreaming gets summaries.
-
 ## Release Ledger
+
+## [0.140.5] - 2026-06-14
+
+Release summary: 1 bug fix.
+Tag range: `qa-assets-issue-848..v0.140.5`.
+
+### Bug Fixes
+
+- **connector-base**: reject invalid workspace config (#849)
 
 ## [0.140.4] - 2026-06-13
 
