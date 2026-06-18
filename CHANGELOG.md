@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-18
 - Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
+- Bug fixes: address qa findings.
 
 ### 2026-06-14
 - Bug fixes: reject invalid workspace config.
@@ -33,6 +34,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: recover reset summaries from prompt transcripts; embed memory writes.
 
 ## Release Ledger
+
+## [0.142.1] - 2026-06-18
+
+Release summary: 1 bug fix.
+Tag range: `v0.142.0..v0.142.1`.
+
+### Bug Fixes
+
+- **dashboard**: address qa findings (#851)
 
 ## [0.142.0] - 2026-06-18
 
