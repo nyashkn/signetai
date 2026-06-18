@@ -12,7 +12,13 @@
 
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { resolveDefaultBasePath } from "@signet/core";
+import {
+	identityModeManagesFiles,
+	identityModeReadsFiles,
+	loadIdentityMode,
+	resolveDefaultBasePath,
+	resolveStartupIdentityFiles,
+} from "@signet/core";
 import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "./agent-id";
 import { applyTokenBudget, selectWithTokenBudget } from "./context-budget";
 import {
@@ -157,6 +163,32 @@ function loadDbAccessor() {
 	} catch {
 		return null;
 	}
+}
+
+const IDENTITY_HEADER_BY_FILE: Record<string, string> = {
+	"AGENTS.md": "Agent Instructions",
+	"SOUL.md": "Soul",
+	"IDENTITY.md": "Identity",
+	"USER.md": "About Your User",
+	"MEMORY.md": "Working Memory",
+};
+
+const IDENTITY_BUDGET_BY_FILE: Record<string, number> = {
+	"AGENTS.md": 12_000,
+	"SOUL.md": 4_000,
+	"IDENTITY.md": 2_000,
+	"USER.md": 6_000,
+	"MEMORY.md": 10_000,
+};
+
+function identityHeaderFor(path: string, role?: string): string {
+	const filename = path.split(/[\\/]/).pop() ?? path;
+	return IDENTITY_HEADER_BY_FILE[filename] ?? role ?? filename.replace(/\.md$/i, "");
+}
+
+function identityBudgetFor(path: string): number {
+	const filename = path.split(/[\\/]/).pop() ?? path;
+	return IDENTITY_BUDGET_BY_FILE[filename] ?? 4_000;
 }
 
 // ============================================================================
@@ -532,7 +564,9 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const resolvedHooksConfig = loadHooksConfigForHarness(req.harness);
 	const config = resolvedHooksConfig.sessionStart || {};
 	const memoryCfg = loadMemoryConfig(getAgentsDir());
-	const includeIdentity = config.includeIdentity !== false;
+	const identityMode = loadIdentityMode(getAgentsDir());
+	const managesIdentity = identityModeManagesFiles(identityMode);
+	const includeIdentity = identityModeReadsFiles(identityMode) && config.includeIdentity !== false;
 
 	logger.info("hooks", "Session start hook", {
 		harness: req.harness,
@@ -600,11 +634,28 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		? readContextIdentitySections(agentsDir, resolvedHooksConfig.identity, identityFiles)
 		: null;
 	const profileHasExplicitIdentityFiles =
-		includeIdentity && resolvedHooksConfig.identity?.include !== false && resolvedHooksConfig.identity?.files !== undefined;
+		includeIdentity &&
+		resolvedHooksConfig.identity?.include !== false &&
+		resolvedHooksConfig.identity?.files !== undefined;
 
 	// Read AGENTS.md first so harness instructions precede synthesized memory.
 	const agentsMdContent =
 		includeIdentity && profileIdentitySections === null ? readAgentsMd(agentsDir, 12000, identityFiles) : undefined;
+	const startupIdentitySections =
+		includeIdentity && profileIdentitySections === null
+			? resolveStartupIdentityFiles(agentsDir)
+					.filter((entry) => entry.path !== "AGENTS.md" && entry.path !== "MEMORY.md")
+					.map((entry) => ({
+						header: identityHeaderFor(entry.path, entry.role),
+						content: readIdentityFile(
+							agentsDir,
+							entry.path,
+							entry.budget ?? identityBudgetFor(entry.path),
+							identityFiles,
+						),
+					}))
+					.filter((section): section is { header: string; content: string } => Boolean(section.content))
+			: [];
 
 	// Read MEMORY.md with 10k char budget unless a context profile supplies the identity/context file list.
 	const memoryMdContent =
@@ -909,7 +960,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const injectParts: string[] = [];
 	let recoverySection = "";
 
-	injectParts.push(buildSignetSystemPrompt());
+	injectParts.push(buildSignetSystemPrompt({ includeIdentityStewardship: managesIdentity }));
 	const systemPluginContext = buildPluginPromptContributionSection("system", logger);
 	if (systemPluginContext) {
 		injectParts.push(systemPluginContext);
@@ -962,8 +1013,6 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (agentsMdContent) {
 		injectParts.push("\n## Agent Instructions\n");
 		injectParts.push(agentsMdContent);
-	} else if (profileIdentitySections === null && (identity.name !== "Agent" || identity.description)) {
-		injectParts.push(`You are ${identity.name}${identity.description ? `, ${identity.description}` : ""}.`);
 	}
 
 	if (profileIdentitySections !== null) {
@@ -976,24 +1025,13 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			injectParts.push(memoryMdContent);
 		}
 	} else {
-		// Inject additional identity files.
-		const soulContent = includeIdentity ? readIdentityFile(agentsDir, "SOUL.md", 4000, identityFiles) : undefined;
-		const identityContent = includeIdentity
-			? readIdentityFile(agentsDir, "IDENTITY.md", 2000, identityFiles)
-			: undefined;
-		const userContent = includeIdentity ? readIdentityFile(agentsDir, "USER.md", 6000, identityFiles) : undefined;
-
-		if (soulContent) {
-			injectParts.push("\n## Soul\n");
-			injectParts.push(soulContent);
-		}
-		if (identityContent) {
-			injectParts.push("\n## Identity\n");
-			injectParts.push(identityContent);
-		}
-		if (userContent) {
-			injectParts.push("\n## About Your User\n");
-			injectParts.push(userContent);
+		if (startupIdentitySections.length > 0) {
+			for (const section of startupIdentitySections) {
+				injectParts.push(`\n## ${section.header}\n`);
+				injectParts.push(section.content);
+			}
+		} else if (!agentsMdContent && managesIdentity && (identity.name !== "Agent" || identity.description)) {
+			injectParts.push(`You are ${identity.name}${identity.description ? `, ${identity.description}` : ""}.`);
 		}
 
 		if (memoryMdContent) {
