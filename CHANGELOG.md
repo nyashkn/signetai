@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-18
-- Features: add context budget profiles.
+- Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
 
 ### 2026-06-14
 - Bug fixes: reject invalid workspace config.
@@ -33,6 +33,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: recover reset summaries from prompt transcripts; embed memory writes.
 
 ## Release Ledger
+
+## [0.142.0] - 2026-06-18
+
+Release summary: 2 features.
+Tag range: `v0.141.0..v0.142.0`.
+
+### Features
+
+- **daemon**: dashboard admin login with password authentication
+- **identity**: add capability-module identity modes (managed/passthrough/off)
 
 ## [0.141.0] - 2026-06-18
 
