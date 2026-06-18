@@ -1,27 +1,135 @@
 import type { Context, Hono, Next } from "hono";
 import {
-	createApiKey,
-	createToken,
-	listApiKeys,
-	requirePermission,
-	revokeApiKey,
-	requireRateLimit,
 	type Permission,
 	type TokenRole,
 	type TokenScope,
+	createApiKey,
+	createToken,
+	getPeerAddress,
+	listApiKeys,
+	requirePermission,
+	requireRateLimit,
+	revokeApiKey,
+	verifyPasswordHash,
+	verifyPlainPassword,
 } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
-import { authAdminLimiter, authConfig, authSecret } from "./state.js";
+import { readEnvTrimmed } from "./state.js";
+import { authAdminLimiter, authConfig, authLoginLimiter, authSecret } from "./state.js";
+
+const MAX_USERNAME_LENGTH = 128;
+const MAX_PASSWORD_LENGTH = 1024;
+
+function resolvePasswordLogin(): {
+	readonly username: string;
+	readonly passwordHash: string | null;
+	readonly plainPassword: string | null;
+	readonly configured: boolean;
+} {
+	const username = readEnvTrimmed("SIGNET_ADMIN_USERNAME") ?? authConfig.login.password.username;
+	const passwordHash = readEnvTrimmed("SIGNET_ADMIN_PASSWORD_HASH") ?? authConfig.login.password.passwordHash;
+	const plainPassword = readEnvTrimmed("SIGNET_ADMIN_PASSWORD") ?? null;
+	return {
+		username,
+		passwordHash,
+		plainPassword,
+		configured: Boolean(passwordHash || plainPassword),
+	};
+}
+
+function isValidLoginString(value: unknown, maxLength: number): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+function authProviderResponse() {
+	const login = resolvePasswordLogin();
+	return {
+		mode: authConfig.mode,
+		providers: [
+			{
+				id: "password",
+				type: "password",
+				enabled: login.configured,
+				username: login.username,
+			},
+			{
+				id: "sso",
+				type: "oidc",
+				enabled: false,
+				startPath: "/api/auth/sso/start",
+			},
+			{
+				id: "saml",
+				type: "saml",
+				enabled: false,
+				startPath: "/api/auth/saml/start",
+			},
+		],
+	};
+}
 
 export function registerAuthRoutes(app: Hono): void {
 	app.get("/api/auth/whoami", (c) => {
 		const auth = c.get("auth");
+		const effectiveAccess = authConfig.mode === "local" || auth?.authenticated === true || auth?.trustedLocal === true;
 		return c.json({
 			authenticated: auth?.authenticated ?? false,
+			trustedLocal: auth?.trustedLocal === true,
+			effectiveAccess,
 			claims: auth?.claims ?? null,
 			mode: authConfig.mode,
+			providers: authProviderResponse().providers,
 		});
 	});
+
+	app.get("/api/auth/methods", (c) => c.json(authProviderResponse()));
+
+	app.post("/api/auth/login", async (c) => {
+		const limitKey = `login:${getPeerAddress(c) ?? "anonymous"}`;
+		const check = authLoginLimiter.check(limitKey);
+		if (!check.allowed) {
+			c.status(429);
+			c.header("Retry-After", String(Math.ceil((check.resetAt - Date.now()) / 1000)));
+			return c.json({ error: "rate limit exceeded", retryAfter: check.resetAt });
+		}
+		authLoginLimiter.record(limitKey);
+
+		if (!authSecret) {
+			return c.json({ error: "auth secret not available" }, 400);
+		}
+
+		const payload = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+		if (!payload) return c.json({ error: "invalid request body" }, 400);
+
+		if (!isValidLoginString(payload.username, MAX_USERNAME_LENGTH)) {
+			return c.json({ error: "username is required" }, 400);
+		}
+		if (!isValidLoginString(payload.password, MAX_PASSWORD_LENGTH)) {
+			return c.json({ error: "password is required" }, 400);
+		}
+
+		const login = resolvePasswordLogin();
+		if (!login.configured) {
+			return c.json({ error: "password login is not configured" }, 503);
+		}
+
+		const usernameMatches = verifyPlainPassword(payload.username, login.username);
+		const hashMatches = login.passwordHash ? verifyPasswordHash(payload.password, login.passwordHash) : false;
+		const plainMatches = login.plainPassword ? verifyPlainPassword(payload.password, login.plainPassword) : false;
+		if (!usernameMatches || (!hashMatches && !plainMatches)) {
+			return c.json({ error: "invalid username or password" }, 401);
+		}
+
+		const ttl = authConfig.sessionTokenTtlSeconds;
+		const token = createToken(authSecret, { sub: "dashboard:admin", scope: {}, role: "admin" }, ttl);
+		const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+		return c.json({ token, expiresAt, role: "admin", username: login.username });
+	});
+
+	app.get("/api/auth/sso/start", (c) => c.json({ error: "SSO login is not configured", provider: "sso" }, 501));
+	app.get("/api/auth/sso/callback", (c) => c.json({ error: "SSO callback is not configured", provider: "sso" }, 501));
+	app.post("/api/auth/saml/acs", (c) => c.json({ error: "SAML ACS is not configured", provider: "saml" }, 501));
+	app.get("/api/auth/saml/start", (c) => c.json({ error: "SAML login is not configured", provider: "saml" }, 501));
 
 	const requireAdminAuth = async (c: Context, next: Next) => {
 		const perm = requirePermission("admin", authConfig);
