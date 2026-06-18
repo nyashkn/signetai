@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-18
+- Features: add context budget profiles.
+
 ### 2026-06-14
 - Bug fixes: reject invalid workspace config.
 
@@ -29,12 +32,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-06-04
 - Bug fixes: recover reset summaries from prompt transcripts; embed memory writes.
 
-### 2026-06-03
-- Bug fixes: embed native cli version; keep rust daemon runtime opt-in; pack native tarballs from local paths; publish native npm assets as release tarballs; bundle native assets in npm package; publish native packages without npm scope; buffer streaming reasoning fallback.
-- Refactoring: replace TypeScript runtime with Rust parity daemon.
-- Docs: tighten positioning flow; sharpen context custody pitch.
-
 ## Release Ledger
+
+## [0.141.0] - 2026-06-18
+
+Release summary: 1 feature.
+Tag range: `v0.140.5..v0.141.0`.
+
+### Features
+
+- **daemon**: add context budget profiles
 
 ## [0.140.5] - 2026-06-14
 
