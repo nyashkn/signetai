@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-19
-- Bug fixes: render skills marketplace reliably.
+- Bug fixes: limit constellation entity types; render skills marketplace reliably.
 
 ### 2026-06-18
 - Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
@@ -34,6 +34,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: rewrite root vision and agents policy for current surface.
 
 ## Release Ledger
+
+## [0.142.3] - 2026-06-19
+
+Release summary: 1 bug fix.
+Tag range: `v0.142.2..v0.142.3`.
+
+### Bug Fixes
+
+- **dashboard**: limit constellation entity types (#854)
 
 ## [0.142.2] - 2026-06-19
 
