@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-19
+- Bug fixes: render skills marketplace reliably.
+
 ### 2026-06-18
 - Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
 - Bug fixes: address qa findings.
@@ -30,10 +33,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: correct repo URL to Signet-AI/signetai; restore signet-mcp stdio JSON-RPC server (#826).
 - Docs: rewrite root vision and agents policy for current surface.
 
-### 2026-06-04
-- Bug fixes: recover reset summaries from prompt transcripts; embed memory writes.
-
 ## Release Ledger
+
+## [0.142.2] - 2026-06-19
+
+Release summary: 1 bug fix.
+Tag range: `v0.142.1..v0.142.2`.
+
+### Bug Fixes
+
+- **dashboard**: render skills marketplace reliably (#852)
 
 ## [0.142.1] - 2026-06-18
 
