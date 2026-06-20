@@ -7,6 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-20
+- Features: add ForgeCode integration.
 - Bug fixes: restore native vector runtime.
 
 ### 2026-06-19
@@ -33,6 +34,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: batch graph traversal queries and cache secrets.
 
 ## Release Ledger
+
+## [0.143.0] - 2026-06-20
+
+Release summary: 1 feature.
+Tag range: `v0.142.4..v0.143.0`.
+
+### Features
+
+- **connector**: add ForgeCode integration (#856)
 
 ## [0.142.4] - 2026-06-20
 
