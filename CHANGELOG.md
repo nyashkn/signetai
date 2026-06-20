@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-20
+- Bug fixes: restore native vector runtime.
+
 ### 2026-06-19
 - Bug fixes: limit constellation entity types; render skills marketplace reliably.
 
@@ -29,11 +32,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: copy native-manifest.json into npm wrapper before publish; restore connector tarball and manifest to verify expected list; reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
 - Performance: batch graph traversal queries and cache secrets.
 
-### 2026-06-09
-- Bug fixes: correct repo URL to Signet-AI/signetai; restore signet-mcp stdio JSON-RPC server (#826).
-- Docs: rewrite root vision and agents policy for current surface.
-
 ## Release Ledger
+
+## [0.142.4] - 2026-06-20
+
+Release summary: 1 bug fix.
+Tag range: `v0.142.3..v0.142.4`.
+
+### Bug Fixes
+
+- **docker**: restore native vector runtime (#857)
 
 ## [0.142.3] - 2026-06-19
 
