@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-20
-- Features: add ForgeCode integration.
+- Features: add context traces to logs; add ForgeCode integration.
 - Bug fixes: harden session transcript capture; accept session summary agent_id; restore native vector runtime.
 
 ### 2026-06-19
@@ -34,6 +34,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Performance: batch graph traversal queries and cache secrets.
 
 ## Release Ledger
+
+## [0.144.0] - 2026-06-20
+
+Release summary: 1 feature.
+Tag range: `v0.143.2..v0.144.0`.
+
+### Features
+
+- **dashboard**: add context traces to logs (#860)
 
 ## [0.143.2] - 2026-06-20
 
