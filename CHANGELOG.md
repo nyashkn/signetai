@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-21
+- Bug fixes: scope document chunk routes.
+
 ### 2026-06-20
 - Features: add context traces to logs; add ForgeCode integration.
 - Bug fixes: harden session transcript capture; accept session summary agent_id; restore native vector runtime.
@@ -29,11 +32,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: publish npm installer packages; support portable remote daemon auth.
 - Bug fixes: stage connector packages for signetai npm scope; publish connector packages under signetai scope; expose source and session search tools.
 
-### 2026-06-10
-- Bug fixes: copy native-manifest.json into npm wrapper before publish; restore connector tarball and manifest to verify expected list; reorder release steps — generate assets before verifying them; remove connector tarball and manifest from release verify step; expose aggregate recall in signet_recall tool for pi connector; ship connector plugin assets + rename session_search (#831).
-- Performance: batch graph traversal queries and cache secrets.
-
 ## Release Ledger
+
+## [0.144.1] - 2026-06-21
+
+Release summary: 1 bug fix.
+Tag range: `v0.144.0..v0.144.1`.
+
+### Bug Fixes
+
+- **daemon**: scope document chunk routes (#864)
 
 ## [0.144.0] - 2026-06-20
 
