@@ -8,6 +8,7 @@ Surface summary of the most recent release dates. See the release ledger below f
 
 ### 2026-06-24
 - Features: Rust daemon full parity effort.
+- Bug fixes: harden workspace backup commits.
 
 ### 2026-06-21
 - Bug fixes: scope document chunk routes.
@@ -32,6 +33,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Docs: add remote harness setup guide.
 
 ## Release Ledger
+
+## [0.145.1] - 2026-06-24
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.0..v0.145.1`.
+
+### Bug Fixes
+
+- **git**: harden workspace backup commits (#866)
 
 ## [0.145.0] - 2026-06-24
 
