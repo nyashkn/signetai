@@ -7,7 +7,7 @@ All notable changes to Signet are documented here.
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
 ### 2026-06-28
-- Bug fixes: make daily brief a single memory question; generate daily brief gaps from saved memories; stabilize skills catalog identity.
+- Bug fixes: add daily brief refresh; make daily brief a single memory question; generate daily brief gaps from saved memories; stabilize skills catalog identity.
 
 ### 2026-06-26
 - Bug fixes: surface Signet health diagnostics.
@@ -31,6 +31,15 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Bug fixes: address qa findings.
 
 ## Release Ledger
+
+## [0.145.6] - 2026-06-28
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.5..v0.145.6`.
+
+### Bug Fixes
+
+- **dashboard**: add daily brief refresh (#875)
 
 ## [0.145.5] - 2026-06-28
 
