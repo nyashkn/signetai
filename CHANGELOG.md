@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-28
+- Bug fixes: stabilize skills catalog identity.
+
 ### 2026-06-26
 - Bug fixes: surface Signet health diagnostics.
 
@@ -27,10 +30,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
 - Bug fixes: address qa findings.
 
-### 2026-06-14
-- Bug fixes: reject invalid workspace config.
-
 ## Release Ledger
+
+## [0.145.3] - 2026-06-28
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.2..v0.145.3`.
+
+### Bug Fixes
+
+- **dashboard**: stabilize skills catalog identity (#872)
 
 ## [0.145.2] - 2026-06-26
 
