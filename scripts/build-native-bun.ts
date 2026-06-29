@@ -203,6 +203,21 @@ runBunBuild([
 
 console.log(`Built native Bun executable: ${outfile}`);
 
+// macOS refuses to exec a Mach-O whose signature doesn't match its bytes.
+// `bun build --compile` appends our bundle to the Bun runtime, invalidating
+// the runtime's existing signature, and does not re-sign. Ad-hoc sign so the
+// kernel will launch it; without this the binary SIGKILLs (137) on every exec.
+if (platformKey.startsWith("darwin-")) {
+	const signed = spawnSync("codesign", ["--force", "--sign", "-", outfile], {
+		stdio: "inherit",
+		windowsHide: true,
+	});
+	if (signed.status !== 0) {
+		process.exit(signed.status ?? 1);
+	}
+	console.log(`Ad-hoc signed native executable: ${outfile}`);
+}
+
 if (!process.env.SIGNET_NATIVE_PLATFORM) {
 	const localName = platform() === "win32" ? "signet.exe" : "signet";
 	const localPath = join(outDir, localName);
