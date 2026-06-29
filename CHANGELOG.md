@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-29
+- Bug fixes: align daily brief typography.
+
 ### 2026-06-28
 - Bug fixes: add daily brief refresh; make daily brief a single memory question; generate daily brief gaps from saved memories; stabilize skills catalog identity.
 
@@ -26,11 +29,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-06-19
 - Bug fixes: limit constellation entity types; render skills marketplace reliably.
 
-### 2026-06-18
-- Features: dashboard admin login with password authentication; add capability-module identity modes (managed/passthrough/off); add context budget profiles.
-- Bug fixes: address qa findings.
-
 ## Release Ledger
+
+## [0.145.7] - 2026-06-29
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.6..v0.145.7`.
+
+### Bug Fixes
+
+- **dashboard**: align daily brief typography (#876)
 
 ## [0.145.6] - 2026-06-28
 
