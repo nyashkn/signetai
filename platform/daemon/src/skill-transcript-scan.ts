@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parseTranscriptSkills } from "@signet/core";
+import { parseCodexTranscriptSkills, parseTranscriptSkills } from "@signet/core";
 import { logger } from "./logger.js";
 import { recordSkillInvocation } from "./skill-invocations";
 
@@ -8,6 +8,8 @@ export function recordSkillsFromTranscript(args: {
 	readonly harness: string;
 	readonly agentId: string;
 	readonly origin?: string; // default "scan"
+	readonly sessionId?: string;
+	readonly cwd?: string;
 }): void {
 	if (args.transcriptPath.trim().length === 0) return;
 
@@ -26,7 +28,10 @@ export function recordSkillsFromTranscript(args: {
 	// setImmediate, where an uncaught throw would crash the daemon). Guard the
 	// parse + record loop so the whole function is throw-proof at the contract.
 	try {
-		const { records, skipped } = parseTranscriptSkills(content);
+		const isCodex = args.harness.trim().toLowerCase() === "codex";
+		const { records, skipped } = isCodex
+			? parseCodexTranscriptSkills(content, { sessionId: args.sessionId, cwd: args.cwd })
+			: parseTranscriptSkills(content);
 		const origin = args.origin ?? "scan";
 
 		for (const rec of records) {

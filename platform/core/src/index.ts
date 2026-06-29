@@ -396,7 +396,7 @@ export type {
 } from "./skills";
 
 // Skill transcript parsing (pure — no fs)
-export { parseTranscriptSkills } from "./skill-transcript";
+export { parseCodexTranscriptSkills, parseTranscriptSkills } from "./skill-transcript";
 export type { ParsedSkillInvocation } from "./skill-transcript";
 
 // Memory import

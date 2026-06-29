@@ -399,9 +399,19 @@ function registerSessionEnd(app: Hono): void {
 				}
 				const transcriptPath = parseOptionalString(body.transcriptPath);
 				if (transcriptPath) {
+					const bodyRec = toRecord(body) ?? {};
+					const sessionId = parseOptionalString(bodyRec.sessionId ?? bodyRec.sessionKey);
+					const cwd = parseOptionalString(bodyRec.cwd);
 					// recordSkillsFromTranscript is throw-proof by contract — safe in setImmediate.
 					setImmediate(() =>
-						recordSkillsFromTranscript({ transcriptPath, harness: body.harness, agentId, origin: "scan" }),
+						recordSkillsFromTranscript({
+							transcriptPath,
+							harness: body.harness,
+							agentId,
+							origin: "scan",
+							sessionId,
+							cwd,
+						}),
 					);
 				}
 				return c.json(result);
@@ -692,8 +702,17 @@ function registerPreCompaction(app: Hono): void {
 
 			const result = handlePreCompaction(body);
 			if (transcriptPath) {
+				const sessionId = parseOptionalString(rawBody.sessionId ?? rawBody.sessionKey);
+				const cwd = parseOptionalString(rawBody.cwd);
 				setImmediate(() =>
-					recordSkillsFromTranscript({ transcriptPath, harness: body.harness, agentId, origin: "scan" }),
+					recordSkillsFromTranscript({
+						transcriptPath,
+						harness: body.harness,
+						agentId,
+						origin: "scan",
+						sessionId,
+						cwd,
+					}),
 				);
 			}
 			return c.json(result);
