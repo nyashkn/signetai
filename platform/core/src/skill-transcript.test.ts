@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTranscriptSkills } from "./skill-transcript.js";
+import { parseCodexTranscriptSkills, parseTranscriptSkills } from "./skill-transcript.js";
 
 const T1 = "2024-01-01T10:00:00.000Z";
 const T2 = "2024-01-01T10:00:01.500Z"; // +1500ms
@@ -101,5 +101,106 @@ describe("parseTranscriptSkills", () => {
 		const { records, skipped } = parseTranscriptSkills(`${fixture}\nnot-json\n{broken`);
 		expect(records.length).toBe(2);
 		expect(skipped).toBe(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Codex JSONL fixture
+// ---------------------------------------------------------------------------
+
+// session_meta provides a cwd that records should inherit when context.cwd absent.
+// signet_recall with call_id c001 + matching output (success=true).
+// shell call — non-signet, must be ignored.
+// signet_source_search with call_id c002 but no output — must be skipped.
+// signet_session_search with no call_id — must emit __seq:0, success=true.
+const codexFixture = [
+	JSON.stringify({ type: "session_meta", payload: { cwd: "/meta/cwd" } }),
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call", name: "signet_recall", call_id: "c001", arguments: '{"query":"foo"}' },
+	}),
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call_output", call_id: "c001", output: "found", is_error: false },
+	}),
+	// non-signet — must be ignored entirely
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call", name: "shell", call_id: "s001", arguments: '{"cmd":"ls"}' },
+	}),
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call_output", call_id: "s001", output: "README.md" },
+	}),
+	// signet call with call_id but no matching output → skipped
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call", name: "signet_source_search", call_id: "c002", arguments: '{"query":"bar"}' },
+	}),
+	// signet call without call_id → synthetic toolUseId
+	JSON.stringify({
+		type: "response_item",
+		payload: { type: "function_call", name: "signet_session_search", arguments: '{"q":"baz"}' },
+	}),
+].join("\n");
+
+describe("parseCodexTranscriptSkills", () => {
+	test("signet call with call_id and output emits one record with skill_name equal to tool name", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture);
+		const rec = records.find((r) => r.toolUseId === "c001");
+		expect(rec).toBeDefined();
+		if (!rec) return;
+		expect(rec.skillName).toBe("signet_recall");
+		expect(rec.success).toBe(true);
+		expect(rec.toolUseId).toBe("c001");
+	});
+
+	test("non-signet call (shell) is ignored", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture);
+		const shellRec = records.find((r) => r.skillName === "shell");
+		expect(shellRec).toBeUndefined();
+	});
+
+	test("signet call with call_id but no output increments skipped", () => {
+		const { skipped } = parseCodexTranscriptSkills(codexFixture);
+		expect(skipped).toBe(1);
+	});
+
+	test("signet call without call_id emits record with synthetic toolUseId and success=true", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture);
+		const rec = records.find((r) => r.toolUseId === "__seq:0");
+		expect(rec).toBeDefined();
+		if (!rec) return;
+		expect(rec.skillName).toBe("signet_session_search");
+		expect(rec.success).toBe(true);
+	});
+
+	test("cwd falls back to session_meta value when context.cwd is absent", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture);
+		for (const r of records) {
+			expect(r.cwd).toBe("/meta/cwd");
+		}
+	});
+
+	test("injected context.cwd takes precedence over session_meta cwd", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture, { cwd: "/injected/cwd" });
+		for (const r of records) {
+			expect(r.cwd).toBe("/injected/cwd");
+		}
+	});
+
+	test("context.sessionId is propagated to all records", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture, { sessionId: "codex-sess-1" });
+		for (const r of records) {
+			expect(r.sessionId).toBe("codex-sess-1");
+		}
+	});
+
+	test("latencyMs and createdAtMs are always 0 (no timestamps in Codex transcripts)", () => {
+		const { records } = parseCodexTranscriptSkills(codexFixture);
+		for (const r of records) {
+			expect(r.latencyMs).toBe(0);
+			expect(r.createdAtMs).toBe(0);
+		}
 	});
 });
