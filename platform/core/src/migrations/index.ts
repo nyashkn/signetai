@@ -86,6 +86,7 @@ import { up as entityAliases } from "./077-entity-aliases";
 import { up as apiKeys } from "./078-api-keys";
 import { up as transcriptCaptureJobs } from "./079-transcript-capture-jobs";
 import { up as documentScopeColumns } from "./080-document-scope-columns";
+import { up as skillInvocationsHarness } from "./081-skill-invocations-harness";
 
 // -- Public interface consumed by Database.init() --
 
@@ -762,6 +763,17 @@ export const MIGRATIONS: readonly Migration[] = [
 			columns: [
 				{ table: "documents", column: "agent_id" },
 				{ table: "documents", column: "project" },
+			],
+		},
+	},
+	{
+		version: 81,
+		name: "skill-invocations-harness",
+		up: skillInvocationsHarness,
+		artifacts: {
+			columns: [
+				{ table: "skill_invocations", column: "harness" },
+				{ table: "skill_invocations", column: "tool_use_id" },
 			],
 		},
 	},
