@@ -6,6 +6,9 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-06-30
+- Bug fixes: prevent recursive aggregate recall evidence.
+
 ### 2026-06-29
 - Bug fixes: align daily brief typography.
 
@@ -26,10 +29,16 @@ Surface summary of the most recent release dates. See the release ledger below f
 - Features: add context traces to logs; add ForgeCode integration.
 - Bug fixes: harden session transcript capture; accept session summary agent_id; restore native vector runtime.
 
-### 2026-06-19
-- Bug fixes: limit constellation entity types; render skills marketplace reliably.
-
 ## Release Ledger
+
+## [0.145.8] - 2026-06-30
+
+Release summary: 1 bug fix.
+Tag range: `v0.145.7..v0.145.8`.
+
+### Bug Fixes
+
+- **memory**: prevent recursive aggregate recall evidence (#877)
 
 ## [0.145.7] - 2026-06-29
 
