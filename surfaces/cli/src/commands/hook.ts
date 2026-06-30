@@ -19,6 +19,7 @@ interface HookDeps {
 const SESSION_START_TIMEOUT_MS = resolveSessionStartTimeout();
 const PROMPT_SUBMIT_TIMEOUT_MS = resolvePromptSubmitTimeout();
 const LEGACY_RUNTIME_PATH = "legacy" as const;
+const STDIN_TIMEOUT_MS = 2000;
 
 function legacyHookHeaders(headers?: HeadersInit): Headers {
 	const merged = new Headers(headers);
@@ -259,6 +260,11 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 			const input = await readJson();
 			const sessionKey = pickSessionKey(input);
 			const sessionContext = pickString(input?.session_context, input?.sessionContext);
+			// Forward the transcript path so the daemon can run its skill scan at
+			// compaction as a crash-resilient checkpoint (SessionEnd does the same).
+			// Re-scanning the same transcript is deduped on (harness, session_id,
+			// tool_use_id), so the checkpoint can't double-count.
+			const transcriptPath = pickString(input?.transcript_path, input?.transcriptPath);
 			const data = await fetchHookData<{ summaryPrompt?: string; guidelines?: string; error?: string }>(
 				deps,
 				"pre-compaction",
@@ -270,6 +276,7 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 						messageCount: options.messageCount,
 						sessionKey,
 						sessionContext,
+						transcriptPath,
 						runtimePath: LEGACY_RUNTIME_PATH,
 					}),
 				},
@@ -393,9 +400,16 @@ async function readJson(): Promise<Record<string, unknown> | null> {
 	try {
 		if (process.stdin.isTTY) return null;
 		const chunks: Buffer[] = [];
-		for await (const chunk of process.stdin) {
-			chunks.push(chunk);
-		}
+		const stdinDone = (async (): Promise<void> => {
+			for await (const chunk of process.stdin) {
+				chunks.push(chunk);
+			}
+		})();
+		const timedOut = new Promise<never>((_, reject) => {
+			const timer = setTimeout(() => reject(new Error("stdin timeout")), STDIN_TIMEOUT_MS);
+			timer.unref();
+		});
+		await Promise.race([stdinDone, timedOut]);
 		const input = Buffer.concat(chunks).toString("utf-8").trim();
 		if (!input) return null;
 		const parsed = JSON.parse(input);
