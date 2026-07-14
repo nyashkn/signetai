@@ -418,6 +418,39 @@ export function parseRememberArgs(raw: string): RememberArgs {
 }
 
 // ============================================================================
+// Skill-invocation capture
+// ============================================================================
+
+export function emitSkillInvocation(
+	daemonUrl: string,
+	agentId: string | undefined,
+	skillName: string,
+	toolCallId: string,
+	session: { readonly sessionId?: string | null; readonly project?: string | null } | null,
+	params: Record<string, unknown>,
+	success: boolean,
+	errorText?: string,
+): void {
+	void fetch(`${daemonUrl}/api/hooks/skill-invocation`, {
+		method: "POST",
+		headers: daemonHeaders({ "Content-Type": "application/json" }),
+		body: JSON.stringify({
+			harness: HARNESS,
+			skillName,
+			agentId,
+			sessionId: session?.sessionId,
+			toolUseId: toolCallId,
+			cwd: session?.project ?? RUNTIME_PATH,
+			args: JSON.stringify(params)?.slice(0, 2000),
+			success,
+			errorText,
+			origin: "tool",
+		}),
+		signal: AbortSignal.timeout(3000),
+	}).catch(() => {});
+}
+
+// ============================================================================
 // Commands and Tools
 // ============================================================================
 
@@ -528,8 +561,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 		label: "Signet Recall",
 		description:
 			"Search SignetAI persistent memory for relevant context from previous sessions. Use aggregate=true for multi-query synthesis that consolidates scattered memories into a single summary.",
-		promptSnippet:
-			"Search past memories when user asks about previous decisions, preferences, or project context",
+		promptSnippet: "Search past memories when user asks about previous decisions, preferences, or project context",
 		promptGuidelines: [
 			"Use aggregate=true when the user asks a broad question that likely spans many memories (e.g. 'who is X', 'what happened with Y', 'summarize the history of Z')",
 			"Use aggregate=false (default) for targeted lookups of specific facts or single memories",
@@ -554,11 +586,12 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			),
 			aggregateBudget: Type.Optional(
 				Type.String({
-					description: "Aggregate synthesis budget: 'small', 'medium', or 'large'. Controls depth of multi-query recall and synthesis. (default: medium)",
+					description:
+						"Aggregate synthesis budget: 'small', 'medium', or 'large'. Controls depth of multi-query recall and synthesis. (default: medium)",
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const healthy = await checkDaemonHealth(daemonUrl);
 			if (!healthy) {
 				return {
@@ -567,13 +600,13 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				};
 			}
 
+			const session = currentSessionRef(ctx);
 			try {
 				const query = String(params.query || "");
 				const limit = typeof params.limit === "number" ? params.limit : 5;
 				const isAggregate = params.aggregate === true;
 				const aggregateBudget =
-					typeof params.aggregateBudget === "string" &&
-					["small", "medium", "large"].includes(params.aggregateBudget)
+					typeof params.aggregateBudget === "string" && ["small", "medium", "large"].includes(params.aggregateBudget)
 						? (params.aggregateBudget as "small" | "medium" | "large")
 						: undefined;
 
@@ -589,6 +622,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				if (isAggregate && recall.aggregate) {
 					const aggregateRows = recall.results ?? parsed.rows;
 					if (aggregateRows.length === 0) {
+						emitSkillInvocation(daemonUrl, agentId, "signet_recall", toolCallId, session, params, true);
 						return {
 							content: [{ type: "text", text: "No relevant memories found for this query." }],
 							details: { memoriesFound: 0 },
@@ -604,6 +638,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 						if (typeof row.content === "string") parts.push(row.content);
 					}
 
+					emitSkillInvocation(daemonUrl, agentId, "signet_recall", toolCallId, session, params, true);
 					return {
 						content: [{ type: "text", text: parts.join("\n\n") }],
 						details: {
@@ -617,6 +652,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 
 				// Standard (non-aggregate) response
 				if (parsed.rows.length === 0) {
+					emitSkillInvocation(daemonUrl, agentId, "signet_recall", toolCallId, session, params, true);
 					return {
 						content: [{ type: "text", text: "No relevant memories found for this query." }],
 						details: { memoriesFound: 0 },
@@ -627,12 +663,14 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				state.memoryCount = parsed.rows.length;
 				updateStatus(ctx);
 
+				emitSkillInvocation(daemonUrl, agentId, "signet_recall", toolCallId, session, params, true);
 				return {
 					content: [{ type: "text", text: formatRecallText(recall) }],
 					details: { memoriesFound: parsed.rows.length, memories: parsed.rows, meta: parsed.meta },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				emitSkillInvocation(daemonUrl, agentId, "signet_recall", toolCallId, session, params, false, message);
 				return {
 					content: [{ type: "text", text: `Error recalling memories: ${message}` }],
 					details: { error: message },
@@ -676,7 +714,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const healthy = await checkDaemonHealth(daemonUrl);
 			if (!healthy) {
 				return {
@@ -685,8 +723,8 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				};
 			}
 
+			const session = currentSessionRef(ctx);
 			try {
-				const session = currentSessionRef(ctx);
 				const query = String(params.query || "");
 				const limit = typeof params.limit === "number" ? params.limit : 10;
 				const project = typeof params.project === "string" ? params.project : undefined;
@@ -700,18 +738,21 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				const parsed = parseRecallPayload(recall);
 
 				if (parsed.rows.length === 0) {
+					emitSkillInvocation(daemonUrl, agentId, "signet_source_search", toolCallId, session, params, true);
 					return {
 						content: [{ type: "text", text: "No relevant source artifacts found for this query." }],
 						details: { sourcesFound: 0 },
 					};
 				}
 
+				emitSkillInvocation(daemonUrl, agentId, "signet_source_search", toolCallId, session, params, true);
 				return {
 					content: [{ type: "text", text: formatRecallText(recall) }],
 					details: { sourcesFound: parsed.rows.length, sources: parsed.rows, meta: parsed.meta },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				emitSkillInvocation(daemonUrl, agentId, "signet_source_search", toolCallId, session, params, false, message);
 				return {
 					content: [{ type: "text", text: `Error searching sources: ${message}` }],
 					details: { error: message },
@@ -764,7 +805,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const healthy = await checkDaemonHealth(daemonUrl);
 			if (!healthy) {
 				return {
@@ -773,6 +814,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				};
 			}
 
+			const session = currentSessionRef(ctx);
 			try {
 				const query = String(params.query || "");
 				const result = await searchSessions(daemonUrl, query, {
@@ -783,12 +825,14 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 					limit: typeof params.limit === "number" ? params.limit : undefined,
 				});
 
+				emitSkillInvocation(daemonUrl, agentId, "signet_session_search", toolCallId, session, params, true);
 				return {
 					content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
 					details: { result },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				emitSkillInvocation(daemonUrl, agentId, "signet_session_search", toolCallId, session, params, false, message);
 				return {
 					content: [{ type: "text", text: `Error searching sessions: ${message}` }],
 					details: { error: message },
@@ -826,7 +870,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				}),
 			),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			const healthy = await checkDaemonHealth(daemonUrl);
 			if (!healthy) {
 				return {
@@ -835,6 +879,7 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				};
 			}
 
+			const session = currentSessionRef(ctx);
 			try {
 				const content = String(params.content || "");
 				const critical = Boolean(params.critical);
@@ -843,12 +888,14 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 				await rememberContent(daemonUrl, content, { critical, tags, agentId });
 
 				const pinned = critical ? " (pinned/critical)" : "";
+				emitSkillInvocation(daemonUrl, agentId, "signet_remember", toolCallId, session, params, true);
 				return {
 					content: [{ type: "text", text: `Memory saved${pinned} successfully.` }],
 					details: { saved: true, content },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				emitSkillInvocation(daemonUrl, agentId, "signet_remember", toolCallId, session, params, false, message);
 				return {
 					content: [{ type: "text", text: `Error saving memory: ${message}` }],
 					details: { error: message },
@@ -857,7 +904,6 @@ function registerCommandsAndTools(pi: PiExtensionApi, daemonUrl: string, agentId
 			}
 		},
 	});
-
 }
 
 // ============================================================================

@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { parseRecallPayload } from "@signet/core";
 import SignetPiExtension, {
+	emitSkillInvocation,
 	loadConfig,
 	parseRememberArgs,
 	recallMemories,
@@ -699,5 +700,39 @@ describe("SignetPiExtension", () => {
 			agentId: "agent-pi-test",
 			runtimePath: "plugin",
 		});
+	});
+});
+
+describe("emitSkillInvocation", () => {
+	it("fire-and-forget POSTs to /api/hooks/skill-invocation with harness, skillName as-is, origin=tool", async () => {
+		const requests: Array<{ path: string; body: unknown }> = [];
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				requests.push({ path: new URL(req.url).pathname, body: await req.json() });
+				return new Response(null, { status: 200 });
+			},
+		});
+		servers.push(server);
+
+		emitSkillInvocation(
+			`http://127.0.0.1:${server.port}`,
+			"agent-pi-test",
+			"signet_recall",
+			"tool-call-1",
+			{ sessionId: "session-pi-1", project: "/tmp/pi-project" },
+			{ query: "what is my name?" },
+			true,
+		);
+
+		await Bun.sleep(50);
+
+		expect(requests.map((req) => req.path)).toEqual(["/api/hooks/skill-invocation"]);
+		const body = requests[0]?.body as Record<string, unknown>;
+		expect(body.harness).toBe("pi");
+		expect(body.skillName).toBe("signet_recall");
+		expect(body.origin).toBe("tool");
+		expect(body.toolUseId).toBe("tool-call-1");
+		expect(body.success).toBe(true);
 	});
 });
