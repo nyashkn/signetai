@@ -1242,6 +1242,85 @@ describe("ontology proposals", () => {
 		]);
 	});
 
+	it("joins a bare first name to the one full name it can belong to", () => {
+		insertEntity("entity-russ-full", "Russ Watts", "russ watts", "ant", 15, false, "person");
+		insertEntity("entity-russ", "Russ", "russ", "ant", 40, false, "person");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.sources.map((source) => source.name)).toEqual(["Russ Watts"]);
+		// Inference, not assertion — it must stay well under the apply-first bar.
+		expect(result.items[0]?.confidence).toBeLessThanOrEqual(0.6);
+		expect(JSON.stringify(result.items[0]?.evidence)).toContain("only name in the graph beginning with");
+	});
+
+	it("drops a first name that two full names could equally claim", () => {
+		// The entropy gate is ambiguity: a second Matt destroys the signal rather
+		// than making a coin-flip guess about which one the bare name meant.
+		insertEntity("entity-matt", "Matt", "matt", "ant", 9, false, "person");
+		insertEntity("entity-matt-west", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-damon", "Matt Damon", "matt damon", "ant", 3, false, "person");
+
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
+	it("never matches a description that happens to be typed as a person", () => {
+		// All four are real `person` rows in the live graph, and all four were
+		// matched by a prefix rule that checked only ambiguity.
+		insertEntity("entity-ceo", "CEO", "ceo", "ant", 27, false, "person");
+		insertEntity("entity-ceo-account", "CEO account", "ceo account", "ant", 4, false, "person");
+		insertEntity("entity-children", "children", "children", "ant", 6, false, "person");
+		insertEntity(
+			"entity-children-long",
+			"children aged 6-16 in Kenya",
+			"children aged 6-16 in kenya",
+			"ant",
+			3,
+			false,
+			"person",
+		);
+		insertEntity("entity-teacher", "Teacher", "teacher", "ant", 5, false, "person");
+		insertEntity("entity-teacher-persona", "Teacher persona", "teacher persona", "ant", 2, false, "person");
+		insertEntity("entity-torvalds", "Torvalds", "torvalds", "ant", 19, false, "person");
+		insertEntity("entity-torvalds-b", "Torvalds (Member B)", "torvalds (member b)", "ant", 2, false, "person");
+
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
+	it("keeps a multi-part surname", () => {
+		insertEntity("entity-miles", "Miles", "miles", "ant", 4, false, "person");
+		insertEntity("entity-miles-full", "Miles Vander Veen", "miles vander veen", "ant", 19, false, "person");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.sources.map((source) => source.name)).toEqual(["Miles"]);
+	});
+
+	it("stops regenerating a duplicate the operator already rejected", () => {
+		insertEntity("entity-james", "James Miles", "james miles", "ant", 13, false, "person");
+		insertEntity("entity-plumbing", "info@843plumbing.com", "info@843plumbing.com", "ant", 4, false, "artifact");
+		insertAlias("alias-james", "entity-plumbing", "ant", "James Miles", "user-asserted: quoted from block");
+
+		const first = proposeDuplicateEntityMerges(getDbAccessor(), {
+			agentId: "ant",
+			limit: 10,
+			writeProposals: true,
+			createdBy: "repair-test",
+		});
+		expect(first.writtenCount).toBe(1);
+
+		rejectOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			id: first.proposals[0]?.id ?? "",
+			actor: "test",
+			reason: "vendor mailbox, not this person",
+		});
+
+		// Suppressing only `pending` would resurrect it here, forever.
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
 	it("does not merge a person into an entity that only shares a company display name", () => {
 		insertEntity("entity-dockblocks", "Dock Blocks", "dock blocks", "ant", 50, false, "organization");
 		insertEntity("entity-matt-address", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 15, false, "artifact");

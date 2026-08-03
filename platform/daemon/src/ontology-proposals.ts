@@ -1891,11 +1891,19 @@ function compareDuplicateTargets(a: DuplicateEntityRow, b: DuplicateEntityRow): 
 	return a.name.localeCompare(b.name);
 }
 
-function pendingDuplicateRepairKeys(db: ReadDb, agentId: string): Set<string> {
+/**
+ * Duplicate keys that must not be proposed again.
+ *
+ * `pending` keeps the queue from filling with copies of a proposal awaiting a
+ * decision. `rejected` makes the decision stick: without it, saying no to
+ * "merge James Miles into info@843plumbing.com" only clears the key, and the
+ * identical candidate is regenerated on the next run — forever.
+ */
+function suppressedDuplicateRepairKeys(db: ReadDb, agentId: string): Set<string> {
 	const rows = db
 		.prepare(
 			`SELECT payload FROM ontology_proposals
-			 WHERE agent_id = ? AND status = 'pending' AND operation = 'merge_entities'
+			 WHERE agent_id = ? AND status IN ('pending', 'rejected') AND operation = 'merge_entities'
 			 ORDER BY updated_at DESC
 			 LIMIT 1000`,
 		)
@@ -1973,6 +1981,84 @@ function bridgeAliasDuplicates(
 	return bridged;
 }
 
+interface NamePrefixBridge {
+	readonly short: DuplicateEntityRow;
+	readonly long: DuplicateEntityRow;
+}
+
+/** A capitalised word, allowing `O'Brien`, `Vander-Veen` and a trailing initial's dot. */
+const PERSONAL_NAME_TOKEN = /^[A-Z][A-Za-z]*(?:['-][A-Za-z]+)*\.?$/;
+
+/**
+ * Does this read as a personal name rather than a description?
+ *
+ * `entity_type = 'person'` is not a filter — the graph holds `CEO account`,
+ * `Teacher persona`, `Torvalds (Member B)` and `children aged 6-16 in Kenya`
+ * all typed `person`. Each of those was matched by a prefix rule that only
+ * checked ambiguity, and each was wrong. Requiring every token to be a
+ * capitalised word rejects all four while keeping `Miles Vander Veen`.
+ */
+function looksLikePersonalName(name: string): boolean {
+	const tokens = name.trim().split(/\s+/);
+	if (tokens.length === 0 || tokens.length > 4) return false;
+	return tokens.every((token) => PERSONAL_NAME_TOKEN.test(token));
+}
+
+/**
+ * Join a bare first name to the one full name it can belong to.
+ *
+ * `Russ` and `Russ Watts`, `Alecia` and `Alecia Nikole Robinson` — the same
+ * person written two ways, with no header anywhere pairing them, so neither the
+ * exact-canonical check nor the alias bridge can see it.
+ *
+ * The entropy gate is *ambiguity*, not a word list: a first name is only
+ * evidence when exactly one full name starts with it. Two candidate Matts and
+ * the signal is gone, which is also what keeps role nouns already sitting in
+ * the graph as people (`CEO`, `ambassador`, `team lead`) from matching — no
+ * full name begins with them, so they never pair with anything.
+ *
+ * Unlike the alias bridge this is inference, so it is capped below the
+ * apply-first threshold and can only ever become a proposal.
+ */
+function bridgeNamePrefixDuplicates(
+	db: ReadDb,
+	agentId: string,
+	groups: Map<string, DuplicateEntityRow[]>,
+): Map<string, NamePrefixBridge> {
+	const people = db
+		.prepare(
+			`SELECT id, name, canonical_name, entity_type,
+			        COALESCE(mentions, 0) AS mentions,
+			        COALESCE(pinned, 0) AS pinned,
+			        updated_at
+			 FROM entities
+			 WHERE agent_id = ? AND entity_type = 'person'
+			   AND COALESCE(status, 'active') = 'active'
+			   AND name NOT LIKE '%@%'`,
+		)
+		.all(agentId) as DuplicateEntityRow[];
+
+	const named = people.filter((row) => looksLikePersonalName(row.name));
+
+	const bridged = new Map<string, NamePrefixBridge>();
+	for (const short of named) {
+		const key = canonical(short.canonical_name ?? short.name);
+		// A single token only: "Matt West" is already the full form of something.
+		if (key.length < 3 || key.includes(" ")) continue;
+		// Ambiguity is measured against *every* person, not just the well-formed
+		// ones: a second possible referent kills the signal however it is spelled.
+		const matches = people.filter((row) => canonical(row.canonical_name ?? row.name).startsWith(`${key} `));
+		if (matches.length !== 1) continue;
+		const long = matches[0];
+		if (long === undefined || long.id === short.id || !looksLikePersonalName(long.name)) continue;
+		const group = groups.get(key);
+		if (group === undefined || group.some((row) => row.id === long.id)) continue;
+		groups.set(key, [...group, long]);
+		bridged.set(key, { short, long });
+	}
+	return bridged;
+}
+
 /**
  * Collapse groups that share an entity into one.
  *
@@ -2024,7 +2110,7 @@ function duplicateMergeCandidates(
 	agentId: string,
 	limit: number,
 ): readonly DuplicateEntityMergeCandidate[] {
-	const existing = pendingDuplicateRepairKeys(db, agentId);
+	const existing = suppressedDuplicateRepairKeys(db, agentId);
 	const rows = db
 		.prepare(
 			`SELECT id, name, canonical_name, entity_type,
@@ -2043,6 +2129,7 @@ function duplicateMergeCandidates(
 		groups.set(key, [...(groups.get(key) ?? []), row]);
 	}
 	const bridged = bridgeAliasDuplicates(db, agentId, groups);
+	const prefixed = bridgeNamePrefixDuplicates(db, agentId, groups);
 
 	return [...collapseSharedGroups(groups).entries()]
 		.filter(([key, group]) => key.length > 0 && group.length > 1 && !existing.has(key))
@@ -2050,41 +2137,51 @@ function duplicateMergeCandidates(
 			const ordered = [...group].sort(compareDuplicateTargets);
 			const target = ordered[0];
 			const sources = ordered.slice(1);
-			// After collapsing, the surviving key may not be the alias's own, so fall
+			// After collapsing, the surviving key may not be the bridge's own, so fall
 			// back to whichever bridge landed one of this group's members here.
-			const bridge = bridged.get(key) ?? [...bridged.values()].find((row) => group.some((m) => m.id === row.id));
-			const evidence = [
-				bridge
-					? {
-							source_kind: "entity_alias",
-							source_id: `alias:${key}`,
-							quote: `"${bridge.alias}" is an asserted alias of "${bridge.name}" (${bridge.alias_source ?? "no recorded source"}), and also names ${group
-								.filter((row) => row.id !== bridge.id)
-								.map((row) => `"${row.name}"`)
-								.join(", ")}.`,
-						}
-					: {
-							source_kind: "ontology_index",
-							source_id: `entities:${key}`,
-							quote: `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`,
-						},
-			];
+			const inGroup = (id: string): boolean => group.some((row) => row.id === id);
+			const bridge = bridged.get(key) ?? [...bridged.values()].find((row) => inGroup(row.id));
+			const prefix = prefixed.get(key) ?? [...prefixed.values()].find((pair) => inGroup(pair.long.id));
+
+			let evidenceQuote: string;
+			let sourceKind: string;
+			let sourceId: string;
+			let rationale: string;
+			if (bridge) {
+				sourceKind = "entity_alias";
+				sourceId = `alias:${key}`;
+				evidenceQuote = `"${bridge.alias}" is an asserted alias of "${bridge.name}" (${bridge.alias_source ?? "no recorded source"}), and also names ${group
+					.filter((row) => row.id !== bridge.id)
+					.map((row) => `"${row.name}"`)
+					.join(", ")}.`;
+				rationale = `"${bridge.alias}" and "${bridge.name}" are the same identity under two names.`;
+			} else if (prefix) {
+				sourceKind = "ontology_index";
+				sourceId = `entities:${key}`;
+				evidenceQuote = `"${prefix.long.name}" is the only name in the graph beginning with "${prefix.short.name}", so the bare first name has one possible referent.`;
+				rationale = `"${prefix.short.name}" is an unambiguous short form of "${prefix.long.name}".`;
+			} else {
+				sourceKind = "ontology_index";
+				sourceId = `entities:${key}`;
+				evidenceQuote = `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`;
+				rationale = `Entities share canonical_name "${key}" in the same agent scope.`;
+			}
+			const evidence = [{ source_kind: sourceKind, source_id: sourceId, quote: evidenceQuote }];
+
 			const plan = buildEntityMergePlan(
 				db,
 				{
 					agentId,
 					targetEntityId: target.id,
 					sourceEntityIds: sources.map((row) => row.id),
-					rationale: bridge
-						? `"${bridge.alias}" and "${bridge.name}" are the same identity under two names.`
-						: `Entities share canonical_name "${key}" in the same agent scope.`,
+					rationale,
 					evidence,
 					// A bridged pair differs in entity type by construction — one side is
 					// the address a connector minted as an `artifact`, the other the
 					// person extraction found. Without this the plan blocks on that very
 					// difference and the duplicate is never even proposed. It stays a
 					// pending, human-approved proposal; only the automatic block lifts.
-					...(bridge ? { force: true } : {}),
+					...(bridge || prefix ? { force: true } : {}),
 				},
 				"duplicate_entities",
 			);
@@ -2100,7 +2197,9 @@ function duplicateMergeCandidates(
 				impact: plan.impact,
 				warnings: plan.warnings,
 				blocked: plan.blocked,
-				confidence: plan.confidence,
+				// A name prefix is inference, not an assertion, so it stays well under
+				// the 0.95 apply-first threshold no matter how safe the merge looks.
+				confidence: prefix && !bridge ? Math.min(plan.confidence, 0.6) : plan.confidence,
 				rationale: plan.rationale,
 				evidence: plan.evidence,
 				risk: plan.risk,
