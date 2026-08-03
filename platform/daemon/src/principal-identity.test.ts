@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import {
+	detectGitHubLogin,
 	getPrincipalIdentity,
 	listPrincipalIdentifiers,
 	organizationFromEmailDomain,
 	principalDeclarationsFromAccounts,
 	principalOrganizationFor,
+	setCommandRunnerForTests,
 	setPrincipalIdentity,
 } from "./principal-identity";
 
@@ -54,6 +56,38 @@ describe("principalDeclarationsFromAccounts", () => {
 	it("skips an account whose address could not be read instead of guessing one", () => {
 		// OAuth2 accounts have no SASL username to read.
 		expect(principalDeclarationsFromAccounts([{ name: "oauth-account", address: null }])).toEqual([]);
+	});
+});
+
+describe("detectGitHubLogin", () => {
+	afterEach(() => {
+		setCommandRunnerForTests(null);
+	});
+
+	it("reads the login of the account gh is authenticated as", async () => {
+		const calls: Array<{ command: string; args: readonly string[] }> = [];
+		setCommandRunnerForTests(async (command, args) => {
+			calls.push({ command, args });
+			return "nyashkn\n";
+		});
+		expect(await detectGitHubLogin()).toBe("nyashkn");
+		expect(calls).toEqual([{ command: "gh", args: ["api", "user", "--jq", ".login"] }]);
+	});
+
+	it("returns null when gh is missing or not logged in", async () => {
+		setCommandRunnerForTests(async () => {
+			throw new Error("spawn gh ENOENT");
+		});
+		expect(await detectGitHubLogin()).toBeNull();
+	});
+
+	it("rejects output that is not a GitHub username rather than minting an entity from it", async () => {
+		// A `gh` that prints an error to stdout, or any future output change, must
+		// not become an entity's canonical name.
+		setCommandRunnerForTests(async () => "error: not logged in\n");
+		expect(await detectGitHubLogin()).toBeNull();
+		setCommandRunnerForTests(async () => "-leading-hyphen\n");
+		expect(await detectGitHubLogin()).toBeNull();
 	});
 });
 

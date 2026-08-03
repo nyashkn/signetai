@@ -77,18 +77,26 @@ export function registerPrincipalCommands(program: Command, deps: RegisterPrinci
 			(value: string, previous: string[]) => [...previous, value],
 			[] as string[],
 		)
-		.action(async (options: { name: string; agent: string; email: string[] }) => {
-			// With no --email flags the daemon reads the configured mail accounts —
-			// the SASL username is the address the server itself authenticates, so
-			// there is nothing to confirm.
-			const identities = options.email.map((entry) => {
-				const [identifier, organization] = entry.split("=");
-				return {
-					identifier: (identifier ?? "").trim(),
-					kind: "email",
-					...(organization && organization.trim().length > 0 ? { organization: organization.trim() } : {}),
-				};
-			});
+		.option("--github <login>", "Declare a GitHub username explicitly")
+		.action(async (options: { name: string; agent: string; email: string[]; github?: string }) => {
+			// With no explicit flags the daemon seeds itself: mail addresses from the
+			// configured accounts (the SASL username is what the server
+			// authenticates) and the GitHub login from an authenticated `gh`. Passing
+			// any flag switches to exactly what was passed, so a wrong auto-detected
+			// handle can always be overridden.
+			const identities: Array<{ identifier: string; kind: string; organization?: string }> = options.email.map(
+				(entry) => {
+					const [identifier, organization] = entry.split("=");
+					return {
+						identifier: (identifier ?? "").trim(),
+						kind: "email",
+						...(organization && organization.trim().length > 0 ? { organization: organization.trim() } : {}),
+					};
+				},
+			);
+			if (options.github && options.github.trim().length > 0) {
+				identities.push({ identifier: options.github.trim(), kind: "github_login" });
+			}
 
 			const result = await deps.secretApiCall(
 				"POST",

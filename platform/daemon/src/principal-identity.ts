@@ -27,6 +27,7 @@
  * destructive, so it belongs in the pending proposal queue, not here.
  */
 
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { ReadDb, WriteDb } from "./db-accessor";
 import { getDbAccessor } from "./db-accessor";
@@ -418,6 +419,66 @@ export function principalDeclarationsFromAccounts(
 		});
 	}
 	return declarations;
+}
+
+/**
+ * GitHub usernames: alphanumerics with single interior hyphens, 39 max.
+ *
+ * Validated rather than trusted because the value ends up as an entity's
+ * canonical name, and the first live email ingest showed what an unvalidated
+ * identifier does to the graph — an entity named after 90 characters of URL.
+ */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+
+export type CommandRunner = (command: string, args: readonly string[]) => Promise<string>;
+
+let commandRunnerOverride: CommandRunner | null = null;
+
+/** Test seam — pass null to restore the real runner. */
+export function setCommandRunnerForTests(runner: CommandRunner | null): void {
+	commandRunnerOverride = runner;
+}
+
+function runCommand(command: string, args: readonly string[]): Promise<string> {
+	if (commandRunnerOverride) return commandRunnerOverride(command, args);
+	return new Promise((resolve, reject) => {
+		const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString();
+		});
+		child.on("error", (err) => {
+			clearTimeout(timer);
+			reject(err);
+		});
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			if (code === 0) resolve(stdout);
+			else reject(new Error(`${command} exited with code ${String(code)}`));
+		});
+	});
+}
+
+/**
+ * The GitHub login `gh` is authenticated as, or null when it cannot be read.
+ *
+ * Worth detecting rather than asking for, because the GitHub connector records
+ * authorship as a bare login string. Without this the operator's own commits and
+ * issues mint a second person entity beside the principal — the duplicate this
+ * phase exists to prevent, arriving through a different door.
+ *
+ * ponytail: shells out to an already-installed, already-authenticated CLI rather
+ * than adding a token flow. No `gh`, not logged in, or a login that fails
+ * validation all return null, and the caller simply declares nothing.
+ */
+export async function detectGitHubLogin(): Promise<string | null> {
+	try {
+		const login = (await runCommand("gh", ["api", "user", "--jq", ".login"])).trim();
+		return GITHUB_LOGIN.test(login) ? login : null;
+	} catch {
+		return null;
+	}
 }
 
 /** Which organization hat the operator was wearing when they used this handle. */

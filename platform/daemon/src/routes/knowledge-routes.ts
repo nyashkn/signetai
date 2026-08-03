@@ -30,6 +30,7 @@ import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { getTraversalStatus, resolveFocalEntities, traverseKnowledgeGraph } from "../pipeline/graph-traversal";
 import {
 	type PrincipalIdentityDeclaration,
+	detectGitHubLogin,
 	getPrincipalIdentity,
 	isAliasKind,
 	principalDeclarationsFromAccounts,
@@ -97,6 +98,13 @@ export function registerKnowledgeRoutes(app: Hono): void {
 					{ error: `Could not read mail accounts: ${err instanceof Error ? err.message : String(err)}` },
 					400,
 				);
+			}
+			// The GitHub connector records authorship as a bare login, so without
+			// this the operator's own commits would mint a second person entity.
+			// Absent or unauthenticated `gh` simply contributes nothing.
+			const login = await detectGitHubLogin();
+			if (login) {
+				identities.push({ identifier: login, kind: "github_login", source: "gh-cli:api-user" });
 			}
 		}
 		if (identities.length === 0) return c.json({ error: "No identities to declare" }, 400);
