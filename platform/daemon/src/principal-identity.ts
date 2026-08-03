@@ -93,6 +93,23 @@ export interface SetPrincipalIdentityResult extends PrincipalIdentity {
 	 * these are handed to P4's proposal queue rather than actioned here.
 	 */
 	readonly mergeCandidates: readonly string[];
+	/**
+	 * Entities adopted under a type that contradicts the role they were adopted
+	 * for — the live graph holds `PivotPlanIt` and `kuze` as `project`, so an
+	 * organization link resolves to a project row.
+	 *
+	 * Never retyped here: the type came from somewhere, and silently overwriting
+	 * it makes the graph disagree with whatever wrote it. Reported so P4 can
+	 * propose the change with evidence, which is auditable and reversible.
+	 */
+	readonly typeConflicts: readonly TypeConflict[];
+}
+
+export interface TypeConflict {
+	readonly entityId: string;
+	readonly name: string;
+	readonly actualType: string;
+	readonly expectedType: string;
 }
 
 function idFor(prefix: string, ...parts: readonly string[]): string {
@@ -110,14 +127,23 @@ function upsertEntity(
 	name: string,
 	entityType: string,
 	now: string,
-): { readonly id: string; readonly created: boolean } | null {
+): { readonly id: string; readonly created: boolean; readonly conflict: TypeConflict | null } | null {
 	const canonical = toCanonicalName(name);
 	if (canonical.length === 0) return null;
 
 	const existing = db
-		.prepare("SELECT id FROM entities WHERE canonical_name = ? AND agent_id = ? LIMIT 1")
-		.get(canonical, agentId) as { id: string } | undefined;
-	if (existing) return { id: existing.id, created: false };
+		.prepare("SELECT id, name, entity_type FROM entities WHERE canonical_name = ? AND agent_id = ? LIMIT 1")
+		.get(canonical, agentId) as { id: string; name: string; entity_type: string } | undefined;
+	if (existing) {
+		return {
+			id: existing.id,
+			created: false,
+			conflict:
+				existing.entity_type === entityType
+					? null
+					: { entityId: existing.id, name: existing.name, actualType: existing.entity_type, expectedType: entityType },
+		};
+	}
 
 	const id = idFor("idn", agentId, entityType, canonical);
 	try {
@@ -125,17 +151,25 @@ function upsertEntity(
 			`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
 		).run(id, name.trim(), canonical, entityType, agentId, now, now);
-		return { id, created: true };
+		return { id, created: true, conflict: null };
 	} catch (err) {
 		// `entities.name` is UNIQUE across every agent, so a name already used by an
 		// LLM-extracted entity collides. Adopting that row is correct — it is the
 		// same organization or person — rather than inventing a suffixed duplicate.
 		const message = err instanceof Error ? err.message : String(err);
 		if (!message.includes("UNIQUE constraint")) throw err;
-		const fallback = db.prepare("SELECT id FROM entities WHERE name = ? LIMIT 1").get(name.trim()) as
-			| { id: string }
+		const fallback = db.prepare("SELECT id, name, entity_type FROM entities WHERE name = ? LIMIT 1").get(name.trim()) as
+			| { id: string; name: string; entity_type: string }
 			| undefined;
-		return fallback ? { id: fallback.id, created: false } : null;
+		if (!fallback) return null;
+		return {
+			id: fallback.id,
+			created: false,
+			conflict:
+				fallback.entity_type === entityType
+					? null
+					: { entityId: fallback.id, name: fallback.name, actualType: fallback.entity_type, expectedType: entityType },
+		};
 	}
 }
 
@@ -150,15 +184,29 @@ function resolvePrincipalEntity(
 	db: WriteDb,
 	input: SetPrincipalIdentityInput,
 	now: string,
-): { readonly id: string; readonly created: boolean } | null {
+): { readonly id: string; readonly created: boolean; readonly conflict: TypeConflict | null } | null {
 	const declared = db.prepare("SELECT principal_entity_id FROM agents WHERE id = ? LIMIT 1").get(input.agentId) as
 		| { principal_entity_id: string | null }
 		| undefined;
 	if (declared?.principal_entity_id) {
-		const stillExists = db.prepare("SELECT id FROM entities WHERE id = ? LIMIT 1").get(declared.principal_entity_id) as
-			| { id: string }
-			| undefined;
-		if (stillExists) return { id: stillExists.id, created: false };
+		const stillExists = db
+			.prepare("SELECT id, name, entity_type FROM entities WHERE id = ? LIMIT 1")
+			.get(declared.principal_entity_id) as { id: string; name: string; entity_type: string } | undefined;
+		if (stillExists) {
+			return {
+				id: stillExists.id,
+				created: false,
+				conflict:
+					stillExists.entity_type === "person"
+						? null
+						: {
+								entityId: stillExists.id,
+								name: stillExists.name,
+								actualType: stillExists.entity_type,
+								expectedType: "person",
+							},
+			};
+		}
 	}
 	return upsertEntity(db, input.agentId, input.displayName, "person", now);
 }
@@ -220,6 +268,8 @@ export function setPrincipalIdentityInTx(
 	let organizationsCreated = 0;
 	const mergeCandidates = new Set<string>();
 	const organizationIds = new Map<string, string>();
+	const typeConflicts = new Map<string, TypeConflict>();
+	if (principal.conflict) typeConflicts.set(principal.conflict.entityId, principal.conflict);
 
 	for (const declaration of input.identities) {
 		const canonical = toCanonicalName(declaration.identifier);
@@ -236,6 +286,7 @@ export function setPrincipalIdentityInTx(
 					organizationId = org.id;
 					organizationIds.set(toCanonicalName(organization), org.id);
 					if (org.created) organizationsCreated++;
+					if (org.conflict) typeConflicts.set(org.conflict.entityId, org.conflict);
 				}
 			}
 		}
@@ -264,7 +315,13 @@ export function setPrincipalIdentityInTx(
 
 	const identity = readPrincipalIdentity(db, input.agentId);
 	if (!identity) return null;
-	return { ...identity, aliasesWritten, organizationsCreated, mergeCandidates: [...mergeCandidates] };
+	return {
+		...identity,
+		aliasesWritten,
+		organizationsCreated,
+		mergeCandidates: [...mergeCandidates],
+		typeConflicts: [...typeConflicts.values()],
+	};
 }
 
 export function setPrincipalIdentity(input: SetPrincipalIdentityInput): SetPrincipalIdentityResult | null {

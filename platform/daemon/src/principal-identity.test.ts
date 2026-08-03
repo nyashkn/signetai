@@ -191,6 +191,35 @@ describe("principal identity storage", () => {
 		expect(alias[0]?.entity_id).toBe(result?.entityId ?? "");
 	});
 
+	it("reports an org adopted under a contradicting type instead of retyping it", () => {
+		// Found in the live graph: `PivotPlanIt` and `kuze` already exist as
+		// `project`, so an organization link resolves to a project row. Overwriting
+		// the type would make the graph disagree with whatever wrote it, and the
+		// caller would never know — hence a report, not a mutation.
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+				 VALUES ('ent_pivot', 'PivotPlanIt', 'pivotplanit', 'project', 'default', 31,
+				         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			).run();
+		});
+
+		const result = declare();
+		expect(result?.typeConflicts).toEqual([
+			{ entityId: "ent_pivot", name: "PivotPlanIt", actualType: "project", expectedType: "organization" },
+		]);
+		expect(result?.organizationsCreated).toBe(1); // kuze only — pivotplanit was adopted
+
+		const unchanged = rows<{ entity_type: string }>("SELECT entity_type FROM entities WHERE id = 'ent_pivot'");
+		expect(unchanged[0]?.entity_type).toBe("project");
+
+		// The link is still written, because it is the right entity — only its type is disputed.
+		const alias = rows<{ org_entity_id: string | null }>(
+			"SELECT org_entity_id FROM entity_aliases WHERE canonical_alias = 'njui@pivotplanit.com' AND status = 'active'",
+		);
+		expect(alias[0]?.org_entity_id).toBe("ent_pivot");
+	});
+
 	it("is idempotent — re-declaring updates in place rather than duplicating", () => {
 		const first = declare();
 		const second = declare();
