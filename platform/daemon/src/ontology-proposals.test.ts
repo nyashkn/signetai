@@ -1172,6 +1172,85 @@ describe("ontology proposals", () => {
 		expect(listed.items).toHaveLength(0);
 	});
 
+	function insertAlias(id: string, entityId: string, agentId: string, alias: string, source: string): void {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, 'display_name', 1.0, ?, 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			).run(id, entityId, agentId, alias, alias.toLowerCase(), source);
+		});
+	}
+
+	it("joins a person to their address through an asserted alias", () => {
+		// The duplicate that matters differs in name *and* type: the address is an
+		// `artifact` minted by a connector, the human a `person` from extraction.
+		// No GROUP BY canonical_name can see it — only the alias the From header
+		// asserted bridges the two.
+		insertEntity("entity-matt", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-address", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 15, false, "artifact");
+		insertAlias(
+			"alias-matt",
+			"entity-matt-address",
+			"ant",
+			"Matt West",
+			"user-asserted: From header of <msg-179@dock-blocks.com>",
+		);
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), {
+			agentId: "ant",
+			limit: 10,
+			writeProposals: true,
+			createdBy: "repair-test",
+		});
+
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.canonicalName).toBe("matt west");
+		// 124 mentions beats 15, so the human survives and the address folds in.
+		expect(result.items[0]?.target.name).toBe("Matt West");
+		expect(result.items[0]?.sources.map((source) => source.name)).toEqual(["matt@dock-blocks.com"]);
+		// The type difference is the point of the candidate, not a reason to drop
+		// it — so it is proposed for review rather than blocked outright.
+		expect(result.items[0]?.blocked).toBe(false);
+		expect(result.items[0]?.risk).toBe("review_required");
+		expect(result.items[0]?.warnings.join("\n")).toContain("differs from target type");
+		expect(JSON.stringify(result.items[0]?.evidence)).toContain("From header of <msg-179@dock-blocks.com>");
+		expect(result.writtenCount).toBe(1);
+
+		const listed = listOntologyProposals(getDbAccessor(), { agentId: "ant", operation: "merge_entities" });
+		expect(listed.items).toHaveLength(1);
+		expect(listed.items[0]?.status).toBe("pending");
+	});
+
+	it("collapses a chain of aliases into one candidate rather than competing merges", () => {
+		// The principal declares two handles and a header names a third form of the
+		// same human. As three separate candidates, two of them delete "KN" and
+		// whichever is approved second fails.
+		insertEntity("entity-kn", "KN", "kn", "ant", 29, false, "person");
+		insertEntity("entity-work", "njui@pivotplanit.com", "njui@pivotplanit.com", "ant", 4, false, "person");
+		insertEntity("entity-personal", "nyashkn@gmail.com", "nyashkn@gmail.com", "ant", 9, false, "artifact");
+		insertAlias("alias-work", "entity-kn", "ant", "njui@pivotplanit.com", "principal-declaration");
+		insertAlias("alias-personal", "entity-kn", "ant", "nyashkn@gmail.com", "principal-declaration");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.target.name).toBe("KN");
+		expect(result.items[0]?.sources.map((source) => source.name).sort()).toEqual([
+			"njui@pivotplanit.com",
+			"nyashkn@gmail.com",
+		]);
+	});
+
+	it("does not merge a person into an entity that only shares a company display name", () => {
+		insertEntity("entity-dockblocks", "Dock Blocks", "dock blocks", "ant", 50, false, "organization");
+		insertEntity("entity-matt-address", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 15, false, "artifact");
+		insertAlias("alias-dockblocks", "entity-matt-address", "ant", "Dock Blocks", "user-asserted: From header");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+		expect(result.count).toBe(0);
+	});
+
 	it("writes duplicate entity repair candidates as pending merge proposals only once", () => {
 		insertEntity("entity-signet", "Signet", "signet", "ant", 8, true);
 		insertEntity("entity-signet-upper", "SIGNET", "signet", "ant", 3);

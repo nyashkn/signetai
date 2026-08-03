@@ -68,9 +68,21 @@ export interface IndexSourceParticipantsResult {
 	readonly personsCreated: number;
 	readonly personsLinked: number;
 	readonly edgesWritten: number;
+	/** Display-name aliases written for address-keyed people. */
+	readonly aliasesWritten: number;
 	/** Identifiers already present under a non-person type; candidates for a retype proposal in P4. */
 	readonly typeConflicts: readonly string[];
 }
+
+/**
+ * Entity types a personal display name may legitimately name.
+ *
+ * `Dock Blocks <matt@dock-blocks.com>` is the company signing the mail, not the
+ * human sending it. Writing that alias would make every later lookup of the
+ * organization resolve to Matt, so a display name colliding with anything that
+ * is not already a person (or an address minted as an `artifact`) is dropped.
+ */
+const ALIASABLE_ENTITY_TYPES = new Set(["person", "artifact"]);
 
 function idFor(...parts: readonly string[]): string {
 	return `src_${createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32)}`;
@@ -149,6 +161,67 @@ function upsertPerson(
 	}
 }
 
+/**
+ * Record the name↔address pairing an RFC 5322 header asserts.
+ *
+ * This is the cheapest identity evidence that exists: `From: Matt West
+ * <matt@dock-blocks.com>` states, at transport level, that the display name and
+ * the address are the same human. Person entities are keyed on the address, so
+ * without this the graph keeps `Matt West` (from LLM extraction) and
+ * `matt@dock-blocks.com` (from this connector) as unrelated rows that differ in
+ * both name and type — which the exact-canonical duplicate check can never see.
+ *
+ * The alias applies directly at the participant's own strength (1.0 for an
+ * envelope header, lower for a quoted forward block), per the apply-first
+ * doctrine: an alias is additive and archivable, unlike a merge.
+ */
+function upsertDisplayNameAlias(
+	db: WriteDb,
+	input: IndexSourceParticipantsInput,
+	participant: SourceParticipant,
+	personEntityId: string,
+	now: string,
+): boolean {
+	const displayName = participant.displayName?.trim() ?? "";
+	const canonical = toCanonicalName(displayName);
+	// A two-character name is a parse artifact, not a person: the live corpus
+	// produced `is` from a quoted `Cc:` fragment, which would then claim every
+	// later mention of that word as an identity.
+	if (canonical.length < 3 || canonical === toCanonicalName(participant.identifier)) return false;
+
+	const collision = db
+		.prepare("SELECT entity_type FROM entities WHERE canonical_name = ? AND agent_id = ? LIMIT 1")
+		.get(canonical, input.agentId) as { entity_type: string } | undefined;
+	if (collision && !ALIASABLE_ENTITY_TYPES.has(collision.entity_type)) return false;
+
+	// One handle resolves to one entity (migration 077's unique index). A header
+	// never outranks an existing claim — the principal declaration and an earlier
+	// message both got here first on purpose — so a taken alias is left alone and
+	// surfaces as a merge candidate instead.
+	const taken = db
+		.prepare("SELECT id FROM entity_aliases WHERE agent_id = ? AND canonical_alias = ? AND status = 'active' LIMIT 1")
+		.get(input.agentId, canonical) as { id: string } | undefined;
+	if (taken) return false;
+
+	db.prepare(
+		`INSERT INTO entity_aliases
+		 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source,
+		  status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 'display_name', ?, ?, 'active', ?, ?)`,
+	).run(
+		idFor("alias", input.agentId, canonical),
+		personEntityId,
+		input.agentId,
+		displayName,
+		canonical,
+		Math.min(1, Math.max(0, participant.strength)),
+		participant.reason,
+		now,
+		now,
+	);
+	return true;
+}
+
 function upsertParticipantEdge(
 	db: WriteDb,
 	input: IndexSourceParticipantsInput,
@@ -224,6 +297,7 @@ export function indexSourceParticipantsInTx(
 	let personsCreated = 0;
 	let personsLinked = 0;
 	let edgesWritten = 0;
+	let aliasesWritten = 0;
 	const typeConflicts = new Set<string>();
 
 	for (const participant of input.participants) {
@@ -233,9 +307,10 @@ export function indexSourceParticipantsInTx(
 		else personsLinked++;
 		if (person.typeConflict) typeConflicts.add(participant.identifier);
 		if (upsertParticipantEdge(db, input, participant, person.id, now)) edgesWritten++;
+		if (upsertDisplayNameAlias(db, input, participant, person.id, now)) aliasesWritten++;
 	}
 
-	return { personsCreated, personsLinked, edgesWritten, typeConflicts: [...typeConflicts] };
+	return { personsCreated, personsLinked, edgesWritten, aliasesWritten, typeConflicts: [...typeConflicts] };
 }
 
 export function indexSourceParticipants(input: IndexSourceParticipantsInput): IndexSourceParticipantsResult {

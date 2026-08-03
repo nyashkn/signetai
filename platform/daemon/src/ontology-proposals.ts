@@ -1912,6 +1912,113 @@ function pendingDuplicateRepairKeys(db: ReadDb, agentId: string): Set<string> {
 	);
 }
 
+interface AliasBridgeRow extends DuplicateEntityRow {
+	readonly alias_key: string;
+	readonly alias: string;
+	readonly alias_source: string | null;
+}
+
+/**
+ * Entity types an identity alias may bridge.
+ *
+ * The duplicates that matter here differ in *type* as well as name — an address
+ * arrives from a connector as `artifact` while the same human exists as a
+ * `person` from extraction. Anything else (a project, an organization, a tool)
+ * sharing a name with a handle is a coincidence, not the same thing.
+ */
+const BRIDGEABLE_ENTITY_TYPES = new Set(["person", "artifact"]);
+
+/**
+ * Fold alias-linked entities into the duplicate groups.
+ *
+ * `entity_aliases` holds pairings asserted by a source — an RFC 5322 display
+ * name beside its address, a declared principal handle. Where the alias's
+ * canonical form is *also* an entity's canonical name, those two rows are the
+ * same thing under two names, which is invisible to a `GROUP BY canonical_name`
+ * because the names genuinely differ.
+ *
+ * Returns the alias evidence per key, so the proposal can quote the header that
+ * asserted the pairing rather than restating the join.
+ */
+function bridgeAliasDuplicates(
+	db: ReadDb,
+	agentId: string,
+	groups: Map<string, DuplicateEntityRow[]>,
+): Map<string, AliasBridgeRow> {
+	const rows = db
+		.prepare(
+			`SELECT a.canonical_alias AS alias_key, a.alias AS alias, a.source AS alias_source,
+			        e.id, e.name, e.canonical_name, e.entity_type,
+			        COALESCE(e.mentions, 0) AS mentions,
+			        COALESCE(e.pinned, 0) AS pinned,
+			        e.updated_at
+			 FROM entity_aliases a
+			 JOIN entities e ON e.id = a.entity_id
+			 WHERE a.agent_id = ? AND a.status = 'active'
+			   AND COALESCE(e.status, 'active') = 'active'`,
+		)
+		.all(agentId) as AliasBridgeRow[];
+
+	const bridged = new Map<string, AliasBridgeRow>();
+	for (const row of rows) {
+		const key = canonical(row.alias_key);
+		const group = groups.get(key);
+		if (!group || group.length === 0) continue;
+		if (group.some((member) => member.id === row.id)) continue;
+		if (!BRIDGEABLE_ENTITY_TYPES.has(row.entity_type)) continue;
+		if (!group.every((member) => BRIDGEABLE_ENTITY_TYPES.has(member.entity_type))) continue;
+		groups.set(key, [...group, row]);
+		bridged.set(key, row);
+	}
+	return bridged;
+}
+
+/**
+ * Collapse groups that share an entity into one.
+ *
+ * Aliases chain: the principal declaration puts `KN` beside
+ * `njui@pivotplanit.com`, a header puts `Njui` beside the same address, and a
+ * second declared handle puts `KN` beside `nyashkn@gmail.com`. Left alone that
+ * is three proposals, two of which delete `KN` — so whichever is approved
+ * second fails. One identity is one candidate with several sources.
+ *
+ * Exact-canonical groups cannot overlap (an entity has one canonical name), so
+ * this only ever fires on alias-bridged groups.
+ */
+function collapseSharedGroups(groups: Map<string, DuplicateEntityRow[]>): Map<string, DuplicateEntityRow[]> {
+	const parent = new Map<string, string>();
+	const find = (key: string): string => {
+		let root = key;
+		while ((parent.get(root) ?? root) !== root) root = parent.get(root) ?? root;
+		return root;
+	};
+	const union = (a: string, b: string): void => {
+		const rootA = find(a);
+		const rootB = find(b);
+		if (rootA !== rootB) parent.set(rootA > rootB ? rootA : rootB, rootA > rootB ? rootB : rootA);
+	};
+
+	const owner = new Map<string, string>();
+	for (const [key, group] of groups) {
+		parent.set(key, parent.get(key) ?? key);
+		for (const row of group) {
+			const seen = owner.get(row.id);
+			if (seen === undefined) owner.set(row.id, key);
+			else union(seen, key);
+		}
+	}
+
+	const collapsed = new Map<string, DuplicateEntityRow[]>();
+	for (const [key, group] of groups) {
+		const root = find(key);
+		const merged = collapsed.get(root) ?? [];
+		const byId = new Map(merged.map((row) => [row.id, row]));
+		for (const row of group) byId.set(row.id, row);
+		collapsed.set(root, [...byId.values()]);
+	}
+	return collapsed;
+}
+
 function duplicateMergeCandidates(
 	db: ReadDb,
 	agentId: string,
@@ -1935,19 +2042,32 @@ function duplicateMergeCandidates(
 		const key = canonical(row.canonical_name ?? row.name);
 		groups.set(key, [...(groups.get(key) ?? []), row]);
 	}
+	const bridged = bridgeAliasDuplicates(db, agentId, groups);
 
-	return [...groups.entries()]
+	return [...collapseSharedGroups(groups).entries()]
 		.filter(([key, group]) => key.length > 0 && group.length > 1 && !existing.has(key))
 		.map(([key, group]) => {
 			const ordered = [...group].sort(compareDuplicateTargets);
 			const target = ordered[0];
 			const sources = ordered.slice(1);
+			// After collapsing, the surviving key may not be the alias's own, so fall
+			// back to whichever bridge landed one of this group's members here.
+			const bridge = bridged.get(key) ?? [...bridged.values()].find((row) => group.some((m) => m.id === row.id));
 			const evidence = [
-				{
-					source_kind: "ontology_index",
-					source_id: `entities:${key}`,
-					quote: `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`,
-				},
+				bridge
+					? {
+							source_kind: "entity_alias",
+							source_id: `alias:${key}`,
+							quote: `"${bridge.alias}" is an asserted alias of "${bridge.name}" (${bridge.alias_source ?? "no recorded source"}), and also names ${group
+								.filter((row) => row.id !== bridge.id)
+								.map((row) => `"${row.name}"`)
+								.join(", ")}.`,
+						}
+					: {
+							source_kind: "ontology_index",
+							source_id: `entities:${key}`,
+							quote: `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`,
+						},
 			];
 			const plan = buildEntityMergePlan(
 				db,
@@ -1955,8 +2075,16 @@ function duplicateMergeCandidates(
 					agentId,
 					targetEntityId: target.id,
 					sourceEntityIds: sources.map((row) => row.id),
-					rationale: `Entities share canonical_name "${key}" in the same agent scope.`,
+					rationale: bridge
+						? `"${bridge.alias}" and "${bridge.name}" are the same identity under two names.`
+						: `Entities share canonical_name "${key}" in the same agent scope.`,
 					evidence,
+					// A bridged pair differs in entity type by construction — one side is
+					// the address a connector minted as an `artifact`, the other the
+					// person extraction found. Without this the plan blocks on that very
+					// difference and the duplicate is never even proposed. It stays a
+					// pending, human-approved proposal; only the automatic block lifts.
+					...(bridge ? { force: true } : {}),
 				},
 				"duplicate_entities",
 			);
