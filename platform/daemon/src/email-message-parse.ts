@@ -60,6 +60,19 @@ const ESP_DELIVERY_HEADERS = ["feedback-id", "x-ses-outgoing", "x-sg-eid", "x-ma
 const ROBOT_LOCAL_PARTS =
 	/^(no-?reply|notifications?|donotreply|do-not-reply|mailer-daemon|bounce[s+-]?|postmaster|automated|alerts?|support|updates?)([+.-]|$)/i;
 
+/**
+ * Does this address belong to a mailbox nobody reads?
+ *
+ * Exported because it is the one bulk signal derivable from an IMAP ENVELOPE
+ * alone — the connector can classify a message whose body it has not paid to
+ * download, which matters when a mailbox is larger than the per-sync body
+ * budget.
+ */
+export function isRobotAddress(address: string): boolean {
+	const localPart = address.split("@")[0] ?? "";
+	return ROBOT_LOCAL_PARTS.test(localPart);
+}
+
 /** Header field name to value, tolerating folded continuation lines and both CRLF and LF. */
 export function parseHeaders(rawMessage: string): EmailHeaders {
 	const headerBlock = splitMessage(rawMessage).head;
@@ -126,19 +139,32 @@ export function parseAddressList(value: string): readonly EmailAddress[] {
 	return out.filter((entry) => entry.address.length > 0);
 }
 
+/**
+ * Conservative addr-spec check. Anything that fails becomes an empty address
+ * and is dropped by `parseAddressList`, because a malformed identifier would
+ * otherwise mint a junk `person` entity that is expensive to remove later.
+ */
+const ADDR_SPEC = /^[^\s@<>",;:\\()[\]]+@[^\s@<>",;:\\()[\]]+\.[^\s@<>",;:\\()[\]]+$/;
+
+function normalizeAddress(raw: string): string {
+	// Plain-text renderings of HTML mail smuggle the anchor href in beside the
+	// address — `partners@apollo.io mailto:partners@apollo.io?to=...` — so keep
+	// only the first token before validating.
+	const first = raw.trim().split(/\s+/)[0] ?? "";
+	const cleaned = first
+		.replace(/^[<"']+/, "")
+		.replace(/[>"',;.]+$/, "")
+		.toLowerCase();
+	return ADDR_SPEC.test(cleaned) ? cleaned : "";
+}
+
 function parseSingleAddress(raw: string): EmailAddress {
 	const trimmed = decodeMimeWords(raw.trim());
 	const angled = /^(.*?)<([^>]*)>\s*$/.exec(trimmed);
 	if (angled) {
-		return { name: stripQuotes(angled[1] ?? "").trim(), address: (angled[2] ?? "").trim().toLowerCase() };
+		return { name: stripQuotes(angled[1] ?? "").trim(), address: normalizeAddress(angled[2] ?? "") };
 	}
-	return {
-		name: "",
-		address: trimmed
-			.replace(/^["']|["']$/g, "")
-			.trim()
-			.toLowerCase(),
-	};
+	return { name: "", address: normalizeAddress(trimmed) };
 }
 
 function stripQuotes(value: string): string {
@@ -333,8 +359,7 @@ export function classifyCorrespondence(input: ClassifyCorrespondenceInput): Corr
 	const from = parseAddressList(headerValue(headers, "from"));
 	const replyTo = parseAddressList(headerValue(headers, "reply-to"));
 	for (const address of [...from, ...replyTo]) {
-		const localPart = address.address.split("@")[0] ?? "";
-		if (ROBOT_LOCAL_PARTS.test(localPart)) robotSignals.push(`robot-local-part:${address.address}`);
+		if (isRobotAddress(address.address)) robotSignals.push(`robot-local-part:${address.address}`);
 	}
 	// A `Reply-To:` header that is present but blank is a deliberate "do not
 	// answer this" — ClickUp's task notifications are the local example.

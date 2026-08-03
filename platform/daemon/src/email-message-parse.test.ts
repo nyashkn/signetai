@@ -4,6 +4,7 @@ import {
 	decodeMimeWords,
 	extractQuotedParticipants,
 	extractTextBody,
+	isRobotAddress,
 	parseAddressList,
 	parseEmailMessage,
 	parseHeaders,
@@ -56,6 +57,22 @@ describe("parseAddressList", () => {
 		expect(parseAddressList('"matt dock-blocks.com" <matt@dock-blocks.com>')).toEqual([
 			{ name: "matt dock-blocks.com", address: "matt@dock-blocks.com" },
 		]);
+	});
+
+	test("drops the href smuggled in by plain-text renderings of HTML mail", () => {
+		// Real shape seen in the wild: the anchor target is appended inside the
+		// angle brackets. Taking it whole minted a junk person entity whose
+		// canonical name was 90 characters of URL.
+		expect(
+			parseAddressList('"Apollo Partners" <partners@apollo.io mailto:partners@apollo.io?to=%22apollo%22>'),
+		).toEqual([{ name: "Apollo Partners", address: "partners@apollo.io" }]);
+	});
+
+	test("rejects fragments that are not addresses instead of minting them", () => {
+		expect(parseAddressList('is"<')).toEqual([]);
+		expect(parseAddressList("<not-an-address>")).toEqual([]);
+		expect(parseAddressList("Matt West")).toEqual([]);
+		expect(parseAddressList("<user@localdomain>")).toEqual([]);
 	});
 
 	test("bare addresses and empty headers", () => {
@@ -198,6 +215,23 @@ describe("classifyCorrespondence", () => {
 		expect(classifyCorrespondence({ headers: list, ownAddresses: OWN, repliesToKnownMessage: true }).class).toBe(
 			"bulk",
 		);
+	});
+});
+
+describe("isRobotAddress", () => {
+	test("separates unattended mailboxes from people using only the address", () => {
+		// This is the sole bulk signal available from an IMAP ENVELOPE, so a
+		// message whose body was never downloaded still classifies correctly.
+		expect(isRobotAddress("notifications@tasks.clickup.com")).toBe(true);
+		expect(isRobotAddress("noreply@clickup.com")).toBe(true);
+		expect(isRobotAddress("no-reply@x.com")).toBe(true);
+		expect(isRobotAddress("bounce+123@x.com")).toBe(true);
+		expect(isRobotAddress("alecia.robi@gmail.com")).toBe(false);
+		expect(isRobotAddress("westmatt81@gmail.com")).toBe(false);
+		expect(isRobotAddress("matt@dock-blocks.com")).toBe(false);
+		// Prefix-only matches must not fire: a person is not a robot.
+		expect(isRobotAddress("noreplacement@x.com")).toBe(false);
+		expect(isRobotAddress("alerta@x.com")).toBe(false);
 	});
 });
 

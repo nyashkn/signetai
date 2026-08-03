@@ -38,6 +38,7 @@ import {
 	type ParsedEmailMessage,
 	classifyCorrespondence,
 	extractQuotedParticipants,
+	isRobotAddress,
 	parseEmailMessage,
 } from "./email-message-parse";
 import { type EmailEnvelope, fetchEmailEnvelopes, fetchEmailMessageRaw, groupIntoThreads } from "./email-source-fetch";
@@ -243,13 +244,18 @@ function classifyMessage(
 			reciprocated: reciprocated.has(senderAddress),
 		});
 	}
-	// Body was skipped (budget or a prior fetch), so the full header set is not
-	// available. Envelope-only classification is deliberately conservative: with
-	// no bulk markers to inspect, only a live reply chain or reciprocity can
-	// promote a message to `direct`.
+	// Body was skipped (budget, or already stored), so `List-Unsubscribe` and the
+	// ESP markers cannot be inspected. The sender address still can be, and it is
+	// the signal that separates `notifications@` from a colleague — defaulting
+	// everything here to `notification` would bury real correspondents in any
+	// mailbox larger than the body budget.
 	if (reciprocated.has(senderAddress)) return { class: "direct", signals: ["envelope-only", "reciprocated"] };
 	if (repliesToKnownMessage) return { class: "direct", signals: ["envelope-only", "reply-chain"] };
-	return { class: "notification", signals: ["envelope-only", "no-headers-available"] };
+	if (senderAddress.length === 0) return { class: "notification", signals: ["envelope-only", "no-sender"] };
+	if (isRobotAddress(senderAddress) || envelope.replyTo.some((address) => isRobotAddress(address.address))) {
+		return { class: "notification", signals: ["envelope-only", `robot-local-part:${senderAddress}`] };
+	}
+	return { class: "direct", signals: ["envelope-only", "human-sender-address"] };
 }
 
 function collectOwnAddresses(envelopes: readonly EmailEnvelope[]): ReadonlySet<string> {
@@ -290,19 +296,27 @@ function collectReciprocatedAddresses(agentId: string, sourceId: string): Readon
 	}
 }
 
+/**
+ * Has this message's body already been stored, so the sync can skip paying an
+ * IMAP login for it?
+ *
+ * Counts rather than probing for a row: `withReadDb` normalizes a missing
+ * `.get()` result to `null`, so an `!== undefined` check is true even when
+ * nothing matched and would silently suppress every body fetch.
+ */
 function hasIndexedBody(agentId: string, sourceId: string, sourcePath: string): boolean {
 	try {
 		const row = getDbAccessor().withReadDb(
 			(db) =>
 				db
 					.prepare(
-						`SELECT 1 AS present FROM memory_artifacts
+						`SELECT COUNT(*) AS n FROM memory_artifacts
 						 WHERE agent_id = ? AND source_id = ? AND source_path = ? AND COALESCE(is_deleted, 0) = 0
-						 LIMIT 1`,
+						   AND json_extract(source_meta_json, '$.bodyFetched') = 1`,
 					)
-					.get(agentId, sourceId, sourcePath) as { present: number } | undefined,
+					.get(agentId, sourceId, sourcePath) as { n: number } | null | undefined,
 		);
-		return row !== undefined;
+		return (row?.n ?? 0) > 0;
 	} catch {
 		return false;
 	}
