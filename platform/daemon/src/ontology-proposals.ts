@@ -2059,6 +2059,105 @@ function bridgeNamePrefixDuplicates(
 	return bridged;
 }
 
+interface LocalPartBridge {
+	readonly address: DuplicateEntityRow;
+	readonly person: DuplicateEntityRow;
+	readonly localPart: string;
+}
+
+/**
+ * Join a second mailbox to the person it belongs to, using its local part.
+ *
+ * A person's work address carries no name at all — the only display name
+ * `matt@dock-blocks.com` was ever given is the literal string `matt
+ * dock-blocks.com`. So neither a header pairing nor a name prefix reaches it,
+ * and yet the corpus states plainly, in a human's own words, that it is the
+ * same Matt: *"he was talking about his outlook account matt@dock-blocks.com"*.
+ *
+ * Two deterministic signals stand in for that sentence:
+ *
+ * 1. **The local part is an unambiguous first name.** `matt@` matches the first
+ *    token of `Matt West`, and only that — generator 3's ambiguity rule already
+ *    guarantees a single referent.
+ * 2. **The two never co-occur.** One person's two mailboxes are essentially
+ *    never both addressed on the same message. A single message naming both as
+ *    distinct participants refutes the pairing outright.
+ *
+ * Weakest of the generators, so it proposes at the lowest confidence and can
+ * never apply itself.
+ */
+function bridgeAddressLocalParts(
+	db: ReadDb,
+	agentId: string,
+	groups: Map<string, DuplicateEntityRow[]>,
+): Map<string, LocalPartBridge> {
+	const addresses = db
+		.prepare(
+			`SELECT id, name, canonical_name, entity_type,
+			        COALESCE(mentions, 0) AS mentions,
+			        COALESCE(pinned, 0) AS pinned,
+			        updated_at
+			 FROM entities
+			 WHERE agent_id = ? AND entity_type = 'person'
+			   AND COALESCE(status, 'active') = 'active'
+			   AND canonical_name LIKE '%@%.%'`,
+		)
+		.all(agentId) as DuplicateEntityRow[];
+	if (addresses.length === 0) return new Map();
+
+	// Where each entity was seen. Two mailboxes of one person share no message.
+	const placements = db
+		.prepare(
+			`SELECT target_entity_id AS entity_id, source_path
+			 FROM entity_dependencies
+			 WHERE agent_id = ? AND source_path IS NOT NULL
+			   AND dependency_type IN ('authored_by', 'addressed_to', 'copied_on')`,
+		)
+		.all(agentId) as Array<{ entity_id: string; source_path: string }>;
+	const seenOn = new Map<string, Set<string>>();
+	for (const row of placements) {
+		const paths = seenOn.get(row.entity_id) ?? new Set<string>();
+		paths.add(row.source_path);
+		seenOn.set(row.entity_id, paths);
+	}
+	const coOccurs = (a: string, b: string): boolean => {
+		const left = seenOn.get(a);
+		const right = seenOn.get(b);
+		if (!left || !right) return false;
+		for (const path of left) if (right.has(path)) return true;
+		return false;
+	};
+
+	const bridged = new Map<string, LocalPartBridge>();
+	for (const address of addresses) {
+		const localPart = canonical(address.canonical_name ?? address.name).split("@")[0] ?? "";
+		if (localPart.length < 3 || !/^[a-z]+$/.test(localPart)) continue;
+
+		// Only a person can own a mailbox. Without this the graph's own noise votes:
+		// `Matt Dashboard analysis`, `Matt from DockBlocks here` and `Matt West's
+		// June emails` are an event, an artifact and a source, and counting them as
+		// rival owners made every real mailbox look ambiguous.
+		const targets = [...groups.entries()].filter(
+			([key, group]) =>
+				(key === localPart || key.startsWith(`${localPart} `)) &&
+				group.some((row) => row.entity_type === "person" && looksLikePersonalName(row.name)),
+		);
+		if (targets.length !== 1) continue;
+		const entry = targets[0];
+		if (entry === undefined) continue;
+		const [key, group] = entry;
+		if (group.some((row) => row.id === address.id)) continue;
+		if (!group.every((row) => looksLikePersonalName(row.name) || row.canonical_name?.includes("@"))) continue;
+		if (group.some((row) => coOccurs(address.id, row.id))) continue;
+
+		const person = group.find((row) => looksLikePersonalName(row.name));
+		if (person === undefined) continue;
+		groups.set(key, [...group, address]);
+		bridged.set(key, { address, person, localPart });
+	}
+	return bridged;
+}
+
 /**
  * Collapse groups that share an entity into one.
  *
@@ -2130,8 +2229,14 @@ function duplicateMergeCandidates(
 	}
 	const bridged = bridgeAliasDuplicates(db, agentId, groups);
 	const prefixed = bridgeNamePrefixDuplicates(db, agentId, groups);
+	// Local parts run against *collapsed* groups: before the collapse, `matt` and
+	// `matt west` look like two rival owners of `matt@` when they are one cluster,
+	// and the ambiguity rule would throw the join away. Collapse again afterwards,
+	// since attaching a mailbox can itself bring two clusters together.
+	const clustered = collapseSharedGroups(groups);
+	const localParts = bridgeAddressLocalParts(db, agentId, clustered);
 
-	return [...collapseSharedGroups(groups).entries()]
+	return [...collapseSharedGroups(clustered).entries()]
 		.filter(([key, group]) => key.length > 0 && group.length > 1 && !existing.has(key))
 		.map(([key, group]) => {
 			const ordered = [...group].sort(compareDuplicateTargets);
@@ -2142,31 +2247,51 @@ function duplicateMergeCandidates(
 			const inGroup = (id: string): boolean => group.some((row) => row.id === id);
 			const bridge = bridged.get(key) ?? [...bridged.values()].find((row) => inGroup(row.id));
 			const prefix = prefixed.get(key) ?? [...prefixed.values()].find((pair) => inGroup(pair.long.id));
+			const localPart = localParts.get(key) ?? [...localParts.values()].find((pair) => inGroup(pair.address.id));
 
-			let evidenceQuote: string;
-			let sourceKind: string;
-			let sourceId: string;
-			let rationale: string;
+			// One item per generator that contributed, so a reviewer sees every
+			// reason these rows were put together — including the weakest one.
+			const evidence: Array<{ source_kind: string; source_id: string; quote: string }> = [];
+			const rationales: string[] = [];
 			if (bridge) {
-				sourceKind = "entity_alias";
-				sourceId = `alias:${key}`;
-				evidenceQuote = `"${bridge.alias}" is an asserted alias of "${bridge.name}" (${bridge.alias_source ?? "no recorded source"}), and also names ${group
-					.filter((row) => row.id !== bridge.id)
-					.map((row) => `"${row.name}"`)
-					.join(", ")}.`;
-				rationale = `"${bridge.alias}" and "${bridge.name}" are the same identity under two names.`;
-			} else if (prefix) {
-				sourceKind = "ontology_index";
-				sourceId = `entities:${key}`;
-				evidenceQuote = `"${prefix.long.name}" is the only name in the graph beginning with "${prefix.short.name}", so the bare first name has one possible referent.`;
-				rationale = `"${prefix.short.name}" is an unambiguous short form of "${prefix.long.name}".`;
-			} else {
-				sourceKind = "ontology_index";
-				sourceId = `entities:${key}`;
-				evidenceQuote = `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`;
-				rationale = `Entities share canonical_name "${key}" in the same agent scope.`;
+				evidence.push({
+					source_kind: "entity_alias",
+					source_id: `alias:${key}`,
+					quote: `"${bridge.alias}" is an asserted alias of "${bridge.name}" (${bridge.alias_source ?? "no recorded source"}), and also names ${group
+						.filter((row) => row.id !== bridge.id)
+						.map((row) => `"${row.name}"`)
+						.join(", ")}.`,
+				});
+				rationales.push(`"${bridge.alias}" and "${bridge.name}" are the same identity under two names.`);
 			}
-			const evidence = [{ source_kind: sourceKind, source_id: sourceId, quote: evidenceQuote }];
+			if (prefix) {
+				evidence.push({
+					source_kind: "ontology_index",
+					source_id: `entities:${key}`,
+					quote: `"${prefix.long.name}" is the only name in the graph beginning with "${prefix.short.name}", so the bare first name has one possible referent.`,
+				});
+				rationales.push(`"${prefix.short.name}" is an unambiguous short form of "${prefix.long.name}".`);
+			}
+			if (localPart) {
+				evidence.push({
+					source_kind: "ontology_index",
+					source_id: `entities:${localPart.address.canonical_name ?? localPart.address.name}`,
+					// The address, not the row's display name: a connector-minted row is
+					// named for whoever the header called them, so quoting the name here
+					// would read as "Russ Watts has the local part russ".
+					quote: `The mailbox "${localPart.address.canonical_name ?? localPart.address.name}" has the local part "${localPart.localPart}", which names only "${localPart.person.name}" in this graph, and the two are never named on the same message.`,
+				});
+				rationales.push(`"${localPart.address.name}" appears to be a second mailbox for "${localPart.person.name}".`);
+			}
+			if (evidence.length === 0) {
+				evidence.push({
+					source_kind: "ontology_index",
+					source_id: `entities:${key}`,
+					quote: `Duplicate canonical_name "${key}" appears on ${ordered.map((row) => row.name).join(", ")}.`,
+				});
+				rationales.push(`Entities share canonical_name "${key}" in the same agent scope.`);
+			}
+			const rationale = rationales.join(" ");
 
 			const plan = buildEntityMergePlan(
 				db,
@@ -2181,7 +2306,7 @@ function duplicateMergeCandidates(
 					// person extraction found. Without this the plan blocks on that very
 					// difference and the duplicate is never even proposed. It stays a
 					// pending, human-approved proposal; only the automatic block lifts.
-					...(bridge || prefix ? { force: true } : {}),
+					...(bridge || prefix || localPart ? { force: true } : {}),
 				},
 				"duplicate_entities",
 			);
@@ -2199,7 +2324,14 @@ function duplicateMergeCandidates(
 				blocked: plan.blocked,
 				// A name prefix is inference, not an assertion, so it stays well under
 				// the 0.95 apply-first threshold no matter how safe the merge looks.
-				confidence: prefix && !bridge ? Math.min(plan.confidence, 0.6) : plan.confidence,
+				// A group is only as trustworthy as its weakest join: an asserted alias
+				// leaves the plan's own figure, a name prefix caps at 0.6, a local part
+				// at 0.5. All three stay under the 0.95 apply-first threshold.
+				confidence: localPart
+					? Math.min(plan.confidence, 0.5)
+					: prefix && !bridge
+						? Math.min(plan.confidence, 0.6)
+						: plan.confidence,
 				rationale: plan.rationale,
 				evidence: plan.evidence,
 				risk: plan.risk,

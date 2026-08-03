@@ -1182,6 +1182,84 @@ describe("ontology proposals", () => {
 		});
 	}
 
+	function insertParticipantEdge(id: string, entityId: string, agentId: string, sourcePath: string): void {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_dependencies
+				 (id, source_entity_id, target_entity_id, agent_id, dependency_type, strength, confidence,
+				  created_at, updated_at, source_path)
+				 VALUES (?, 'entity-doc', ?, ?, 'addressed_to', 1, 1,
+				         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
+			).run(id, entityId, agentId, sourcePath);
+		});
+	}
+
+	it("joins a second mailbox to its owner through the local part", () => {
+		// `matt@dock-blocks.com` carries no name at all — the only display name it
+		// was ever given is the literal string `matt dock-blocks.com` — so no
+		// header pairing and no name prefix reaches it.
+		insertEntity("entity-doc", "a message", "a message", "ant", 1, false, "artifact");
+		insertEntity("entity-matt-west", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-work", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 11, false, "person");
+		insertEntity("entity-matt", "Matt", "matt", "ant", 9, false, "person");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.sources.map((source) => source.name).sort()).toEqual(["Matt", "matt@dock-blocks.com"]);
+		expect(result.items[0]?.confidence).toBeLessThanOrEqual(0.5);
+		expect(JSON.stringify(result.items[0]?.evidence)).toContain("never named on the same message");
+	});
+
+	it("refuses the local-part join when one message names both", () => {
+		// Two mailboxes of one person are essentially never both addressed on the
+		// same message; a single such message refutes the pairing outright.
+		insertEntity("entity-doc", "a message", "a message", "ant", 1, false, "artifact");
+		insertEntity("entity-matt-west", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-work", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 11, false, "person");
+		insertParticipantEdge("dep-a", "entity-matt-west", "ant", "email://acct/INBOX/42");
+		insertParticipantEdge("dep-b", "entity-matt-work", "ant", "email://acct/INBOX/42");
+
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
+	it("does not let non-person rows vote on who owns a mailbox", () => {
+		// All three are real rows in the live graph and all three start with "Matt".
+		// Counting them as rival owners made every genuine mailbox look ambiguous.
+		insertEntity("entity-matt-work", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 11, false, "person");
+		insertEntity("entity-matt-west", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-event", "Matt Dashboard analysis", "matt dashboard analysis", "ant", 2, false, "event");
+		insertEntity(
+			"entity-matt-art",
+			"Matt from DockBlocks here",
+			"matt from dockblocks here",
+			"ant",
+			1,
+			false,
+			"artifact",
+		);
+		insertEntity("entity-matt-src", "Matt West's June emails", "matt west's june emails", "ant", 1, false, "source");
+
+		const result = proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 });
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.sources.map((source) => source.name)).toEqual(["matt@dock-blocks.com"]);
+	});
+
+	it("refuses the local-part join when two people could own the mailbox", () => {
+		insertEntity("entity-matt-work", "matt@dock-blocks.com", "matt@dock-blocks.com", "ant", 11, false, "person");
+		insertEntity("entity-matt-west", "Matt West", "matt west", "ant", 124, false, "person");
+		insertEntity("entity-matt-damon", "Matt Damon", "matt damon", "ant", 3, false, "person");
+
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
+	it("does not read a role mailbox as a person", () => {
+		insertEntity("entity-info", "info@843plumbing.com", "info@843plumbing.com", "ant", 4, false, "person");
+		insertEntity("entity-james", "James Miles", "james miles", "ant", 13, false, "person");
+
+		expect(proposeDuplicateEntityMerges(getDbAccessor(), { agentId: "ant", limit: 10 }).count).toBe(0);
+	});
+
 	it("joins a person to their address through an asserted alias", () => {
 		// The duplicate that matters differs in name *and* type: the address is an
 		// `artifact` minted by a connector, the human a `person` from extraction.
