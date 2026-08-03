@@ -280,7 +280,7 @@ describe("createMcpServer", () => {
 		for (const alias of GRAPHIQ_COMPAT_ALIASES) {
 			expect(names).toContain(alias);
 		}
-		expect(names.length).toBe(57);
+		expect(names.length).toBe(59);
 	});
 
 	it("registers generic code tools when GraphIQ has an active project", async () => {

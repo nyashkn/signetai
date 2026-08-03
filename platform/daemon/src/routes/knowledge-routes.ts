@@ -26,6 +26,7 @@ import {
 	unpinEntity,
 } from "../knowledge-graph";
 import { getKnowledgeHygieneReport } from "../knowledge-graph-hygiene";
+import { trailFrom, whatTouched } from "../knowledge-trail";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { getTraversalStatus, resolveFocalEntities, traverseKnowledgeGraph } from "../pipeline/graph-traversal";
 import {
@@ -358,6 +359,51 @@ export function registerKnowledgeRoutes(app: Hono): void {
 	app.get("/api/knowledge/stats", (c) => {
 		const agentId = c.req.query("agent_id") ?? "default";
 		return c.json(getKnowledgeStats(getDbAccessor(), agentId));
+	});
+
+	function positiveInt(raw: string | undefined): number | undefined {
+		const parsed = Number.parseInt(raw ?? "", 10);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+	}
+
+	function ratio(raw: string | undefined): number | undefined {
+		const parsed = Number.parseFloat(raw ?? "");
+		return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+	}
+
+	// `who` is any spelling of one identity — a name, an address, an entity id —
+	// because the caller rarely knows which one the graph filed the work under.
+	app.get("/api/knowledge/touched", (c) => {
+		const who = c.req.query("who")?.trim() ?? "";
+		if (who.length === 0) return c.json({ error: "who is required" }, 400);
+		return c.json(
+			whatTouched({
+				agentId: c.req.query("agent_id") ?? "default",
+				selector: who,
+				limit: positiveInt(c.req.query("limit")),
+				minStrength: ratio(c.req.query("min_strength")),
+			}),
+		);
+	});
+
+	app.get("/api/knowledge/trail", (c) => {
+		const thing = c.req.query("thing")?.trim() ?? "";
+		if (thing.length === 0) return c.json({ error: "thing is required" }, 400);
+		const types = c.req
+			.query("types")
+			?.split(",")
+			.map((value) => value.trim())
+			.filter((value) => value.length > 0);
+		return c.json(
+			trailFrom({
+				agentId: c.req.query("agent_id") ?? "default",
+				selector: thing,
+				maxDepth: positiveInt(c.req.query("depth")),
+				limit: positiveInt(c.req.query("limit")),
+				minStrength: ratio(c.req.query("min_strength")),
+				...(types && types.length > 0 ? { targetTypes: types } : {}),
+			}),
+		);
 	});
 
 	app.get("/api/knowledge/communities", (c) => {

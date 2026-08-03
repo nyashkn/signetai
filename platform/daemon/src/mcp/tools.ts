@@ -149,6 +149,8 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"signet_session_search",
 	"signet_save_note",
 	"knowledge_expand",
+	"knowledge_what_touched",
+	"knowledge_trail",
 	"knowledge_tree",
 	"knowledge_list_entities",
 	"knowledge_get_entity",
@@ -2012,6 +2014,64 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			if (!result.ok) {
 				return errorResult(`Expand failed: ${result.error}`);
 			}
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"knowledge_what_touched",
+		{
+			title: "What Touched",
+			description:
+				"Everything one person or thing is attached to, with a deep link per item. " +
+				"Give any spelling — a display name, an email address, an entity id — the " +
+				"identity is resolved through its aliases first, so work filed under a " +
+				"different handle still comes back.",
+			inputSchema: z.object({
+				who: z.string().describe("Person or thing, e.g. 'Matt West' or 'matt@dock-blocks.com'"),
+				limit: z.number().optional().describe("Max items, default 50"),
+				min_strength: z.number().optional().describe("Minimum edge strength 0..1, default 0.3"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+		},
+		async ({ who, limit, min_strength, agent_id }) => {
+			const params = new URLSearchParams({ who });
+			if (limit !== undefined) params.set("limit", String(limit));
+			if (min_strength !== undefined) params.set("min_strength", String(min_strength));
+			if (agent_id !== undefined) params.set("agent_id", agent_id);
+			const result = await fetchDaemon<unknown>(baseUrl, `/api/knowledge/touched?${params.toString()}`);
+			if (!result.ok) return errorResult(`what_touched failed: ${result.error}`);
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"knowledge_trail",
+		{
+			title: "Trail",
+			description:
+				"Ordered provenance chains out of a person or thing, up to several hops, " +
+				"each hop naming the relationship that led there and deep-linking the " +
+				"artifact it came from. Use to answer 'where did this come from' and " +
+				"'what connects these two'.",
+			inputSchema: z.object({
+				thing: z.string().describe("Starting point — a person, an address, a document, an entity id"),
+				depth: z.number().optional().describe("Max hops, 1..6, default 4"),
+				types: z.string().optional().describe("Comma-separated entity types the chain must end on"),
+				limit: z.number().optional().describe("Max paths, default 50"),
+				min_strength: z.number().optional().describe("Minimum edge strength 0..1, default 0.3"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+		},
+		async ({ thing, depth, types, limit, min_strength, agent_id }) => {
+			const params = new URLSearchParams({ thing });
+			if (depth !== undefined) params.set("depth", String(depth));
+			if (types !== undefined) params.set("types", types);
+			if (limit !== undefined) params.set("limit", String(limit));
+			if (min_strength !== undefined) params.set("min_strength", String(min_strength));
+			if (agent_id !== undefined) params.set("agent_id", agent_id);
+			const result = await fetchDaemon<unknown>(baseUrl, `/api/knowledge/trail?${params.toString()}`);
+			if (!result.ok) return errorResult(`trail failed: ${result.error}`);
 			return textResult(result.data);
 		},
 	);
