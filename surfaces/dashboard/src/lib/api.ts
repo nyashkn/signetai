@@ -1483,6 +1483,43 @@ export async function addGitHubSource(input: AddGitHubSourceInput): Promise<AddS
 	return body as AddSourceResponse;
 }
 
+/** No credential field: himalaya holds the account secrets, Signet only names them. */
+export interface AddEmailSourceInput {
+	readonly accounts: readonly string[];
+	readonly name?: string;
+	readonly mailboxes?: readonly string[];
+	readonly maxMessagesPerSync?: number;
+	readonly includeQuotedParticipants?: boolean;
+	readonly since?: string;
+}
+
+export async function addEmailSource(input: AddEmailSourceInput): Promise<AddSourceResponse> {
+	const response = await fetch(`${API_BASE}/api/sources/email`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	const body = (await response.json().catch(() => null)) as Partial<AddSourceResponse> | null;
+	if (!response.ok) {
+		return {
+			source: {
+				id: "",
+				kind: "email",
+				name: input.name ?? "Email",
+				root: `email://accounts/${input.accounts.join(",")}`,
+				enabled: false,
+				mode: "read-only",
+				createdAt: "",
+				updatedAt: "",
+			},
+			created: false,
+			indexed: 0,
+			error: typeof body?.error === "string" ? body.error : `Request failed with ${response.status}`,
+		};
+	}
+	return body as AddSourceResponse;
+}
+
 export async function removeSource(sourceId: string): Promise<RemoveSourceResponse> {
 	try {
 		const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(sourceId)}`, {

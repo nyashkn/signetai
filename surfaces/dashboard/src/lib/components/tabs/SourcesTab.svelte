@@ -3,6 +3,7 @@ import {
 	type GitHubSourceResourceType,
 	type SignetSourceEntry,
 	addDiscordSource,
+	addEmailSource,
 	addGitHubSource,
 	addObsidianSource,
 	getSourceSnapshot,
@@ -51,7 +52,7 @@ type SourceKind =
 	| "airtable"
 	| "go-high-level"
 	| "stripe"
-	| "imap-email"
+	| "email"
 	| "proton-mail"
 	| "browser-history"
 	| "linear";
@@ -173,11 +174,21 @@ let githubLabelsText = $state("");
 let githubDocPathsText = $state("README.md\nCHANGELOG.md");
 // biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
 let githubMaxItems = $state(500);
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let emailName = $state("Email");
+let emailAccountsText = $state("");
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let emailMailboxesText = $state("Inbox\nSent");
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let emailMaxMessages = $state(500);
+// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
+let emailIncludeQuotedParticipants = $state(true);
 let status = $state<string | null>(null);
 let error = $state<string | null>(null);
 let touchedPath = $state(false);
 let touchedDiscord = $state(false);
 let touchedGithub = $state(false);
+let touchedEmail = $state(false);
 let expandedKind = $state<SourceKind | null>(null);
 // biome-ignore lint/style/useConst: Svelte event handlers mutate this rune from markup.
 let selectedDiscordSourceId = $state<string | null>(null);
@@ -447,17 +458,17 @@ const connectors: SourceConnector[] = [
 		learnMore: [],
 	},
 	{
-		kind: "imap-email",
-		name: "IMAP Email",
-		detail: "Generic mailboxes and folders",
+		kind: "email",
+		name: "Email",
+		detail: "Mail threads via the himalaya CLI",
 		description:
-			"Connect a standards-based IMAP mailbox for read-only thread, sender, folder, and attachment-metadata recall.",
+			"Index mail threads through your existing himalaya accounts. Credentials stay in himalaya's own config — Signet never stores or reads them. Sender, recipient, and reply relationships are taken straight from message headers, so people and threads land in the graph as asserted facts rather than guesses.",
 		icon: "imap-email",
 		category: "cloud",
-		tags: ["cloud", "mail", "email", "imap", "planned"],
-		status: "planned",
-		indexes: ["Mail folders", "Threads and senders", "Attachment metadata"],
-		never: ["Send, delete, or move mail during indexing"],
+		tags: ["cloud", "mail", "email", "imap", "gmail", "himalaya"],
+		status: "available",
+		indexes: ["Mail threads and replies", "Senders and recipients", "Message bodies"],
+		never: ["Send, delete, or move mail during indexing", "Store mail credentials"],
 		learnMore: [],
 	},
 	{
@@ -516,6 +527,7 @@ const selectedConnector = $derived(connectors.find((connector) => connector.kind
 const obsidianSources = $derived(sources.filter((source) => source.kind === "obsidian"));
 const discordSources = $derived(sources.filter((source) => source.kind === "discord"));
 const githubSources = $derived(sources.filter((source) => source.kind === "github"));
+const emailSources = $derived(sources.filter((source) => source.kind === "email"));
 const connectedSourceList = $derived([...obsidianSources, ...discordSources, ...githubSources]);
 const selectedDiscordSource = $derived(
 	discordSources.find((source) => source.id === selectedDiscordSourceId) ?? discordSources[0] ?? null,
@@ -548,6 +560,21 @@ const githubReposMissing = $derived(githubRepos.length === 0);
 const githubResourceTypesMissing = $derived(githubResourceTypes.length === 0);
 const githubTokenMissingForDiscussions = $derived(githubIncludeDiscussions && githubTokenRef.trim().length === 0);
 const githubMaxItemsInvalid = $derived(!Number.isInteger(Number(githubMaxItems)) || Number(githubMaxItems) < 1);
+const emailAccounts = $derived(
+	emailAccountsText
+		.split(/[\n,]/)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0),
+);
+const emailMailboxes = $derived(
+	emailMailboxesText
+		.split(/[\n,]/)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0),
+);
+const emailAccountsMissing = $derived(emailAccounts.length === 0);
+const emailMailboxesMissing = $derived(emailMailboxes.length === 0);
+const emailMaxMessagesInvalid = $derived(!Number.isInteger(Number(emailMaxMessages)) || Number(emailMaxMessages) < 1);
 const canSubmit = $derived.by(() => {
 	if (adding) return false;
 	if (selectedKind === "obsidian") return !pathIsMissing;
@@ -556,6 +583,9 @@ const canSubmit = $derived.by(() => {
 		return (
 			!githubReposMissing && !githubResourceTypesMissing && !githubTokenMissingForDiscussions && !githubMaxItemsInvalid
 		);
+	}
+	if (selectedKind === "email") {
+		return !emailAccountsMissing && !emailMailboxesMissing && !emailMaxMessagesInvalid;
 	}
 	return false;
 });
@@ -603,6 +633,7 @@ function selectConnector(kind: SourceKind): void {
 	touchedPath = false;
 	touchedDiscord = false;
 	touchedGithub = false;
+	touchedEmail = false;
 }
 
 async function chooseFolder(): Promise<void> {
@@ -765,9 +796,43 @@ async function submitGitHubSource(): Promise<void> {
 	}
 }
 
+async function submitEmailSource(): Promise<void> {
+	touchedEmail = true;
+	if (!canSubmit) return;
+	adding = true;
+	status = null;
+	error = null;
+	try {
+		const result = await addEmailSource({
+			accounts: emailAccounts,
+			name: emailName.trim() || undefined,
+			mailboxes: emailMailboxes,
+			maxMessagesPerSync: Number(emailMaxMessages),
+			includeQuotedParticipants: emailIncludeQuotedParticipants,
+		});
+		if (result.error) {
+			error = result.error;
+			return;
+		}
+		status = `${result.created ? "Connected" : "Updated"} ${result.source.name}. Mail indexing is running in the background.`;
+		emailAccountsText = "";
+		touchedEmail = false;
+		connectMode = false;
+		await refreshSources();
+	} finally {
+		adding = false;
+	}
+}
+
 async function disconnectSource(source: SignetSourceEntry): Promise<void> {
 	const originalLabel =
-		source.kind === "discord" ? "Discord data" : source.kind === "github" ? "GitHub data" : "vault files";
+		source.kind === "discord"
+			? "Discord data"
+			: source.kind === "github"
+				? "GitHub data"
+				: source.kind === "email"
+					? "mail on the server"
+					: "vault files";
 	const confirmed = window.confirm(
 		`Remove ${source.name} from Signet?\n\nThis purges Signet's indexed source rows and chunks, but leaves the original ${originalLabel} untouched.`,
 	);
@@ -1490,7 +1555,7 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 				<div class="connector-grid" class:has-expanded={expandedKind !== null}>
 					{#each filteredConnectors as connector (connector.kind)}
 						{@const expanded = expandedKind === connector.kind}
-						{@const connectedSources = connector.kind === "obsidian" ? obsidianSources : connector.kind === "discord" ? discordSources : connector.kind === "github" ? githubSources : []}
+						{@const connectedSources = connector.kind === "obsidian" ? obsidianSources : connector.kind === "discord" ? discordSources : connector.kind === "github" ? githubSources : connector.kind === "email" ? emailSources : []}
 						{@const isConnected = connectedSources.length > 0}
 						<article class="connector-card" class:expanded class:connected={isConnected} class:compressed={expandedKind !== null && !expanded}>
 							<button
@@ -1615,7 +1680,7 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 													onclick={() => void disconnectSource(source)}
 												>
 													{#if removingSourceId === source.id}<span class="spin"><RefreshCw /></span>{:else}<X />{/if}
-													{removingSourceId === source.id ? "Removing" : source.kind === "discord" ? "Disconnect Discord" : source.kind === "github" ? "Disconnect GitHub" : "Disconnect vault"}
+													{removingSourceId === source.id ? "Removing" : source.kind === "discord" ? "Disconnect Discord" : source.kind === "github" ? "Disconnect GitHub" : source.kind === "email" ? "Disconnect email" : "Disconnect vault"}
 												</button>
 											</article>
 										{/each}
@@ -1853,6 +1918,58 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 												<textarea bind:value={githubDocPathsText} rows="4" placeholder="README.md&#10;docs/**/*.md"></textarea>
 												<small class="field-hint">Use exact files or globs. Defaults cover README and changelog without crawling the whole repository.</small>
 											</label>
+											<button class="connect-button" type="submit" disabled={!canSubmit}>
+												{#if adding}<span class="spin"><RefreshCw /></span>{:else}<CirclePlus />{/if}
+												{adding ? "Queueing" : "Add source"}
+											</button>
+										</form>
+									{/if}
+
+									{#if connectMode && expanded && connector.kind === "email"}
+										<form class="connect-form" onsubmit={(event) => { event.preventDefault(); void submitEmailSource(); }}>
+											<label>
+												<span>Display name</span>
+												<input bind:value={emailName} placeholder="Email" />
+											</label>
+											<label>
+												<span>himalaya accounts</span>
+												<textarea
+													bind:value={emailAccountsText}
+													rows="3"
+													placeholder="personal&#10;work"
+													onblur={() => (touchedEmail = true)}
+												></textarea>
+												<small class="field-hint">One account key per line, as named in <code>~/.config/himalaya/config.toml</code>. Run <code>himalaya account list</code> to see them. Signet never stores mail credentials — himalaya holds them.</small>
+											</label>
+											{#if touchedEmail && emailAccountsMissing}<p class="field-error">At least one himalaya account is required.</p>{/if}
+											<label>
+												<span>Mailboxes</span>
+												<textarea
+													bind:value={emailMailboxesText}
+													rows="3"
+													placeholder="Inbox&#10;Sent"
+													onblur={() => (touchedEmail = true)}
+												></textarea>
+												<small class="field-hint">Sent is included by default: your outbound mail is half of any request-and-response trail.</small>
+											</label>
+											{#if touchedEmail && emailMailboxesMissing}<p class="field-error">At least one mailbox is required.</p>{/if}
+											<label>
+												<span>Message cap per sync</span>
+												<input
+													bind:value={emailMaxMessages}
+													type="number"
+													min="1"
+													max="10000"
+													onblur={() => (touchedEmail = true)}
+												/>
+												<small class="field-hint">Limits how many message bodies are downloaded per sync. Thread and sender metadata for the whole mailbox is fetched in a single connection regardless.</small>
+											</label>
+											{#if touchedEmail && emailMaxMessagesInvalid}<p class="field-error">Message cap must be a whole number of at least 1.</p>{/if}
+											<label class="source-option-row">
+												<input bind:checked={emailIncludeQuotedParticipants} type="checkbox" />
+												<span>Read participants from quoted replies</span>
+											</label>
+											<small class="field-hint">Forwarded and quoted blocks name people who never appear in an envelope header. Reading them recovers those contacts.</small>
 											<button class="connect-button" type="submit" disabled={!canSubmit}>
 												{#if adding}<span class="spin"><RefreshCw /></span>{:else}<CirclePlus />{/if}
 												{adding ? "Queueing" : "Add source"}

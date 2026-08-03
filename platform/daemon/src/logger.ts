@@ -33,6 +33,7 @@ export type LogCategory =
 	| "sync" // Harness sync operations
 	| "git" // Git auto-commits
 	| "github-source" // GitHub source ingestion and fetch diagnostics
+	| "email-source" // Email source ingestion via the himalaya CLI
 	| "watcher" // File watcher events
 	| "embedding" // Embedding operations
 	| "harness" // Harness configuration

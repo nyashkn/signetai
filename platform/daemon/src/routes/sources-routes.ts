@@ -9,6 +9,7 @@ import {
 	SOURCE_CHUNK_SOURCE_TYPE,
 	type SignetSourceEntry,
 	addDiscordSource,
+	addEmailSource,
 	addGitHubSource,
 	addObsidianSource,
 	loadSourcesConfig,
@@ -102,6 +103,16 @@ interface AddGitHubSourceBody {
 	readonly labels?: readonly string[];
 	readonly docPaths?: readonly string[];
 	readonly maxItemsPerRepo?: number;
+}
+
+interface AddEmailSourceBody {
+	readonly accounts?: readonly string[];
+	readonly account?: string;
+	readonly name?: string;
+	readonly mailboxes?: readonly string[];
+	readonly maxMessagesPerSync?: number;
+	readonly includeQuotedParticipants?: boolean;
+	readonly since?: string;
 }
 
 interface PickDirectoryBody {
@@ -307,6 +318,46 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 					? body.docPaths.filter((entry): entry is string => typeof entry === "string")
 					: undefined,
 				maxItemsPerRepo: body.maxItemsPerRepo,
+			},
+			agentsDir,
+		);
+		if (result.ok === false) return c.json({ error: result.error }, 400);
+
+		const job = enqueueSourceIndexJob({
+			source: result.source,
+			agentsDir,
+			startBridge,
+			purgeNativeSource,
+		});
+
+		return c.json({ source: result.source, created: result.created, indexed: 0, queued: true, job }, 202);
+	});
+
+	app.post("/api/sources/email", async (c) => {
+		let body: AddEmailSourceBody = {};
+		try {
+			body = (await c.req.json()) as AddEmailSourceBody;
+		} catch {
+			return c.json({ error: "Invalid JSON body" }, 400);
+		}
+
+		// No credential field by design — accounts are himalaya config keys and the
+		// secrets stay in ~/.config/himalaya/config.toml.
+		const accounts = Array.isArray(body.accounts)
+			? body.accounts.filter((entry): entry is string => typeof entry === "string")
+			: typeof body.account === "string"
+				? [body.account]
+				: [];
+		const result = addEmailSource(
+			{
+				accounts,
+				name: body.name,
+				mailboxes: Array.isArray(body.mailboxes)
+					? body.mailboxes.filter((entry): entry is string => typeof entry === "string")
+					: undefined,
+				maxMessagesPerSync: body.maxMessagesPerSync,
+				includeQuotedParticipants: body.includeQuotedParticipants,
+				since: body.since,
 			},
 			agentsDir,
 		);

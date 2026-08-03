@@ -45,6 +45,9 @@ coverage/
 dogfood-output/
 dist/native/
 email*
+# `email*` is unanchored, so it silently swallows source files at any depth.
+# The email source connector lives here and must be tracked.
+!platform/daemon/src/email-*.ts
 node_modules/
 npm-debug.log*
 package-lock.json

@@ -276,6 +276,17 @@ export async function listSources(deps: SourcesDeps): Promise<void> {
 			if (typeof source.providerSettings.tokenRef === "string")
 				console.log(chalk.dim(`  tokenRef: ${source.providerSettings.tokenRef}`));
 		}
+		if (source.kind === "email" && source.providerSettings) {
+			const accounts = Array.isArray(source.providerSettings.accounts)
+				? source.providerSettings.accounts.filter((entry) => typeof entry === "string")
+				: [];
+			const mailboxes = Array.isArray(source.providerSettings.mailboxes)
+				? source.providerSettings.mailboxes.filter((entry) => typeof entry === "string")
+				: [];
+			if (accounts.length > 0) console.log(chalk.dim(`  himalaya accounts: ${accounts.join(", ")}`));
+			if (mailboxes.length > 0) console.log(chalk.dim(`  mailboxes: ${mailboxes.join(", ")}`));
+			// No tokenRef line: himalaya owns the credentials, Signet never sees them.
+		}
 		if (source.excludeGlobs?.length) console.log(chalk.dim(`  excludes: ${source.excludeGlobs.join(", ")}`));
 		if (source.lastIndexedAt) console.log(chalk.dim(`  last indexed: ${source.lastIndexedAt}`));
 	}

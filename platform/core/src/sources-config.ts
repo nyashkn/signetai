@@ -100,6 +100,33 @@ export interface GitHubSourceSettings {
 	readonly maxItemsPerRepo: number;
 }
 
+/**
+ * Email is driven through the himalaya CLI rather than a bundled IMAP client,
+ * so there is deliberately no `tokenRef` here — credentials stay in
+ * `~/.config/himalaya/config.toml` and Signet never stores or resolves them.
+ */
+export interface EmailSourceSettings {
+	/** himalaya account keys, e.g. `pivotplanit`. */
+	readonly accounts: readonly string[];
+	/** Sent is synced by default: outbound mail is half of any request/response trail. */
+	readonly mailboxes: readonly string[];
+	/** Cap on *body* fetches per sync — each one costs a separate IMAP login. */
+	readonly maxMessagesPerSync: number;
+	/** Mine quoted forward blocks for name/address pairs the envelope headers never carry. */
+	readonly includeQuotedParticipants: boolean;
+	readonly since?: string;
+}
+
+export interface AddEmailSourceInput {
+	readonly accounts: readonly string[];
+	readonly name?: string;
+	readonly mailboxes?: readonly string[];
+	readonly maxMessagesPerSync?: number;
+	readonly includeQuotedParticipants?: boolean;
+	readonly since?: string;
+	readonly now?: string;
+}
+
 export interface AddGitHubSourceInput {
 	readonly repos: readonly string[];
 	readonly tokenRef?: string;
@@ -132,6 +159,12 @@ export const DEFAULT_GITHUB_RESOURCE_TYPES_NO_TOKEN = ["issues", "pulls", "docs"
 export const DEFAULT_GITHUB_DOC_PATHS = ["README.md", "CHANGELOG.md"] as const;
 export const DEFAULT_GITHUB_MAX_ITEMS_PER_REPO = 500;
 export const MAX_GITHUB_MAX_ITEMS_PER_REPO = 10_000;
+export const DEFAULT_EMAIL_MAILBOXES = ["Inbox", "Sent"] as const;
+export const DEFAULT_EMAIL_MAX_MESSAGES_PER_SYNC = 500;
+export const MAX_EMAIL_MAX_MESSAGES_PER_SYNC = 10_000;
+/** Mirrors the argv guards in the daemon's himalaya driver so bad names fail at config time. */
+const EMAIL_ACCOUNT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const EMAIL_MAILBOX_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._\/-]*$/;
 const VALID_GITHUB_RESOURCE_TYPES = new Set<string>(DEFAULT_GITHUB_RESOURCE_TYPES);
 
 export function getAgentsDir(): string {
@@ -310,6 +343,132 @@ function addGitHubSourceChecked(input: AddGitHubSourceInput, agentsDir = getAgen
 	};
 	saveSourcesConfig({ version: SOURCES_CONFIG_VERSION, sources: [...cfg.sources, source] }, agentsDir);
 	return { ok: true, source, created: true };
+}
+
+export function addEmailSource(input: AddEmailSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	return withSourcesConfigLock(agentsDir, () => addEmailSourceUnlocked(input, agentsDir));
+}
+
+function addEmailSourceUnlocked(input: AddEmailSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	try {
+		return addEmailSourceChecked(input, agentsDir);
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		return { ok: false, error: detail };
+	}
+}
+
+function addEmailSourceChecked(input: AddEmailSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	const settings = buildEmailSettings(input);
+	if ("error" in settings) return { ok: false, error: settings.error };
+
+	const now = input.now ?? new Date().toISOString();
+	const cfg = loadSourcesConfigForWrite(agentsDir);
+	const accountKey = settings.accounts.slice().sort().join(",");
+	const sourceId = `email:${createHash("sha256").update(accountKey).digest("hex").slice(0, 16)}`;
+	const root = `email://accounts/${accountKey}`;
+	const existing = cfg.sources.find((source) => source.id === sourceId);
+	if (existing) {
+		const updatedSettings = buildEmailSettings(input, parseEmailSettings(existing.providerSettings));
+		if ("error" in updatedSettings) return { ok: false, error: updatedSettings.error };
+		const updated: SignetSourceEntry = {
+			...existing,
+			name: cleanName(input.name) ?? existing.name,
+			root,
+			enabled: true,
+			providerSettings: emailSettingsProviderSettings(updatedSettings),
+			updatedAt: now,
+		};
+		saveSourcesConfig(
+			{
+				version: SOURCES_CONFIG_VERSION,
+				sources: cfg.sources.map((source) => (source.id === existing.id ? updated : source)),
+			},
+			agentsDir,
+		);
+		return { ok: true, source: updated, created: false };
+	}
+
+	const source: SignetSourceEntry = {
+		id: sourceId,
+		kind: "email",
+		name: cleanName(input.name) ?? settings.accounts[0] ?? "Email Source",
+		root,
+		enabled: true,
+		mode: "read-only",
+		createdAt: now,
+		updatedAt: now,
+		providerSettings: emailSettingsProviderSettings(settings),
+	};
+	saveSourcesConfig({ version: SOURCES_CONFIG_VERSION, sources: [...cfg.sources, source] }, agentsDir);
+	return { ok: true, source, created: true };
+}
+
+export function parseEmailSettings(raw?: SignetSourceProviderSettings): EmailSourceSettings {
+	const accounts = Array.isArray(raw?.accounts)
+		? cleanStringArray(raw.accounts).filter((account) => EMAIL_ACCOUNT_NAME_RE.test(account))
+		: [];
+	const mailboxes = Array.isArray(raw?.mailboxes)
+		? cleanStringArray(raw.mailboxes).filter((mailbox) => EMAIL_MAILBOX_NAME_RE.test(mailbox))
+		: [];
+	const since = typeof raw?.since === "string" ? cleanIsoDate(raw.since) : undefined;
+	return {
+		accounts,
+		mailboxes: mailboxes.length > 0 ? mailboxes : [...DEFAULT_EMAIL_MAILBOXES],
+		maxMessagesPerSync:
+			cleanPositiveInteger(raw?.maxMessagesPerSync, MAX_EMAIL_MAX_MESSAGES_PER_SYNC) ??
+			DEFAULT_EMAIL_MAX_MESSAGES_PER_SYNC,
+		includeQuotedParticipants: raw?.includeQuotedParticipants !== false,
+		...(since ? { since } : {}),
+	};
+}
+
+function buildEmailSettings(
+	input: AddEmailSourceInput,
+	existing?: EmailSourceSettings,
+): EmailSourceSettings | { readonly error: string } {
+	const accounts = input.accounts !== undefined ? cleanStringArray(input.accounts) : (existing?.accounts ?? []);
+	if (accounts.length === 0) return { error: "At least one himalaya account is required" };
+	for (const account of accounts) {
+		if (!EMAIL_ACCOUNT_NAME_RE.test(account)) {
+			return { error: `Invalid himalaya account name: ${account}. Expected a key from ~/.config/himalaya/config.toml` };
+		}
+	}
+	const mailboxes =
+		input.mailboxes !== undefined
+			? cleanStringArray(input.mailboxes)
+			: (existing?.mailboxes ?? [...DEFAULT_EMAIL_MAILBOXES]);
+	if (mailboxes.length === 0) return { error: "At least one mailbox is required" };
+	for (const mailbox of mailboxes) {
+		if (!EMAIL_MAILBOX_NAME_RE.test(mailbox)) return { error: `Invalid mailbox name: ${mailbox}` };
+	}
+	if (input.maxMessagesPerSync !== undefined) {
+		const capped = cleanPositiveInteger(input.maxMessagesPerSync, MAX_EMAIL_MAX_MESSAGES_PER_SYNC);
+		if (capped !== input.maxMessagesPerSync) {
+			return { error: `maxMessagesPerSync must be an integer between 1 and ${MAX_EMAIL_MAX_MESSAGES_PER_SYNC}` };
+		}
+	}
+	if (input.since !== undefined && cleanIsoDate(input.since) === undefined) {
+		return { error: "since must be an ISO 8601 date" };
+	}
+	const since = input.since !== undefined ? cleanIsoDate(input.since) : existing?.since;
+	return {
+		accounts,
+		mailboxes,
+		maxMessagesPerSync: input.maxMessagesPerSync ?? existing?.maxMessagesPerSync ?? DEFAULT_EMAIL_MAX_MESSAGES_PER_SYNC,
+		includeQuotedParticipants: input.includeQuotedParticipants ?? existing?.includeQuotedParticipants ?? true,
+		...(since ? { since } : {}),
+	};
+}
+
+function emailSettingsProviderSettings(settings: EmailSourceSettings): SignetSourceProviderSettings {
+	return {
+		accounts: settings.accounts,
+		mailboxes: settings.mailboxes,
+		maxMessagesPerSync: settings.maxMessagesPerSync,
+		includeQuotedParticipants: settings.includeQuotedParticipants,
+		...(settings.since ? { since: settings.since } : {}),
+	};
 }
 
 export function parseDiscordSettings(raw?: SignetSourceProviderSettings): DiscordSourceSettings {
