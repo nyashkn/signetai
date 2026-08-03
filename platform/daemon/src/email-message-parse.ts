@@ -148,14 +148,18 @@ const ADDR_SPEC = /^[^\s@<>",;:\\()[\]]+@[^\s@<>",;:\\()[\]]+\.[^\s@<>",;:\\()[\
 
 function normalizeAddress(raw: string): string {
 	// Plain-text renderings of HTML mail smuggle the anchor href in beside the
-	// address — `partners@apollo.io mailto:partners@apollo.io?to=...` — so keep
-	// only the first token before validating.
+	// address, in two shapes seen on real mail:
+	//   `partners@apollo.io mailto:partners@apollo.io?to=...`   (space separated)
+	//   `matt@dock-blocks.com<mailto:matt@dock-blocks.com`      (no separator)
+	// Keep the first whitespace token, then cut at any interior `<`. A `<` cannot
+	// appear inside an addr-spec, so everything from it on is the smuggled half.
 	const first = raw.trim().split(/\s+/)[0] ?? "";
-	const cleaned = first
-		.replace(/^[<"']+/, "")
-		.replace(/[>"',;.]+$/, "")
+	const withoutBrackets = first.replace(/^[<"']+/, "");
+	const cleaned = withoutBrackets
+		.split("<")[0]
+		?.replace(/[>"',;.]+$/, "")
 		.toLowerCase();
-	return ADDR_SPEC.test(cleaned) ? cleaned : "";
+	return cleaned !== undefined && ADDR_SPEC.test(cleaned) ? cleaned : "";
 }
 
 function parseSingleAddress(raw: string): EmailAddress {
@@ -414,9 +418,12 @@ export function extractQuotedParticipants(textBody: string): readonly QuotedPart
 	};
 
 	for (const inline of textBody.matchAll(INLINE_ATTRIBUTION)) {
+		// Through `normalizeAddress`, not raw: the capture group tolerates a second
+		// `@` and a `<`, so a smuggled `addr<mailto:addr` href reached the graph as
+		// one identifier and minted an entity named after it.
 		push({
 			name: cleanAttributionName(inline[1] ?? ""),
-			address: (inline[2] ?? "").trim().toLowerCase(),
+			address: normalizeAddress(inline[2] ?? ""),
 			role: "inline",
 		});
 	}

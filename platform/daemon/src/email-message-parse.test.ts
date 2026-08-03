@@ -321,3 +321,27 @@ describe("parseEmailMessage", () => {
 		expect(parsed.cc).toEqual([]);
 	});
 });
+
+describe("smuggled href with no separator", () => {
+	test("an inline attribution keeps the address and drops the appended mailto href", () => {
+		// Real shape from the pivotplanit Inbox, found only by a live ingest: the
+		// href abuts the address with no space, so the first-token rule alone let
+		// `matt@dock-blocks.com<mailto:matt@dock-blocks.com` through as one
+		// identifier and minted an entity named after it.
+		const body = [
+			"Numbers below.",
+			"",
+			"On Sun, Aug 2, 2026 at 10:03 PM Matt West <matt@dock-blocks.com<mailto:matt@dock-blocks.com> wrote:",
+			"",
+			"> Forwarded for visibility",
+		].join("\r\n");
+
+		const participants = extractQuotedParticipants(body);
+		expect(participants.map((p) => p.address)).toEqual(["matt@dock-blocks.com"]);
+	});
+
+	test("a quoted header line with the same shape is cleaned too", () => {
+		const body = "*From:* Matt West <matt@dock-blocks.com<mailto:matt@dock-blocks.com>";
+		expect(extractQuotedParticipants(body).map((p) => p.address)).toEqual(["matt@dock-blocks.com"]);
+	});
+});
