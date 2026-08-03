@@ -48,6 +48,7 @@ import {
 	scoreStructuredPathEvidence,
 } from "./pipeline/structured-path-evidence";
 import { type RecallDedupeMeta, applyRecallDedupe } from "./session-recall-dedupe";
+import { deepLinkForArtifact, parseSourceMeta } from "./source-deep-link";
 import { escapeLike } from "./sql-utils";
 import { type TemporalTimeOptions, hasFreshnessIntent, resolveTemporalRecall } from "./temporal-recall";
 
@@ -119,6 +120,8 @@ export interface RecallResult {
 	scope?: string | null;
 	supplementary?: boolean;
 	already_recalled?: boolean;
+	/** Link that opens the originating artifact in its own application, when derivable. */
+	deep_link?: string;
 }
 
 export interface RecallResponse {
@@ -808,6 +811,7 @@ interface NativeArtifactRecallHit {
 	readonly updatedAt: string;
 	readonly content: string;
 	readonly rank: number;
+	readonly meta: Record<string, unknown> | null;
 }
 
 interface SourceChunkVectorHit {
@@ -1052,6 +1056,7 @@ function buildNativeArtifactRecallHits(
 
 			const parts = [
 				"SELECT ma.rowid, ma.source_path, ma.source_kind, ma.harness, ma.project,",
+				"ma.source_meta_json,",
 				"COALESCE(ma.updated_at, ma.captured_at) AS updated_at, ma.content,",
 				"bm25(memory_artifacts_fts) AS rank",
 				"FROM memory_artifacts_fts",
@@ -1077,6 +1082,7 @@ function buildNativeArtifactRecallHits(
 				source_kind: string;
 				harness: string | null;
 				project: string | null;
+				source_meta_json: string | null;
 				updated_at: string;
 				content: string;
 				rank: number;
@@ -1093,6 +1099,7 @@ function buildNativeArtifactRecallHits(
 					updatedAt: row.updated_at,
 					content: transcriptExcerpt(row.content, query, 900),
 					rank: maxRank > 0 ? Math.abs(row.rank) / maxRank : 0.2,
+					meta: parseSourceMeta(row.source_meta_json),
 				}))
 				.filter((row) => row.content.length > 0 && !existingSourceIds.has(nativeArtifactPublicId(row)));
 		});
@@ -2229,6 +2236,10 @@ export async function hybridRecall(
 						created_at: hit.createdAt,
 						source_path: hit.sourcePath,
 						supplementary: true,
+						deep_link: deepLinkForArtifact({
+							sourceKind: hit.sourceType,
+							sourcePath: hit.sourcePath,
+						}),
 					};
 				}),
 			);
@@ -2264,6 +2275,7 @@ export async function hybridRecall(
 						created_at: hit.updatedAt,
 						source_path: hit.sourcePath,
 						supplementary: true,
+						deep_link: deepLinkForArtifact(hit),
 					};
 				}),
 			);
@@ -2395,6 +2407,10 @@ export async function hybridRecall(
 				created_at: hit.createdAt,
 				source_path: hit.sourcePath,
 				supplementary: true,
+				deep_link: deepLinkForArtifact({
+					sourceKind: hit.sourceType,
+					sourcePath: hit.sourcePath,
+				}),
 			};
 		});
 		for (const row of suppressPreviouslyRecalledForSelection(candidates)) {
@@ -2433,6 +2449,7 @@ export async function hybridRecall(
 				created_at: hit.updatedAt,
 				source_path: hit.sourcePath,
 				supplementary: true,
+				deep_link: deepLinkForArtifact(hit),
 			};
 		});
 		for (const row of suppressPreviouslyRecalledForSelection(candidates)) {
