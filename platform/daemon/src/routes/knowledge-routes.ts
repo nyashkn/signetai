@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import { resolveAgentId, resolveDaemonAgentId } from "../agent-id";
 import { requirePermission } from "../auth";
 import { getDbAccessor } from "../db-accessor";
+import { listHimalayaAccounts } from "../email-source-fetch";
 import { walkImpact } from "../graph-impact";
 import {
 	getAttributesForAspectFiltered,
@@ -27,14 +28,83 @@ import {
 import { getKnowledgeHygieneReport } from "../knowledge-graph-hygiene";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { getTraversalStatus, resolveFocalEntities, traverseKnowledgeGraph } from "../pipeline/graph-traversal";
+import {
+	type PrincipalIdentityDeclaration,
+	getPrincipalIdentity,
+	isAliasKind,
+	principalDeclarationsFromAccounts,
+	setPrincipalIdentity,
+} from "../principal-identity";
 import { AGENTS_DIR, authConfig } from "./state";
 import { resolveScopedAgentId, resolveScopedProject } from "./utils";
+
+interface PrincipalRequestBody {
+	agentId?: unknown;
+	displayName?: unknown;
+	identities?: ReadonlyArray<{ identifier?: unknown; kind?: unknown; organization?: unknown }>;
+}
 
 export function registerKnowledgeRoutes(app: Hono): void {
 	const parseNavigationLimit = (value: string | undefined, fallback: number, max: number): number => {
 		const parsed = Number.parseInt(value ?? String(fallback), 10);
 		return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), max) : fallback;
 	};
+
+	app.get("/api/knowledge/principal", (c) => {
+		const agentId = c.req.query("agent_id") ?? "default";
+		return c.json({ principal: getPrincipalIdentity(agentId) });
+	});
+
+	/**
+	 * Declares who is operating this agent, and under which organizations.
+	 *
+	 * `identities` may be omitted, in which case the configured himalaya accounts
+	 * supply them — the SASL username is the address the mail server itself
+	 * authenticates, so it needs no confirming.
+	 */
+	app.post("/api/knowledge/principal", async (c) => {
+		let body: PrincipalRequestBody = {};
+		try {
+			body = (await c.req.json()) as PrincipalRequestBody;
+		} catch {
+			return c.json({ error: "Invalid JSON body" }, 400);
+		}
+
+		const agentId = typeof body.agentId === "string" && body.agentId.length > 0 ? body.agentId : "default";
+		const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+		if (displayName.length === 0) return c.json({ error: "displayName is required" }, 400);
+
+		let identities: PrincipalIdentityDeclaration[] = [];
+		if (Array.isArray(body.identities)) {
+			for (const entry of body.identities) {
+				if (typeof entry?.identifier !== "string" || entry.identifier.trim().length === 0) continue;
+				if (typeof entry.kind !== "string" || !isAliasKind(entry.kind)) {
+					return c.json({ error: `Unknown alias kind: ${String(entry.kind)}` }, 400);
+				}
+				identities.push({
+					identifier: entry.identifier.trim(),
+					kind: entry.kind,
+					...(typeof entry.organization === "string" && entry.organization.trim().length > 0
+						? { organization: entry.organization.trim() }
+						: {}),
+				});
+			}
+		} else {
+			try {
+				identities = [...principalDeclarationsFromAccounts(await listHimalayaAccounts())];
+			} catch (err) {
+				return c.json(
+					{ error: `Could not read mail accounts: ${err instanceof Error ? err.message : String(err)}` },
+					400,
+				);
+			}
+		}
+		if (identities.length === 0) return c.json({ error: "No identities to declare" }, 400);
+
+		const result = setPrincipalIdentity({ agentId, displayName, identities });
+		if (!result) return c.json({ error: "Could not resolve a principal entity" }, 500);
+		return c.json({ principal: result });
+	});
 
 	app.get("/api/knowledge/entities", (c) => {
 		const agentId = c.req.query("agent_id") ?? "default";

@@ -13,6 +13,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { type EmailAddress, decodeMimeWords, parseAddressList, parseMessageIdList } from "./email-message-parse";
 
 const DEFAULT_HIMALAYA_TIMEOUT_MS = 60_000;
@@ -134,6 +137,74 @@ export async function listEmailMailboxes(account: string, timeoutMs?: number): P
 		.filter(isRecord)
 		.map((mailbox) => (typeof mailbox.name === "string" ? mailbox.name : ""))
 		.filter((name) => name.length > 0);
+}
+
+export interface HimalayaAccount {
+	readonly name: string;
+	readonly isDefault: boolean;
+	/** The account's own address, when it can be read off the config. */
+	readonly address: string | null;
+}
+
+/**
+ * The configured accounts, paired with the address each one logs in as.
+ *
+ * `account list --json` reports names and backends but not addresses, and there
+ * is no other subcommand that discloses one, so the address is read from the
+ * SASL username in `config.toml`. That is the same string the IMAP server
+ * authenticates, which makes it the account's own address by definition.
+ *
+ * ponytail: a regex rather than a TOML parser — no dependency exists in the repo
+ * and this reads two key shapes. Accounts authenticating via OAuth2 have no
+ * `sasl.plain.username`, so they come back with a null address and the caller
+ * falls back to declaring one by hand.
+ */
+export async function listHimalayaAccounts(configPath?: string): Promise<readonly HimalayaAccount[]> {
+	const raw = await runner()({ args: ["account", "list", "--json"] });
+	const parsed = parseJson(raw, "account list");
+	if (!isRecord(parsed) || !Array.isArray(parsed.accounts)) return [];
+
+	const addresses = readAccountAddresses(configPath ?? defaultHimalayaConfigPath());
+	return parsed.accounts
+		.filter(isRecord)
+		.map((account) => ({
+			name: typeof account.name === "string" ? account.name : "",
+			isDefault: account.default === true,
+			address: typeof account.name === "string" ? (addresses.get(account.name) ?? null) : null,
+		}))
+		.filter((account) => account.name.length > 0);
+}
+
+function defaultHimalayaConfigPath(): string {
+	return join(homedir(), ".config", "himalaya", "config.toml");
+}
+
+const ACCOUNT_SECTION = /^\s*\[accounts\.([^\]]+)\]\s*$/;
+const SASL_USERNAME = /^\s*(?:imap|smtp)\.sasl\.plain\.username\s*=\s*["']([^"']+)["']\s*$/;
+
+function readAccountAddresses(configPath: string): ReadonlyMap<string, string> {
+	const found = new Map<string, string>();
+	let text = "";
+	try {
+		text = readFileSync(configPath, "utf8");
+	} catch {
+		return found;
+	}
+
+	let current = "";
+	for (const line of text.split(/\r?\n/)) {
+		const section = ACCOUNT_SECTION.exec(line);
+		if (section?.[1]) {
+			current = section[1].replace(/^["']|["']$/g, "");
+			continue;
+		}
+		if (line.trimStart().startsWith("[")) current = "";
+		if (current.length === 0 || found.has(current)) continue;
+		const username = SASL_USERNAME.exec(line);
+		// Only an address is useful here; a bare login name identifies no mailbox.
+		if (username?.[1]?.includes("@")) found.set(current, username[1].toLowerCase());
+	}
+	return found;
 }
 
 export interface FetchEmailEnvelopesInput {

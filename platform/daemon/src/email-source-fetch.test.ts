@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type HimalayaCommandInput,
 	assertSafeAccountName,
@@ -7,6 +10,7 @@ import {
 	fetchEmailMessageRaw,
 	groupIntoThreads,
 	listEmailMailboxes,
+	listHimalayaAccounts,
 	setHimalayaRunnerForTests,
 } from "./email-source-fetch";
 
@@ -190,5 +194,61 @@ describe("groupIntoThreads", () => {
 
 	test("messages with no Message-ID are dropped, not grouped under an empty key", () => {
 		expect(groupIntoThreads([{ messageId: "", inReplyTo: "<a>" }])).toEqual([]);
+	});
+});
+
+describe("listHimalayaAccounts", () => {
+	test("pairs each configured account with the address it authenticates as", async () => {
+		// `account list --json` reports names and backends but never an address —
+		// this is the verbatim shape from himalaya v2.0.0.
+		stubRunner(
+			JSON.stringify({
+				accounts: [
+					{ name: "gmail", default: true, backends: ["imap", "smtp"] },
+					{ name: "pivotplanit", default: false, backends: ["imap", "smtp"] },
+					{ name: "oauth-only", default: false, backends: ["imap", "smtp"] },
+				],
+			}),
+		);
+		const dir = mkdtempSync(join(tmpdir(), "signet-himalaya-config-"));
+		const configPath = join(dir, "config.toml");
+		writeFileSync(
+			configPath,
+			[
+				"[accounts.gmail]",
+				'imap.server = "imaps://imap.gmail.com:993"',
+				'imap.sasl.plain.username = "nyashkn@gmail.com"',
+				'imap.sasl.plain.password.command = "pass show gmail"',
+				"",
+				"[accounts.pivotplanit]",
+				'imap.sasl.plain.username = "NJUI@pivotplanit.com"',
+				'smtp.sasl.plain.username = "njui@pivotplanit.com"',
+				"",
+				"[accounts.oauth-only]",
+				'imap.oauth2.client-id = "abc"',
+				"",
+				"[other-section]",
+				'imap.sasl.plain.username = "not-an-account@example.com"',
+				"",
+			].join("\n"),
+		);
+
+		try {
+			const accounts = await listHimalayaAccounts(configPath);
+			expect(accounts).toEqual([
+				{ name: "gmail", isDefault: true, address: "nyashkn@gmail.com" },
+				{ name: "pivotplanit", isDefault: false, address: "njui@pivotplanit.com" },
+				// No SASL username to read, so no address is invented for it.
+				{ name: "oauth-only", isDefault: false, address: null },
+			]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a missing config yields accounts without addresses rather than throwing", async () => {
+		stubRunner(JSON.stringify({ accounts: [{ name: "gmail", default: true }] }));
+		const accounts = await listHimalayaAccounts(join(tmpdir(), "signet-no-such-himalaya-config.toml"));
+		expect(accounts).toEqual([{ name: "gmail", isDefault: true, address: null }]);
 	});
 });

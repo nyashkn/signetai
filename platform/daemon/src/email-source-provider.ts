@@ -44,6 +44,7 @@ import {
 import { type EmailEnvelope, fetchEmailEnvelopes, fetchEmailMessageRaw, groupIntoThreads } from "./email-source-fetch";
 import { logger } from "./logger";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
+import { listPrincipalIdentifiers } from "./principal-identity";
 import { indexSourceArtifactStructure, purgeSourceArtifactStructure } from "./source-artifact-graph";
 import { type SourceParticipant, indexSourceParticipants } from "./source-participant-graph";
 import type { SourceProviderAdapter, SourceProviderSyncContext, SourceProviderSyncResult } from "./source-providers";
@@ -147,7 +148,7 @@ async function syncMailbox(
 		? envelopes.filter((envelope) => (Date.parse(envelope.date) || 0) >= sinceMs)
 		: envelopes;
 
-	const ownAddresses = collectOwnAddresses(inWindow);
+	const ownAddresses = collectOwnAddresses(agentId, inWindow);
 	const knownMessageIds = new Set(inWindow.map((envelope) => envelope.messageId).filter((id) => id.length > 0));
 	const reciprocated = collectReciprocatedAddresses(agentId, context.source.id);
 
@@ -258,10 +259,16 @@ function classifyMessage(
 	return { class: "direct", signals: ["envelope-only", "human-sender-address"] };
 }
 
-function collectOwnAddresses(envelopes: readonly EmailEnvelope[]): ReadonlySet<string> {
-	// The account's own addresses are whatever it is consistently addressed as.
-	// Reading them off the traffic avoids a second himalaya call for account
-	// config that would only restate the same thing.
+function collectOwnAddresses(agentId: string, envelopes: readonly EmailEnvelope[]): ReadonlySet<string> {
+	// A declared principal is ground truth: the operator said which addresses are
+	// theirs, so there is nothing to infer.
+	const declared = listPrincipalIdentifiers(agentId, "email");
+	if (declared.size > 0) return declared;
+
+	// Otherwise fall back to reading them off the traffic — whatever the account
+	// is consistently addressed as. This is a guess, and a bad one on a quiet or
+	// freshly connected mailbox where no address clears the threshold; declaring
+	// a principal is what removes it.
 	const counts = new Map<string, number>();
 	for (const envelope of envelopes) {
 		for (const address of envelope.to) counts.set(address.address, (counts.get(address.address) ?? 0) + 1);

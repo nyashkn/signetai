@@ -75,6 +75,7 @@ import { registerMcpCommands } from "./commands/mcp.js";
 import { registerMemoryCommands } from "./commands/memory.js";
 import { registerOntologyCommands } from "./commands/ontology.js";
 import { registerPortableCommands } from "./commands/portable.js";
+import { registerPrincipalCommands } from "./commands/principal.js";
 import { registerRepairQueueCommands } from "./commands/repair-queue.js";
 import { registerRouteCommands } from "./commands/route.js";
 import { registerSecretCommands } from "./commands/secret.js";
@@ -1079,6 +1080,8 @@ registerSourcesCommands(program, {
 	agentsDir: AGENTS_DIR,
 	secretApiCall,
 });
+
+registerPrincipalCommands(program, { secretApiCall });
 
 registerMcpCommands(program, {
 	fetchFromDaemon,

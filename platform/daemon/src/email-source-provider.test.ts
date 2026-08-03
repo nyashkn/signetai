@@ -6,6 +6,7 @@ import { addEmailSource } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { setHimalayaRunnerForTests } from "./email-source-fetch";
 import { emailSourceProvider } from "./email-source-provider";
+import { setPrincipalIdentity } from "./principal-identity";
 
 const HUMAN_ID = "<human-1@mail.gmail.com>";
 const REPLY_ID = "<human-2@mail.gmail.com>";
@@ -205,6 +206,30 @@ describe("email-source-provider", () => {
 		expect(byKind.get("source_email_message")).toBe(3);
 		// Two threads, not three: the reply joins its parent via In-Reply-To.
 		expect(byKind.get("source_email_thread")).toBe(2);
+	});
+
+	it("prefers a declared principal over addresses inferred from traffic", async () => {
+		// Without a declaration the connector infers its own addresses from `To:`
+		// frequency, and njui@pivotplanit.com clears that threshold here — the
+		// robot message comes back tagged `explicitly-addressed`. Declaring a
+		// different address has to win, otherwise the operator has no way to
+		// correct a wrong guess, and no way to be recognised at all on a mailbox
+		// too quiet for any address to clear the threshold.
+		setPrincipalIdentity({
+			agentId: "default",
+			displayName: "KN",
+			identities: [{ identifier: "kinyanjui@kuze.ai", kind: "email" }],
+		});
+		await sync();
+
+		const signals = rows<{ signals: string | null }>(
+			`SELECT json_extract(source_meta_json, '$.correspondenceSignals') AS signals
+			 FROM memory_artifacts
+			 WHERE source_kind = 'source_email_message'
+			   AND json_extract(source_meta_json, '$.correspondence') = 'notification'`,
+		);
+		expect(signals.length).toBe(1);
+		expect(signals[0]?.signals ?? "").not.toContain("explicitly-addressed");
 	});
 
 	it("re-syncing does not refetch bodies it already stored", async () => {

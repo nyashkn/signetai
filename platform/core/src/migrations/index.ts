@@ -98,6 +98,7 @@ import { up as jobCancellations } from "./089-job-cancellations";
 import { up as jobArchive } from "./090-job-archive";
 import { up as embeddingIndexGenerations } from "./091-embedding-index-generations";
 import { up as embeddingStagingStore } from "./092-embedding-staging-store";
+import { up as principalIdentity } from "./093-principal-identity";
 
 // -- Public interface consumed by Database.init() --
 
@@ -878,6 +879,18 @@ export const MIGRATIONS: readonly Migration[] = [
 		name: "embedding-staging-store",
 		up: embeddingStagingStore,
 		artifacts: { tables: ["embeddings_staging"] },
+	},
+	{
+		version: 93,
+		name: "principal-identity",
+		up: principalIdentity,
+		artifacts: {
+			columns: [
+				{ table: "entity_aliases", column: "alias_kind", optional: true },
+				{ table: "entity_aliases", column: "org_entity_id", optional: true },
+				{ table: "agents", column: "principal_entity_id", optional: true },
+			],
+		},
 	},
 ];
 
