@@ -46,6 +46,7 @@ import { logger } from "./logger";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import { listPrincipalIdentifiers } from "./principal-identity";
 import { indexSourceArtifactStructure, purgeSourceArtifactStructure } from "./source-artifact-graph";
+import { assertIngestNotDegraded, snapshotSourceIngest } from "./source-ingest-gate";
 import { type SourceParticipant, indexSourceParticipants } from "./source-participant-graph";
 import type { SourceProviderAdapter, SourceProviderSyncContext, SourceProviderSyncResult } from "./source-providers";
 import { purgeSourceOwnedRows } from "./source-purge";
@@ -77,6 +78,13 @@ interface MessageRecord {
 	readonly parsed: ParsedEmailMessage | null;
 	readonly correspondence: CorrespondenceClass;
 	readonly correspondenceSignals: readonly string[];
+	/**
+	 * A body already sits in the store, so this sync deliberately did not refetch
+	 * it. Without this the second sync is destructive: `parsed` is null, the
+	 * rendered content carries an empty body, and the rewrite replaces a real
+	 * message with its headers alone.
+	 */
+	readonly bodyAlreadyIndexed: boolean;
 }
 
 async function syncEmailSource(context: SourceProviderSyncContext): Promise<SourceProviderSyncResult> {
@@ -93,6 +101,7 @@ async function syncEmailSource(context: SourceProviderSyncContext): Promise<Sour
 	let indexed = 0;
 	let scanned = 0;
 	let bodyBudget = settings.maxMessagesPerSync;
+	const ingestBefore = snapshotSourceIngest(agentId, context.source.id);
 
 	for (const target of targets) {
 		if (!context.shouldContinue()) break;
@@ -117,6 +126,10 @@ async function syncEmailSource(context: SourceProviderSyncContext): Promise<Sour
 		scanned++;
 		context.onProgress?.({ scanned, total: targets.length, indexed, currentPath });
 	}
+
+	// Before the failure artifacts, so a degraded sync cannot bury its own
+	// evidence under rows that make the count look healthy.
+	assertIngestNotDegraded(agentId, context.source.id, ingestBefore);
 
 	for (const failure of failures) {
 		indexed += writeFailureArtifact(context.source, agentId, failure);
@@ -164,7 +177,8 @@ async function syncMailbox(
 	for (const envelope of inWindow) {
 		if (!context.shouldContinue()) break;
 		let parsed: ParsedEmailMessage | null = null;
-		if (bodiesFetched < bodyBudget && !hasIndexedBody(agentId, context.source.id, messagePath(target, envelope))) {
+		const bodyAlreadyIndexed = hasIndexedBody(agentId, context.source.id, messagePath(target, envelope));
+		if (bodiesFetched < bodyBudget && !bodyAlreadyIndexed) {
 			try {
 				parsed = parseEmailMessage(
 					await fetchEmailMessageRaw({ account: target.account, mailbox: target.mailbox, uid: envelope.uid }),
@@ -186,6 +200,7 @@ async function syncMailbox(
 			parsed,
 			correspondence: verdict.class,
 			correspondenceSignals: verdict.signals,
+			bodyAlreadyIndexed,
 		});
 		await yielder();
 	}
@@ -471,6 +486,14 @@ function writeMessageArtifact(
 ): number {
 	const path = messagePath(target, record.envelope);
 	if (seenPaths.has(path)) return 0;
+	// A stored body plus no fetch this round means every field below would be
+	// rebuilt from the envelope alone — an empty body, `bodyFetched: false`, and
+	// a classification that lost the headers it needed. Leave the row as it is,
+	// but mark it seen so the stale-artifact purge does not delete it.
+	if (record.parsed === null && record.bodyAlreadyIndexed) {
+		seenPaths.add(path);
+		return 0;
+	}
 	const { envelope, parsed } = record;
 	const body = parsed?.textBody ?? "";
 	const content = [

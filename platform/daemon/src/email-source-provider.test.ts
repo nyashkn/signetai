@@ -243,4 +243,41 @@ describe("email-source-provider", () => {
 		await sync();
 		expect(messageReads).toBe(0);
 	});
+
+	it("re-syncing keeps the bodies it already stored", async () => {
+		// The other half of the same behaviour, and the destructive half: skipping
+		// the fetch leaves `parsed` null, so the rewrite rendered an empty body and
+		// stamped `bodyFetched: false` over a message that was fully stored. A
+		// second sync silently reduced the corpus to headers.
+		await sync();
+		const before = rows<{ source_path: string; content: string }>(
+			"SELECT source_path, content FROM memory_artifacts WHERE source_kind = 'source_email_message' ORDER BY source_path",
+		);
+		expect(before.some((row) => row.content.includes("Numbers below"))).toBe(true);
+
+		await sync();
+
+		const after = rows<{ source_path: string; content: string }>(
+			"SELECT source_path, content FROM memory_artifacts WHERE source_kind = 'source_email_message' ORDER BY source_path",
+		);
+		expect(after).toEqual(before);
+		const fetched = rows<{ n: number }>(
+			`SELECT COUNT(*) AS n FROM memory_artifacts
+			 WHERE source_kind = 'source_email_message' AND json_extract(source_meta_json, '$.bodyFetched') = 1`,
+		);
+		expect(fetched[0]?.n).toBe(3);
+	});
+
+	it("keeps a message the second sync chose not to rewrite", async () => {
+		// Skipping the rewrite must not skip marking the path seen: the stale
+		// purge deletes anything a sync did not touch, so an untouched-but-live
+		// message would be removed as though the mailbox had dropped it.
+		await sync();
+		await sync();
+		const live = rows<{ n: number }>(
+			`SELECT COUNT(*) AS n FROM memory_artifacts
+			 WHERE source_kind = 'source_email_message' AND COALESCE(is_deleted, 0) = 0`,
+		);
+		expect(live[0]?.n).toBe(3);
+	});
 });
