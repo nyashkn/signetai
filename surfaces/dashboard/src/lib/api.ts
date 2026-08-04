@@ -3475,6 +3475,79 @@ async function decideOntologyProposal(
 	}
 }
 
+/**
+ * Nothing schedules the duplicate generator — it is a manual repair pass, and
+ * until it is asked to write, `proposeDuplicateEntityMerges` is a dry run whose
+ * candidates are thrown away. That is why the queue reads empty on a graph that
+ * has a dozen obvious duplicates in it.
+ */
+export async function scanForDuplicateIdentities(
+	agentId: string,
+	limit = 40,
+): Promise<{ ok: boolean; written?: number; found?: number; skipped?: number; error?: string }> {
+	try {
+		const res = await fetch(`${API_BASE}/api/ontology/proposals/repair/duplicates`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, limit, write_proposals: true, created_by: "dashboard" }),
+		});
+		const body = (await res.json().catch(() => null)) as {
+			error?: string;
+			count?: number;
+			writtenCount?: number;
+			skippedCount?: number;
+		} | null;
+		if (!res.ok) return { ok: false, error: body?.error ?? `Scan failed (${res.status})` };
+		return {
+			ok: true,
+			written: body?.writtenCount ?? 0,
+			found: body?.count ?? 0,
+			skipped: body?.skippedCount ?? 0,
+		};
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : "Scan failed" };
+	}
+}
+
+/**
+ * A hand-made merge goes through the same review queue as a generated one
+ * rather than mutating directly — `write_proposal` is what keeps the audit
+ * trail identical, and `force` is needed because the pair a human spots is
+ * usually the one whose entity types differ.
+ */
+export async function proposeManualMerge(
+	agentId: string,
+	targetEntityId: string,
+	source: string,
+): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await fetch(`${API_BASE}/api/ontology/proposals/repair/merge-plan`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: agentId,
+				target_entity_id: targetEntityId,
+				source_entities: [source],
+				force: true,
+				write_proposal: true,
+				created_by: "dashboard",
+				rationale: "Merged by hand from the identity panel.",
+			}),
+		});
+		const body = (await res.json().catch(() => null)) as {
+			error?: string;
+			blocked?: boolean;
+			warnings?: string[];
+		} | null;
+		if (!res.ok) return { ok: false, error: body?.error ?? `Merge failed (${res.status})` };
+		// A blocked plan answers 200 with its reasons and writes nothing.
+		if (body?.blocked) return { ok: false, error: body.warnings?.join("; ") ?? "Merge blocked" };
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : "Merge failed" };
+	}
+}
+
 export function applyOntologyProposal(agentId: string, id: string): Promise<{ ok: boolean; error?: string }> {
 	return decideOntologyProposal(agentId, id, "apply");
 }

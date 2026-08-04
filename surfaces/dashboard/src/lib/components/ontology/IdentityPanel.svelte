@@ -1,5 +1,11 @@
 <script lang="ts">
-import { type EntityAliasRecord, type WhatTouchedResult, getEntityAliases, getWhatTouched } from "$lib/api";
+import {
+	type EntityAliasRecord,
+	type WhatTouchedResult,
+	getEntityAliases,
+	getWhatTouched,
+	proposeManualMerge,
+} from "$lib/api";
 import { groupTouchedBySource, touchedTitle } from "./identity-panel-data";
 
 interface Props {
@@ -38,11 +44,32 @@ $effect(() => {
 
 const groups = $derived(groupTouchedBySource(touched?.items ?? []));
 const otherNames = $derived((touched?.identity.names ?? []).slice(1));
+
+let mergeSource = $state("");
+let merging = $state(false);
+let mergeNote = $state<string | null>(null);
+
+async function merge(): Promise<void> {
+	const source = mergeSource.trim();
+	if (source.length === 0) return;
+	merging = true;
+	mergeNote = null;
+	const result = await proposeManualMerge(agentId, entityId, source);
+	merging = false;
+	if (!result.ok) {
+		mergeNote = result.error ?? "Merge failed";
+		return;
+	}
+	// It lands in the same review queue a generated candidate does, so the panel
+	// says where it went rather than pretending the graph already changed.
+	mergeSource = "";
+	mergeNote = "Queued for review in Proposals";
+}
 </script>
 
 {#if error}
 	<div class="section"><div class="section-label">IDENTITY</div><p class="identity-error">{error}</p></div>
-{:else if aliases.length > 0 || groups.length > 0}
+{:else}
 	<div class="section">
 		<div class="section-label">
 			IDENTITY
@@ -78,6 +105,23 @@ const otherNames = $derived((touched?.identity.names ?? []).slice(1));
 				</ul>
 			</div>
 		{/each}
+
+		<form
+			class="merge"
+			onsubmit={(event) => {
+				event.preventDefault();
+				void merge();
+			}}
+		>
+			<input
+				type="text"
+				bind:value={mergeSource}
+				placeholder="Merge another name or address into this one"
+				disabled={merging}
+			/>
+			<button type="submit" disabled={merging || mergeSource.trim().length === 0}>Queue</button>
+		</form>
+		{#if mergeNote}<p class="merge-note">{mergeNote}</p>{/if}
 	</div>
 {/if}
 
@@ -167,6 +211,42 @@ const otherNames = $derived((touched?.identity.names ?? []).slice(1));
 	.identity-error {
 		margin: 0;
 		color: #f87171;
+		font-size: 11px;
+	}
+	.merge {
+		display: flex;
+		gap: 4px;
+		margin-top: 8px;
+	}
+	.merge input {
+		flex: 1;
+		min-width: 0;
+		padding: 3px 7px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		border-radius: 5px;
+		background: rgba(2, 4, 10, 0.6);
+		color: #cbd5f5;
+		font-size: 11px;
+	}
+	.merge input::placeholder {
+		color: #475569;
+	}
+	.merge button {
+		padding: 3px 9px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		border-radius: 5px;
+		background: rgba(148, 163, 184, 0.1);
+		color: #cbd5f5;
+		font-size: 11px;
+		cursor: pointer;
+	}
+	.merge button:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
+	.merge-note {
+		margin: 5px 0 0;
+		color: #64748b;
 		font-size: 11px;
 	}
 </style>

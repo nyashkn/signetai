@@ -4,8 +4,9 @@ import {
 	applyOntologyProposal,
 	listOntologyProposals,
 	rejectOntologyProposal,
+	scanForDuplicateIdentities,
 } from "$lib/api";
-import { Check, ChevronDown, RefreshCw, X } from "$lib/icons";
+import { Check, ChevronDown, RefreshCw, Search, X } from "$lib/icons";
 import { proposalHeadline, proposalEvidenceLines } from "./proposal-inbox-data";
 
 interface Props {
@@ -38,6 +39,27 @@ $effect(() => {
 	void load();
 });
 
+let scanning = $state(false);
+let scanNote = $state<string | null>(null);
+
+async function scan(): Promise<void> {
+	scanning = true;
+	scanNote = null;
+	const result = await scanForDuplicateIdentities(agentId);
+	scanning = false;
+	if (!result.ok) {
+		scanNote = result.error ?? "Scan failed";
+		return;
+	}
+	// A candidate already queued or already rejected never reappears, so a scan
+	// finding nothing new is the steady state. Blocked ones are reported
+	// separately: they were found and deliberately not written, which reads as a
+	// silent failure otherwise.
+	const blocked = result.skipped ? `, ${result.skipped} blocked` : "";
+	scanNote = result.written === 0 ? `No new candidates${blocked || " to add"}` : `+${result.written} new${blocked}`;
+	await load();
+}
+
 async function decide(proposal: OntologyProposalRecord, decision: "apply" | "reject"): Promise<void> {
 	busyId = proposal.id;
 	const result =
@@ -59,10 +81,24 @@ async function decide(proposal: OntologyProposalRecord, decision: "apply" | "rej
 <section class="inbox">
 	<header>
 		<h2>Proposals<span class="count">{proposals.length}</span></h2>
-		<button type="button" class="icon" onclick={() => load()} disabled={loading} aria-label="Refresh proposals">
-			<RefreshCw size={13} class={loading ? "spin" : ""} />
-		</button>
+		<div class="header-actions">
+			<button
+				type="button"
+				class="icon"
+				onclick={() => scan()}
+				disabled={scanning}
+				aria-label="Scan for duplicate identities"
+				title="Scan for duplicate identities"
+			>
+				<Search size={13} class={scanning ? "spin" : ""} />
+			</button>
+			<button type="button" class="icon" onclick={() => load()} disabled={loading} aria-label="Refresh proposals">
+				<RefreshCw size={13} class={loading ? "spin" : ""} />
+			</button>
+		</div>
 	</header>
+
+	{#if scanNote}<p class="scan-note">{scanNote}</p>{/if}
 
 	{#if loadError}
 		<p class="empty error">{loadError}</p>
@@ -151,6 +187,17 @@ async function decide(proposal: OntologyProposalRecord, decision: "apply" | "rej
 		border-radius: 999px;
 		background: rgba(212, 160, 23, 0.16);
 		color: #d4a017;
+		font-size: 11px;
+	}
+	.header-actions {
+		display: flex;
+		gap: 2px;
+	}
+	.scan-note {
+		margin: 0;
+		padding: 6px 12px;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+		color: #64748b;
 		font-size: 11px;
 	}
 	.icon {
