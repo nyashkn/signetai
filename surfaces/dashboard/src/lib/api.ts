@@ -1520,6 +1520,46 @@ export async function addEmailSource(input: AddEmailSourceInput): Promise<AddSou
 	return body as AddSourceResponse;
 }
 
+/** `tokenRef` names a secret; the ClickUp token itself never travels through the dashboard. */
+export interface AddClickUpSourceInput {
+	readonly tokenRef: string;
+	readonly teamIds?: readonly string[];
+	readonly name?: string;
+	readonly includeClosed?: boolean;
+	readonly includeSubtasks?: boolean;
+	readonly includeComments?: boolean;
+	readonly maxTasksPerTeam?: number;
+	readonly maxCommentTasksPerSync?: number;
+	readonly since?: string;
+}
+
+export async function addClickUpSource(input: AddClickUpSourceInput): Promise<AddSourceResponse> {
+	const response = await fetch(`${API_BASE}/api/sources/clickup`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
+	const body = (await response.json().catch(() => null)) as Partial<AddSourceResponse> | null;
+	if (!response.ok) {
+		return {
+			source: {
+				id: "",
+				kind: "clickup",
+				name: input.name ?? "ClickUp",
+				root: "clickup://workspaces",
+				enabled: false,
+				mode: "read-only",
+				createdAt: "",
+				updatedAt: "",
+			},
+			created: false,
+			indexed: 0,
+			error: typeof body?.error === "string" ? body.error : `Request failed with ${response.status}`,
+		};
+	}
+	return body as AddSourceResponse;
+}
+
 export async function removeSource(sourceId: string): Promise<RemoveSourceResponse> {
 	try {
 		const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(sourceId)}`, {

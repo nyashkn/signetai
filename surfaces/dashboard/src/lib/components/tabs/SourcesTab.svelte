@@ -3,6 +3,7 @@ import {
 	type GitHubSourceResourceType,
 	type SignetSourceEntry,
 	addDiscordSource,
+	addClickUpSource,
 	addEmailSource,
 	addGitHubSource,
 	addObsidianSource,
@@ -183,12 +184,25 @@ let emailMailboxesText = $state("Inbox\nSent");
 let emailMaxMessages = $state(500);
 // biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
 let emailIncludeQuotedParticipants = $state(true);
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let clickupName = $state("");
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let clickupTokenRef = $state("");
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let clickupTeamsText = $state("");
+// biome-ignore lint/style/useConst: Svelte bind:value mutates this rune from markup.
+let clickupMaxTasks = $state(1000);
+// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
+let clickupIncludeClosed = $state(false);
+// biome-ignore lint/style/useConst: Svelte bind:checked mutates this rune from markup.
+let clickupIncludeComments = $state(true);
 let status = $state<string | null>(null);
 let error = $state<string | null>(null);
 let touchedPath = $state(false);
 let touchedDiscord = $state(false);
 let touchedGithub = $state(false);
 let touchedEmail = $state(false);
+let touchedClickUp = $state(false);
 let expandedKind = $state<SourceKind | null>(null);
 // biome-ignore lint/style/useConst: Svelte event handlers mutate this rune from markup.
 let selectedDiscordSourceId = $state<string | null>(null);
@@ -234,9 +248,9 @@ const connectors: SourceConnector[] = [
 			"Connect ClickUp spaces, lists, tasks, docs, and comments as project context with workspace/list provenance attached.",
 		icon: "clickup",
 		category: "code",
-		tags: ["code", "project-management", "tasks", "clickup", "planned"],
-		status: "planned",
-		indexes: ["Tasks and subtasks", "Docs", "Spaces and lists"],
+		tags: ["code", "project-management", "tasks", "clickup"],
+		status: "available",
+		indexes: ["Tasks and subtasks", "Task comments", "Spaces and lists", "Creators, assignees and watchers"],
 		never: ["Change task status or assign owners from indexing"],
 		learnMore: [],
 	},
@@ -528,6 +542,7 @@ const obsidianSources = $derived(sources.filter((source) => source.kind === "obs
 const discordSources = $derived(sources.filter((source) => source.kind === "discord"));
 const githubSources = $derived(sources.filter((source) => source.kind === "github"));
 const emailSources = $derived(sources.filter((source) => source.kind === "email"));
+const clickupSources = $derived(sources.filter((source) => source.kind === "clickup"));
 const connectedSourceList = $derived([...obsidianSources, ...discordSources, ...githubSources]);
 const selectedDiscordSource = $derived(
 	discordSources.find((source) => source.id === selectedDiscordSourceId) ?? discordSources[0] ?? null,
@@ -575,6 +590,16 @@ const emailMailboxes = $derived(
 const emailAccountsMissing = $derived(emailAccounts.length === 0);
 const emailMailboxesMissing = $derived(emailMailboxes.length === 0);
 const emailMaxMessagesInvalid = $derived(!Number.isInteger(Number(emailMaxMessages)) || Number(emailMaxMessages) < 1);
+const clickupTeamIds = $derived(
+	clickupTeamsText
+		.split(/[\n,]/)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0),
+);
+const clickupTokenMissing = $derived(clickupTokenRef.trim().length === 0);
+/** Workspace ids are numeric; a pasted task URL or workspace name fails here rather than at sync. */
+const clickupTeamIdsInvalid = $derived(clickupTeamIds.some((teamId) => !/^\d+$/.test(teamId)));
+const clickupMaxTasksInvalid = $derived(!Number.isInteger(Number(clickupMaxTasks)) || Number(clickupMaxTasks) < 1);
 const canSubmit = $derived.by(() => {
 	if (adding) return false;
 	if (selectedKind === "obsidian") return !pathIsMissing;
@@ -586,6 +611,9 @@ const canSubmit = $derived.by(() => {
 	}
 	if (selectedKind === "email") {
 		return !emailAccountsMissing && !emailMailboxesMissing && !emailMaxMessagesInvalid;
+	}
+	if (selectedKind === "clickup") {
+		return !clickupTokenMissing && !clickupTeamIdsInvalid && !clickupMaxTasksInvalid;
 	}
 	return false;
 });
@@ -634,6 +662,7 @@ function selectConnector(kind: SourceKind): void {
 	touchedDiscord = false;
 	touchedGithub = false;
 	touchedEmail = false;
+	touchedClickUp = false;
 }
 
 async function chooseFolder(): Promise<void> {
@@ -824,6 +853,36 @@ async function submitEmailSource(): Promise<void> {
 	}
 }
 
+async function submitClickUpSource(): Promise<void> {
+	touchedClickUp = true;
+	if (!canSubmit) return;
+	adding = true;
+	status = null;
+	error = null;
+	try {
+		const result = await addClickUpSource({
+			tokenRef: clickupTokenRef.trim(),
+			teamIds: clickupTeamIds,
+			name: clickupName.trim() || undefined,
+			includeClosed: clickupIncludeClosed,
+			includeComments: clickupIncludeComments,
+			maxTasksPerTeam: Number(clickupMaxTasks),
+		});
+		if (result.error) {
+			error = result.error;
+			return;
+		}
+		status = `${result.created ? "Connected" : "Updated"} ${result.source.name}. ClickUp indexing is running in the background.`;
+		clickupTokenRef = "";
+		clickupTeamsText = "";
+		touchedClickUp = false;
+		connectMode = false;
+		await refreshSources();
+	} finally {
+		adding = false;
+	}
+}
+
 async function disconnectSource(source: SignetSourceEntry): Promise<void> {
 	const originalLabel =
 		source.kind === "discord"
@@ -832,7 +891,9 @@ async function disconnectSource(source: SignetSourceEntry): Promise<void> {
 				? "GitHub data"
 				: source.kind === "email"
 					? "mail on the server"
-					: "vault files";
+					: source.kind === "clickup"
+						? "tasks in ClickUp"
+						: "vault files";
 	const confirmed = window.confirm(
 		`Remove ${source.name} from Signet?\n\nThis purges Signet's indexed source rows and chunks, but leaves the original ${originalLabel} untouched.`,
 	);
@@ -1555,7 +1616,7 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 				<div class="connector-grid" class:has-expanded={expandedKind !== null}>
 					{#each filteredConnectors as connector (connector.kind)}
 						{@const expanded = expandedKind === connector.kind}
-						{@const connectedSources = connector.kind === "obsidian" ? obsidianSources : connector.kind === "discord" ? discordSources : connector.kind === "github" ? githubSources : connector.kind === "email" ? emailSources : []}
+						{@const connectedSources = connector.kind === "obsidian" ? obsidianSources : connector.kind === "discord" ? discordSources : connector.kind === "github" ? githubSources : connector.kind === "email" ? emailSources : connector.kind === "clickup" ? clickupSources : []}
 						{@const isConnected = connectedSources.length > 0}
 						<article class="connector-card" class:expanded class:connected={isConnected} class:compressed={expandedKind !== null && !expanded}>
 							<button
@@ -1680,7 +1741,7 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 													onclick={() => void disconnectSource(source)}
 												>
 													{#if removingSourceId === source.id}<span class="spin"><RefreshCw /></span>{:else}<X />{/if}
-													{removingSourceId === source.id ? "Removing" : source.kind === "discord" ? "Disconnect Discord" : source.kind === "github" ? "Disconnect GitHub" : source.kind === "email" ? "Disconnect email" : "Disconnect vault"}
+													{removingSourceId === source.id ? "Removing" : source.kind === "discord" ? "Disconnect Discord" : source.kind === "github" ? "Disconnect GitHub" : source.kind === "email" ? "Disconnect email" : source.kind === "clickup" ? "Disconnect ClickUp" : "Disconnect vault"}
 												</button>
 											</article>
 										{/each}
@@ -1970,6 +2031,61 @@ function discordYesNo(source: SignetSourceEntry, key: string, defaultValue = tru
 												<span>Read participants from quoted replies</span>
 											</label>
 											<small class="field-hint">Forwarded and quoted blocks name people who never appear in an envelope header. Reading them recovers those contacts.</small>
+											<button class="connect-button" type="submit" disabled={!canSubmit}>
+												{#if adding}<span class="spin"><RefreshCw /></span>{:else}<CirclePlus />{/if}
+												{adding ? "Queueing" : "Add source"}
+											</button>
+										</form>
+									{/if}
+
+									{#if connectMode && expanded && connector.kind === "clickup"}
+										<form class="connect-form" onsubmit={(event) => { event.preventDefault(); void submitClickUpSource(); }}>
+											<label>
+												<span>Display name</span>
+												<input bind:value={clickupName} placeholder="ClickUp" />
+											</label>
+											<label>
+												<span>Token secret name</span>
+												<input
+													bind:value={clickupTokenRef}
+													placeholder="CLICKUP_API_TOKEN"
+													onblur={() => (touchedClickUp = true)}
+												/>
+												<small class="field-hint">The <em>name</em> of a Signet secret, not the token itself. Store it first with <code>signet secrets set CLICKUP_API_TOKEN</code>; get the value from ClickUp under Settings &rarr; Apps &rarr; API Token.</small>
+											</label>
+											{#if touchedClickUp && clickupTokenMissing}<p class="field-error">A token secret name is required.</p>{/if}
+											<label>
+												<span>Workspace ids</span>
+												<textarea
+													bind:value={clickupTeamsText}
+													rows="3"
+													placeholder="9001"
+													onblur={() => (touchedClickUp = true)}
+												></textarea>
+												<small class="field-hint">One numeric id per line. Leave empty to index every workspace the token can see. The id is the number in a ClickUp URL after <code>/</code>.</small>
+											</label>
+											{#if touchedClickUp && clickupTeamIdsInvalid}<p class="field-error">Workspace ids are numeric — paste the number, not the workspace name or a task URL.</p>{/if}
+											<label>
+												<span>Task cap per workspace</span>
+												<input
+													bind:value={clickupMaxTasks}
+													type="number"
+													min="1"
+													max="20000"
+													onblur={() => (touchedClickUp = true)}
+												/>
+												<small class="field-hint">Tasks arrive a hundred at a time from one endpoint, so this bounds total work rather than trading away structure.</small>
+											</label>
+											{#if touchedClickUp && clickupMaxTasksInvalid}<p class="field-error">Task cap must be a whole number of at least 1.</p>{/if}
+											<label class="source-option-row">
+												<input bind:checked={clickupIncludeComments} type="checkbox" />
+												<span>Index task comments</span>
+											</label>
+											<small class="field-hint">Comments cost one request per task, so they are fetched for the most recent tasks first.</small>
+											<label class="source-option-row">
+												<input bind:checked={clickupIncludeClosed} type="checkbox" />
+												<span>Include closed tasks</span>
+											</label>
 											<button class="connect-button" type="submit" disabled={!canSubmit}>
 												{#if adding}<span class="spin"><RefreshCw /></span>{:else}<CirclePlus />{/if}
 												{adding ? "Queueing" : "Add source"}
