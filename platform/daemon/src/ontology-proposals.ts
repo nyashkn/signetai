@@ -1161,6 +1161,71 @@ function mergeEntityEdges(db: WriteDb, agentId: string, sourceId: string, target
 	db.prepare("DELETE FROM memory_entity_mentions WHERE entity_id = ?").run(sourceId);
 }
 
+/** A conservative addr-spec, matching the one the email connector validates with. */
+const ADDRESS_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Identity has to survive the merge, in both directions.
+ *
+ * `entity_aliases.entity_id` is declared `ON DELETE CASCADE`, but nothing in
+ * this repo sets `PRAGMA foreign_keys = ON`, so deleting the source leaves its
+ * aliases pointing at a row that no longer exists — still occupying the single
+ * active slot their canonical name gets, so the pairing cannot be rewritten
+ * later either. Repointing them is the repair.
+ *
+ * The source's own name is the other half. Approving a merge deletes the only
+ * row that spelled it, so `what_touched("Matt West")` stops resolving at the
+ * exact moment the proposal proving Matt West and westmatt81@gmail.com are one
+ * person is accepted. An approved merge is user-asserted, so the alias enters
+ * at 1.0 — but it never steals a name another entity already holds.
+ */
+function mergeEntityAliases(
+	db: WriteDb,
+	agentId: string,
+	source: { readonly id: string; readonly name: string },
+	targetId: string,
+): number {
+	// The unique index is per (agent_id, canonical_alias) across every entity, so
+	// an inherited alias can never collide with one the target already holds.
+	const inherited = db
+		.prepare(
+			`UPDATE entity_aliases SET entity_id = ?, updated_at = datetime('now')
+			 WHERE agent_id = ? AND entity_id = ? AND status = 'active'`,
+		)
+		.run(targetId, agentId, source.id).changes;
+
+	const row = db.prepare("SELECT canonical_name FROM entities WHERE id = ? AND agent_id = ?").get(source.id, agentId) as
+		| { canonical_name: string }
+		| undefined;
+	const canonical = row?.canonical_name ?? source.name.trim().toLowerCase();
+	const target = db
+		.prepare("SELECT canonical_name FROM entities WHERE id = ? AND agent_id = ?")
+		.get(targetId, agentId) as { canonical_name: string } | undefined;
+	if (canonical.length === 0 || canonical === target?.canonical_name) return inherited;
+
+	const holder = db
+		.prepare(
+			"SELECT entity_id FROM entity_aliases WHERE agent_id = ? AND canonical_alias = ? AND status = 'active' LIMIT 1",
+		)
+		.get(agentId, canonical) as { entity_id: string } | undefined;
+	if (holder) return inherited;
+
+	db.prepare(
+		`INSERT INTO entity_aliases
+		 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, 'active', datetime('now'), datetime('now'))`,
+	).run(
+		crypto.randomUUID(),
+		targetId,
+		agentId,
+		source.name,
+		canonical,
+		ADDRESS_SHAPE.test(canonical) ? "email" : "display_name",
+		`user-asserted: merged into ${target?.canonical_name ?? targetId}`,
+	);
+	return inherited + 1;
+}
+
 function applyMergeEntities(
 	db: WriteDb,
 	agentId: string,
@@ -1177,10 +1242,16 @@ function applyMergeEntities(
 	});
 	if (plan.blocked) throw new OntologyProposalError(`Merge blocked: ${plan.warnings.join("; ")}`, 409);
 
-	const merged: Array<{ readonly name: string; readonly entityId: string; readonly movedAspects: number }> = [];
+	const merged: Array<{
+		readonly name: string;
+		readonly entityId: string;
+		readonly movedAspects: number;
+		readonly aliases: number;
+	}> = [];
 	for (const source of plan.sources) {
 		const movedAspects = mergeEntityAspects(db, agentId, source.id, plan.target.id);
 		mergeEntityEdges(db, agentId, source.id, plan.target.id);
+		const aliases = mergeEntityAliases(db, agentId, source, plan.target.id);
 		db.prepare(
 			`UPDATE entities
 			 SET mentions = COALESCE(mentions, 0) + COALESCE((SELECT mentions FROM entities WHERE id = ?), 0),
@@ -1188,7 +1259,7 @@ function applyMergeEntities(
 			 WHERE id = ? AND agent_id = ?`,
 		).run(source.id, plan.target.id, agentId);
 		db.prepare("DELETE FROM entities WHERE id = ? AND agent_id = ?").run(source.id, agentId);
-		merged.push({ name: source.name, entityId: source.id, movedAspects });
+		merged.push({ name: source.name, entityId: source.id, movedAspects, aliases });
 	}
 	if (merged.length === 0) throw new OntologyProposalError("No distinct source entities to merge", 400);
 	return {

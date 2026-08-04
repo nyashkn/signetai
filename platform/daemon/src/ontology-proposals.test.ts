@@ -1038,6 +1038,74 @@ describe("ontology proposals", () => {
 		expect(rows.map((row) => row.content)).toContain("Proposal-first mutation loop");
 	});
 
+	function activeAliases(agentId: string): Array<{ canonical_alias: string; entity_id: string; alias_kind: string }> {
+		return getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT canonical_alias, entity_id, alias_kind FROM entity_aliases
+						 WHERE agent_id = ? AND status = 'active' ORDER BY canonical_alias`,
+					)
+					.all(agentId) as Array<{ canonical_alias: string; entity_id: string; alias_kind: string }>,
+		);
+	}
+
+	it("keeps every spelling resolvable after a merge", () => {
+		// Approving the merge deletes the only row spelling "Matt West", and
+		// deletes it while an alias still points at it — nothing sets
+		// PRAGMA foreign_keys, so the declared CASCADE never fires and the row
+		// dangles, holding that canonical name's one active slot forever.
+		insertEntity("ent-addr", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 9, false, "person");
+		insertEntity("ent-name", "Matt West", "matt west", "ant", 3, false, "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES ('al-dock', 'ent-name', 'ant', 'matt@dock-blocks.com', 'matt@dock-blocks.com', 'email', 0.5,
+				         'local part', 'active', '2026-05-06T00:00:00.000Z', '2026-05-06T00:00:00.000Z')`,
+			).run();
+		});
+
+		const merge = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: { target_entity_id: "ent-addr", source_entity_ids: ["ent-name"] },
+			rationale: "One person, two spellings.",
+		});
+		const applied = applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: merge.id, actor: "test" });
+
+		expect(applied.status).toBe("applied");
+		expect(activeAliases("ant")).toEqual([
+			{ canonical_alias: "matt west", entity_id: "ent-addr", alias_kind: "display_name" },
+			{ canonical_alias: "matt@dock-blocks.com", entity_id: "ent-addr", alias_kind: "email" },
+		]);
+	});
+
+	it("never claims a name another entity already answers to", () => {
+		insertEntity("ent-addr", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 9, false, "person");
+		insertEntity("ent-name", "Matt", "matt", "ant", 3, false, "person");
+		insertEntity("ent-other", "Matt Damon", "matt damon", "ant", 2, false, "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES ('al-matt', 'ent-other', 'ant', 'Matt', 'matt', 'display_name', 1.0,
+				         'user-asserted', 'active', '2026-05-06T00:00:00.000Z', '2026-05-06T00:00:00.000Z')`,
+			).run();
+		});
+
+		const merge = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: { target_entity_id: "ent-addr", source_entity_ids: ["ent-name"] },
+		});
+		applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: merge.id, actor: "test" });
+
+		expect(activeAliases("ant")).toEqual([
+			{ canonical_alias: "matt", entity_id: "ent-other", alias_kind: "display_name" },
+		]);
+	});
+
 	it("applies ID-first merge_entities when entity names are ambiguous", () => {
 		const target = createOntologyProposal(getDbAccessor(), {
 			agentId: "ant",
@@ -1106,7 +1174,10 @@ describe("ontology proposals", () => {
 
 		expect(applied.status).toBe("applied");
 		expect(applied.result?.targetEntityId).toBe(ids.targetId);
-		expect(applied.result?.mergedEntities).toEqual([{ name: "Signet Alias", entityId: ids.sourceId, movedAspects: 1 }]);
+		// Both rows share a canonical name, so there is no second spelling to alias.
+		expect(applied.result?.mergedEntities).toEqual([
+			{ name: "Signet Alias", entityId: ids.sourceId, movedAspects: 1, aliases: 0 },
+		]);
 	});
 
 	it("rejects merge_entities when supplied IDs and names disagree", () => {
