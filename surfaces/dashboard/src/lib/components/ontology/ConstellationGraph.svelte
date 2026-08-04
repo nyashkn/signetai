@@ -1,6 +1,7 @@
 <script lang="ts">
 import { getConstellationOverlay } from "$lib/api";
 import { onMount } from "svelte";
+import IdentityPanel from "./IdentityPanel.svelte";
 import { SpatialIndex } from "./canvas/hit-test";
 import { GraphInputHandler } from "./canvas/input-handler";
 import { isNodeVisibleAtLod, renderFrame } from "./canvas/renderer";
@@ -1093,7 +1094,10 @@ function entityNavigatorStyle(): string {
 
 function popoverPanelHeight(node: KnowledgeMapNode): number {
 	const actions = Math.min(directChildren(node.id).length, popoverChildLimit(node));
-	return clamp(236 + Math.ceil(actions / 2) * 32, 270, Math.min(430, height - 32));
+	// An entity card also carries the identity section — its handles and its
+	// deep-linked trail — so it opens at the taller end of the same range.
+	const identity = node.kind === "entity" ? 140 : 0;
+	return clamp(236 + identity + Math.ceil(actions / 2) * 32, 270, Math.min(430, height - 32));
 }
 
 function popoverChildLimit(node: KnowledgeMapNode): number {
@@ -1332,6 +1336,11 @@ onMount(() => {
 								<strong>{row.value}</strong>
 							</div>
 						{/each}
+					</div>
+				{/if}
+				{#if popoverNode.kind === "entity"}
+					<div class="popover-identity">
+						<IdentityPanel {agentId} entityId={popoverNode.id} />
 					</div>
 				{/if}
 				<div class="popover-actions">
@@ -1978,6 +1987,11 @@ onMount(() => {
 		color: rgba(226, 232, 240, 0.88);
 	}
 
+	/* Deliberately not its own scroll container: the card body already scrolls,
+	   and nesting a second scroller inside a 270px card traps the wheel. */
+	.popover-identity {
+		margin-top: 6px;
+	}
 	.popover-actions {
 		display: flex;
 		flex-wrap: wrap;

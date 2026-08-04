@@ -1,6 +1,6 @@
 <script lang="ts">
 import { type EntityAliasRecord, type WhatTouchedResult, getEntityAliases, getWhatTouched } from "$lib/api";
-import { groupTouchedBySource } from "./identity-panel-data";
+import { groupTouchedBySource, touchedTitle } from "./identity-panel-data";
 
 interface Props {
 	agentId: string;
@@ -69,9 +69,9 @@ const otherNames = $derived((touched?.identity.names ?? []).slice(1));
 						<li>
 							<span class="relation">{item.relation.replace(/_/g, " ")}</span>
 							{#if item.deepLink}
-								<a class="target" href={item.deepLink}>{item.name}</a>
+								<a class="target" href={item.deepLink} title={item.name}>{touchedTitle(item.name)}</a>
 							{:else}
-								<span class="target plain">{item.name}</span>
+								<span class="target plain" title={item.name}>{touchedTitle(item.name)}</span>
 							{/if}
 						</li>
 					{/each}

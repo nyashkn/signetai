@@ -172,7 +172,16 @@ async function decide(proposal: OntologyProposalRecord, decision: "apply" | "rej
 		list-style: none;
 		margin: 0;
 		padding: 0;
+		/* `min-height: 0` is what actually makes this scroll: a flex item's
+		   default `min-height: auto` sizes it to its content, so the list grew
+		   past the panel and every row below the fold became unclickable. */
+		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
+	}
+	.evidence {
+		flex: none;
+		overflow: visible;
 	}
 	li {
 		padding: 10px 12px;

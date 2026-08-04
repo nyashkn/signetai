@@ -1,5 +1,16 @@
 import type { TouchedItemRecord } from "$lib/api";
 
+/**
+ * Connector-minted entities are named `<subject> - source:email:<hash>:document:<uri>`
+ * — unique by construction, unreadable in a list. The subject is the only part
+ * a person recognises, and the uri it drops is already carried by the deep link.
+ */
+export function touchedTitle(name: string): string {
+	const cut = name.indexOf(" - source:");
+	const title = cut > 0 ? name.slice(0, cut) : name;
+	return title.trim().length > 0 ? title.trim() : name;
+}
+
 export interface TouchedGroup {
 	readonly sourceKind: string;
 	readonly label: string;

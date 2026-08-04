@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { describe, expect, it } from "bun:test";
 import type { TouchedItemRecord } from "$lib/api";
-import { groupTouchedBySource } from "./identity-panel-data";
+import { groupTouchedBySource, touchedTitle } from "./identity-panel-data";
 
 function item(overrides: Partial<TouchedItemRecord>): TouchedItemRecord {
 	return {
@@ -32,6 +32,19 @@ describe("identity panel", () => {
 		expect(groups.map((group) => group.label)).toEqual(["Email", "Extracted from memories"]);
 		expect(groups[0].items).toHaveLength(1);
 		expect(groups[1].items).toHaveLength(3);
+	});
+
+	it("keeps the subject and drops the connector's uniqueness suffix", () => {
+		// Verbatim from the live corpus: the whole uri is repeated in the name,
+		// which ellipsised every row down to "Re: calendly test - source:e...".
+		expect(
+			touchedTitle(
+				"Re: calendly test - source:email:68979d6264dc21ba:document:email://pivotplanit/Inbox/messages/%3Cx%3E",
+			),
+		).toBe("Re: calendly test");
+		expect(touchedTitle("Alecia Nikole Robinson")).toBe("Alecia Nikole Robinson");
+		// A name that is only the suffix has nothing better to show than itself.
+		expect(touchedTitle(" - source:email:abc")).toBe("- source:email:abc");
 	});
 
 	it("shows an unmapped source kind rather than hiding it", () => {
