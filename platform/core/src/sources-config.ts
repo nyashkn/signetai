@@ -127,6 +127,37 @@ export interface AddEmailSourceInput {
 	readonly now?: string;
 }
 
+/**
+ * ClickUp is a plain REST API with a personal token, so unlike email it does
+ * carry a `tokenRef` — the same secret-store indirection Discord and GitHub use.
+ * Signet stores the reference, never the token.
+ */
+export interface ClickUpSourceSettings {
+	/** Numeric workspace ids. Empty means every workspace the token can see. */
+	readonly teamIds: readonly string[];
+	readonly tokenRef: string;
+	readonly includeClosed: boolean;
+	readonly includeSubtasks: boolean;
+	readonly includeComments: boolean;
+	readonly maxTasksPerTeam: number;
+	/** Comments cost one request per task, so they are budgeted separately from tasks. */
+	readonly maxCommentTasksPerSync: number;
+	readonly since?: string;
+}
+
+export interface AddClickUpSourceInput {
+	readonly tokenRef: string;
+	readonly teamIds?: readonly string[];
+	readonly name?: string;
+	readonly includeClosed?: boolean;
+	readonly includeSubtasks?: boolean;
+	readonly includeComments?: boolean;
+	readonly maxTasksPerTeam?: number;
+	readonly maxCommentTasksPerSync?: number;
+	readonly since?: string;
+	readonly now?: string;
+}
+
 export interface AddGitHubSourceInput {
 	readonly repos: readonly string[];
 	readonly tokenRef?: string;
@@ -165,6 +196,12 @@ export const MAX_EMAIL_MAX_MESSAGES_PER_SYNC = 10_000;
 /** Mirrors the argv guards in the daemon's himalaya driver so bad names fail at config time. */
 const EMAIL_ACCOUNT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const EMAIL_MAILBOX_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._\/-]*$/;
+export const DEFAULT_CLICKUP_MAX_TASKS_PER_TEAM = 1000;
+export const MAX_CLICKUP_MAX_TASKS_PER_TEAM = 20_000;
+export const DEFAULT_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC = 200;
+export const MAX_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC = 5_000;
+/** ClickUp workspace ids are numeric; anything else is a paste error, not a workspace. */
+const CLICKUP_TEAM_ID_RE = /^\d+$/;
 const VALID_GITHUB_RESOURCE_TYPES = new Set<string>(DEFAULT_GITHUB_RESOURCE_TYPES);
 
 export function getAgentsDir(): string {
@@ -467,6 +504,143 @@ function emailSettingsProviderSettings(settings: EmailSourceSettings): SignetSou
 		mailboxes: settings.mailboxes,
 		maxMessagesPerSync: settings.maxMessagesPerSync,
 		includeQuotedParticipants: settings.includeQuotedParticipants,
+		...(settings.since ? { since: settings.since } : {}),
+	};
+}
+
+export function addClickUpSource(input: AddClickUpSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	return withSourcesConfigLock(agentsDir, () => addClickUpSourceUnlocked(input, agentsDir));
+}
+
+function addClickUpSourceUnlocked(input: AddClickUpSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	try {
+		return addClickUpSourceChecked(input, agentsDir);
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		return { ok: false, error: detail };
+	}
+}
+
+function addClickUpSourceChecked(input: AddClickUpSourceInput, agentsDir = getAgentsDir()): AddSourceResult {
+	const settings = buildClickUpSettings(input);
+	if ("error" in settings) return { ok: false, error: settings.error };
+
+	const now = input.now ?? new Date().toISOString();
+	const cfg = loadSourcesConfigForWrite(agentsDir);
+	// Keyed on the token reference, not on the workspace list: one token is one
+	// ClickUp account, and adding a second workspace to it must update the same
+	// source rather than fork a rival one that re-indexes the overlap.
+	const sourceId = `clickup:${createHash("sha256").update(settings.tokenRef).digest("hex").slice(0, 16)}`;
+	const root = "clickup://workspaces";
+	const existing = cfg.sources.find((source) => source.id === sourceId);
+	if (existing) {
+		const updatedSettings = buildClickUpSettings(input, parseClickUpSettings(existing.providerSettings));
+		if ("error" in updatedSettings) return { ok: false, error: updatedSettings.error };
+		const updated: SignetSourceEntry = {
+			...existing,
+			name: cleanName(input.name) ?? existing.name,
+			root,
+			enabled: true,
+			providerSettings: clickUpSettingsProviderSettings(updatedSettings),
+			updatedAt: now,
+		};
+		saveSourcesConfig(
+			{
+				version: SOURCES_CONFIG_VERSION,
+				sources: cfg.sources.map((source) => (source.id === existing.id ? updated : source)),
+			},
+			agentsDir,
+		);
+		return { ok: true, source: updated, created: false };
+	}
+
+	const source: SignetSourceEntry = {
+		id: sourceId,
+		kind: "clickup",
+		name: cleanName(input.name) ?? "ClickUp Source",
+		root,
+		enabled: true,
+		mode: "read-only",
+		createdAt: now,
+		updatedAt: now,
+		providerSettings: clickUpSettingsProviderSettings(settings),
+	};
+	saveSourcesConfig({ version: SOURCES_CONFIG_VERSION, sources: [...cfg.sources, source] }, agentsDir);
+	return { ok: true, source, created: true };
+}
+
+export function parseClickUpSettings(raw?: SignetSourceProviderSettings): ClickUpSourceSettings {
+	const teamIds = Array.isArray(raw?.teamIds)
+		? cleanStringArray(raw.teamIds).filter((teamId) => CLICKUP_TEAM_ID_RE.test(teamId))
+		: [];
+	const since = typeof raw?.since === "string" ? cleanIsoDate(raw.since) : undefined;
+	return {
+		teamIds,
+		tokenRef: typeof raw?.tokenRef === "string" ? raw.tokenRef.trim() : "",
+		includeClosed: raw?.includeClosed === true,
+		includeSubtasks: raw?.includeSubtasks !== false,
+		includeComments: raw?.includeComments !== false,
+		maxTasksPerTeam:
+			cleanPositiveInteger(raw?.maxTasksPerTeam, MAX_CLICKUP_MAX_TASKS_PER_TEAM) ?? DEFAULT_CLICKUP_MAX_TASKS_PER_TEAM,
+		maxCommentTasksPerSync:
+			cleanPositiveInteger(raw?.maxCommentTasksPerSync, MAX_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC) ??
+			DEFAULT_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC,
+		...(since ? { since } : {}),
+	};
+}
+
+function buildClickUpSettings(
+	input: AddClickUpSourceInput,
+	existing?: ClickUpSourceSettings,
+): ClickUpSourceSettings | { readonly error: string } {
+	const tokenRef = input.tokenRef?.trim() || existing?.tokenRef || "";
+	if (tokenRef.length === 0) return { error: "A ClickUp tokenRef is required" };
+	const teamIds = input.teamIds !== undefined ? cleanStringArray(input.teamIds) : (existing?.teamIds ?? []);
+	for (const teamId of teamIds) {
+		if (!CLICKUP_TEAM_ID_RE.test(teamId)) {
+			return { error: `Invalid ClickUp workspace id: ${teamId}. Expected the numeric id from the task URL` };
+		}
+	}
+	if (input.maxTasksPerTeam !== undefined) {
+		const capped = cleanPositiveInteger(input.maxTasksPerTeam, MAX_CLICKUP_MAX_TASKS_PER_TEAM);
+		if (capped !== input.maxTasksPerTeam) {
+			return { error: `maxTasksPerTeam must be an integer between 1 and ${MAX_CLICKUP_MAX_TASKS_PER_TEAM}` };
+		}
+	}
+	if (input.maxCommentTasksPerSync !== undefined) {
+		const capped = cleanPositiveInteger(input.maxCommentTasksPerSync, MAX_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC);
+		if (capped !== input.maxCommentTasksPerSync) {
+			return {
+				error: `maxCommentTasksPerSync must be an integer between 1 and ${MAX_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC}`,
+			};
+		}
+	}
+	if (input.since !== undefined && cleanIsoDate(input.since) === undefined) {
+		return { error: "since must be an ISO 8601 date" };
+	}
+	const since = input.since !== undefined ? cleanIsoDate(input.since) : existing?.since;
+	return {
+		teamIds,
+		tokenRef,
+		includeClosed: input.includeClosed ?? existing?.includeClosed ?? false,
+		includeSubtasks: input.includeSubtasks ?? existing?.includeSubtasks ?? true,
+		includeComments: input.includeComments ?? existing?.includeComments ?? true,
+		maxTasksPerTeam: input.maxTasksPerTeam ?? existing?.maxTasksPerTeam ?? DEFAULT_CLICKUP_MAX_TASKS_PER_TEAM,
+		maxCommentTasksPerSync:
+			input.maxCommentTasksPerSync ?? existing?.maxCommentTasksPerSync ?? DEFAULT_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC,
+		...(since ? { since } : {}),
+	};
+}
+
+function clickUpSettingsProviderSettings(settings: ClickUpSourceSettings): SignetSourceProviderSettings {
+	return {
+		teamIds: settings.teamIds,
+		tokenRef: settings.tokenRef,
+		includeClosed: settings.includeClosed,
+		includeSubtasks: settings.includeSubtasks,
+		includeComments: settings.includeComments,
+		maxTasksPerTeam: settings.maxTasksPerTeam,
+		maxCommentTasksPerSync: settings.maxCommentTasksPerSync,
 		...(settings.since ? { since: settings.since } : {}),
 	};
 }

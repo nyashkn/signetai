@@ -1,4 +1,5 @@
 import type { SignetSourceEntry, SignetSourceKind, SourceFailureState } from "@signet/core";
+import { clickUpSourceProvider } from "./clickup-source-provider";
 import { discordSourceProvider } from "./discord-source-provider";
 import { emailSourceProvider } from "./email-source-provider";
 import { githubSourceProvider } from "./github-source-provider";
@@ -58,6 +59,7 @@ export function getSourceProvider(kind: SignetSourceKind): SourceProviderAdapter
 	if (kind === discordSourceProvider.kind) return discordSourceProvider;
 	if (kind === githubSourceProvider.kind) return githubSourceProvider;
 	if (kind === emailSourceProvider.kind) return emailSourceProvider;
+	if (kind === clickUpSourceProvider.kind) return clickUpSourceProvider;
 	return additionalProviders.get(kind);
 }
 
@@ -67,6 +69,7 @@ export function configuredSourceProviders(): readonly SourceProviderAdapter[] {
 		discordSourceProvider,
 		githubSourceProvider,
 		emailSourceProvider,
+		clickUpSourceProvider,
 		...additionalProviders.values(),
 	];
 }

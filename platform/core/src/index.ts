@@ -247,9 +247,12 @@ export type {
 } from "./workspace-source-repo";
 export {
 	addDiscordSource,
+	addClickUpSource,
 	addEmailSource,
 	addGitHubSource,
 	addObsidianSource,
+	DEFAULT_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC,
+	DEFAULT_CLICKUP_MAX_TASKS_PER_TEAM,
 	DEFAULT_DISCORD_DESKTOP_CACHE_PATH,
 	DEFAULT_DISCORD_MAX_ATTACHMENT_TEXT_BYTES,
 	DEFAULT_DISCORD_MAX_MESSAGES_PER_CHANNEL,
@@ -260,6 +263,8 @@ export {
 	DEFAULT_EMAIL_MAILBOXES,
 	DEFAULT_EMAIL_MAX_MESSAGES_PER_SYNC,
 	DEFAULT_OBSIDIAN_EXCLUDE_GLOBS,
+	MAX_CLICKUP_MAX_COMMENT_TASKS_PER_SYNC,
+	MAX_CLICKUP_MAX_TASKS_PER_TEAM,
 	MAX_DISCORD_MAX_MESSAGES_PER_CHANNEL,
 	MAX_DISCORD_MAX_ATTACHMENT_TEXT_BYTES,
 	MAX_EMAIL_MAX_MESSAGES_PER_SYNC,
@@ -268,6 +273,7 @@ export {
 	getSourcesConfigPath,
 	loadSourcesConfig,
 	markSourceIndexed,
+	parseClickUpSettings,
 	parseDiscordSettings,
 	parseEmailSettings,
 	parseGitHubSettings,
@@ -275,11 +281,13 @@ export {
 	saveSourcesConfig,
 } from "./sources-config";
 export type {
+	AddClickUpSourceInput,
 	AddDiscordSourceInput,
 	AddEmailSourceInput,
 	AddGitHubSourceInput,
 	AddObsidianSourceInput,
 	AddSourceResult,
+	ClickUpSourceSettings,
 	DiscordSourceSettings,
 	DiscordSourceSyncMode,
 	EmailSourceSettings,

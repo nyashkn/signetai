@@ -3,6 +3,7 @@ import type { Command } from "commander";
 import {
 	type DaemonAddSourceResult,
 	type SourcesDeps,
+	addClickUpSourceFromCli,
 	addDiscordSourceFromCli,
 	addGitHubSourceFromCli,
 	addObsidianVaultSource,
@@ -191,6 +192,27 @@ export function registerSourcesCommands(program: Command, deps: RegisterSourcesC
 				...deps,
 				addDiscordSourceToDaemon: deps.secretApiCall
 					? (input) => addSourceThroughDaemon(deps.secretApiCall, "/api/sources/discord", input)
+					: undefined,
+			}),
+		);
+
+	add
+		.command("clickup")
+		.description("Index ClickUp workspaces as read-only recall sources")
+		.requiredOption("--token-ref <secret>", "Signet secret name or external secret reference for a ClickUp API token")
+		.option("--team <id>", "ClickUp workspace id (repeatable; defaults to every workspace the token sees)", collect, [])
+		.option("--name <name>", "Display name for the ClickUp source")
+		.option("--include-closed", "Include closed tasks")
+		.option("--no-subtasks", "Skip subtasks")
+		.option("--no-include-comments", "Skip task comments")
+		.option("--max-tasks <count>", "Maximum tasks per workspace per sync")
+		.option("--max-comment-tasks <count>", "Maximum tasks to fetch comments for per sync")
+		.option("--since <iso-date>", "Only index tasks updated after this date")
+		.action((options) =>
+			addClickUpSourceFromCli(options, {
+				...deps,
+				addClickUpSourceToDaemon: deps.secretApiCall
+					? (input) => addSourceThroughDaemon(deps.secretApiCall, "/api/sources/clickup", input)
 					: undefined,
 			}),
 		);

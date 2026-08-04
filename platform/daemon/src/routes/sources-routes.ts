@@ -8,6 +8,7 @@ import {
 	LEGACY_OBSIDIAN_CHUNK_SOURCE_TYPE,
 	SOURCE_CHUNK_SOURCE_TYPE,
 	type SignetSourceEntry,
+	addClickUpSource,
 	addDiscordSource,
 	addEmailSource,
 	addGitHubSource,
@@ -112,6 +113,19 @@ interface AddEmailSourceBody {
 	readonly mailboxes?: readonly string[];
 	readonly maxMessagesPerSync?: number;
 	readonly includeQuotedParticipants?: boolean;
+	readonly since?: string;
+}
+
+interface AddClickUpSourceBody {
+	readonly tokenRef?: string;
+	readonly teamIds?: readonly string[];
+	readonly teamId?: string;
+	readonly name?: string;
+	readonly includeClosed?: boolean;
+	readonly includeSubtasks?: boolean;
+	readonly includeComments?: boolean;
+	readonly maxTasksPerTeam?: number;
+	readonly maxCommentTasksPerSync?: number;
 	readonly since?: string;
 }
 
@@ -357,6 +371,47 @@ export function registerSourcesRoutes(app: Hono, deps: RegisterSourcesRoutesDeps
 					: undefined,
 				maxMessagesPerSync: body.maxMessagesPerSync,
 				includeQuotedParticipants: body.includeQuotedParticipants,
+				since: body.since,
+			},
+			agentsDir,
+		);
+		if (result.ok === false) return c.json({ error: result.error }, 400);
+
+		const job = enqueueSourceIndexJob({
+			source: result.source,
+			agentsDir,
+			startBridge,
+			purgeNativeSource,
+		});
+
+		return c.json({ source: result.source, created: result.created, indexed: 0, queued: true, job }, 202);
+	});
+
+	app.post("/api/sources/clickup", async (c) => {
+		let body: AddClickUpSourceBody = {};
+		try {
+			body = (await c.req.json()) as AddClickUpSourceBody;
+		} catch {
+			return c.json({ error: "Invalid JSON body" }, 400);
+		}
+
+		// Only the *reference* crosses this boundary. The token itself lives in the
+		// secret store and is resolved inside the provider at sync time.
+		const teamIds = Array.isArray(body.teamIds)
+			? body.teamIds.filter((entry): entry is string => typeof entry === "string")
+			: typeof body.teamId === "string"
+				? [body.teamId]
+				: undefined;
+		const result = addClickUpSource(
+			{
+				tokenRef: typeof body.tokenRef === "string" ? body.tokenRef : "",
+				...(teamIds ? { teamIds } : {}),
+				name: body.name,
+				includeClosed: body.includeClosed,
+				includeSubtasks: body.includeSubtasks,
+				includeComments: body.includeComments,
+				maxTasksPerTeam: body.maxTasksPerTeam,
+				maxCommentTasksPerSync: body.maxCommentTasksPerSync,
 				since: body.since,
 			},
 			agentsDir,

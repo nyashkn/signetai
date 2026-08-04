@@ -1,8 +1,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import {
+	type AddClickUpSourceInput,
 	type AddDiscordSourceInput,
 	type AddGitHubSourceInput,
 	type SignetSourceEntry,
+	addClickUpSource,
 	addDiscordSource,
 	addGitHubSource,
 	addObsidianSource,
@@ -15,6 +17,7 @@ export interface SourcesDeps {
 	readonly agentsDir: string;
 	readonly addDiscordSourceToDaemon?: (input: AddDiscordSourceInput) => Promise<DaemonAddSourceResult>;
 	readonly addGitHubSourceToDaemon?: (input: AddGitHubSourceInput) => Promise<DaemonAddSourceResult>;
+	readonly addClickUpSourceToDaemon?: (input: AddClickUpSourceInput) => Promise<DaemonAddSourceResult>;
 	readonly removeSourceFromDaemon?: (sourceId: string) => Promise<DaemonRemoveSourceResult>;
 	readonly exportSourceSnapshotFromDaemon?: (
 		sourceId: string,
@@ -245,6 +248,70 @@ export async function addGitHubSourceFromCli(options: AddGitHubSourceOptions, de
 	console.log(chalk.dim("Run `signet daemon restart` if the daemon is already running."));
 }
 
+export interface AddClickUpSourceOptions {
+	readonly tokenRef?: string;
+	readonly team?: readonly string[];
+	readonly name?: string;
+	readonly includeClosed?: boolean;
+	readonly subtasks?: boolean;
+	readonly includeComments?: boolean;
+	readonly maxTasks?: string;
+	readonly maxCommentTasks?: string;
+	readonly since?: string;
+}
+
+export async function addClickUpSourceFromCli(options: AddClickUpSourceOptions, deps: SourcesDeps): Promise<void> {
+	const maxTasksPerTeam = parseIntegerOption(options.maxTasks, "ClickUp max-tasks");
+	if (isParseError(maxTasksPerTeam)) {
+		console.error(chalk.red(`✗ ${maxTasksPerTeam.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	const maxCommentTasksPerSync = parseIntegerOption(options.maxCommentTasks, "ClickUp max-comment-tasks");
+	if (isParseError(maxCommentTasksPerSync)) {
+		console.error(chalk.red(`✗ ${maxCommentTasksPerSync.error}`));
+		process.exitCode = 1;
+		return;
+	}
+	const input: AddClickUpSourceInput = {
+		tokenRef: options.tokenRef ?? "",
+		teamIds: options.team ?? [],
+		name: options.name,
+		includeClosed: options.includeClosed,
+		includeSubtasks: options.subtasks,
+		includeComments: options.includeComments,
+		maxTasksPerTeam,
+		maxCommentTasksPerSync,
+		since: options.since,
+	};
+	const daemonResult = await addSourceThroughDaemon(input, deps.addClickUpSourceToDaemon);
+	if (daemonResult) {
+		const handled = printDaemonAddSourceResult("ClickUp", daemonResult);
+		if (handled) return;
+	}
+
+	const result = addClickUpSource(input, deps.agentsDir);
+	if (result.ok === false) {
+		console.error(chalk.red(`✗ ${result.error}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const verb = result.created ? "Added" : "Updated";
+	console.log(chalk.green(`✓ ${verb} ClickUp source: ${result.source.name}`));
+	console.log(chalk.dim(`  ${result.source.root}`));
+	if (result.source.providerSettings?.tokenRef) {
+		console.log(chalk.dim(`  tokenRef: ${result.source.providerSettings.tokenRef}`));
+	}
+	const teamIds = Array.isArray(result.source.providerSettings?.teamIds)
+		? result.source.providerSettings.teamIds.filter((entry) => typeof entry === "string")
+		: [];
+	console.log(chalk.dim(`  workspaces: ${teamIds.length > 0 ? teamIds.join(", ") : "all visible to the token"}`));
+	console.log();
+	console.log(chalk.dim("The daemon indexes ClickUp through the shared Sources job pipeline."));
+	console.log(chalk.dim("Run `signet daemon restart` if the daemon is already running."));
+}
+
 export async function listSources(deps: SourcesDeps): Promise<void> {
 	const config = loadSourcesConfig(deps.agentsDir);
 	if (config.sources.length === 0) {
@@ -286,6 +353,14 @@ export async function listSources(deps: SourcesDeps): Promise<void> {
 			if (accounts.length > 0) console.log(chalk.dim(`  himalaya accounts: ${accounts.join(", ")}`));
 			if (mailboxes.length > 0) console.log(chalk.dim(`  mailboxes: ${mailboxes.join(", ")}`));
 			// No tokenRef line: himalaya owns the credentials, Signet never sees them.
+		}
+		if (source.kind === "clickup" && source.providerSettings) {
+			const teamIds = Array.isArray(source.providerSettings.teamIds)
+				? source.providerSettings.teamIds.filter((entry) => typeof entry === "string")
+				: [];
+			console.log(chalk.dim(`  workspaces: ${teamIds.length > 0 ? teamIds.join(", ") : "all visible to the token"}`));
+			if (typeof source.providerSettings.tokenRef === "string")
+				console.log(chalk.dim(`  tokenRef: ${source.providerSettings.tokenRef}`));
 		}
 		if (source.excludeGlobs?.length) console.log(chalk.dim(`  excludes: ${source.excludeGlobs.join(", ")}`));
 		if (source.lastIndexedAt) console.log(chalk.dim(`  last indexed: ${source.lastIndexedAt}`));
