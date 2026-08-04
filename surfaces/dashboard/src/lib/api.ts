@@ -3358,6 +3358,79 @@ export async function getConstellationOverlay(agentId: string): Promise<Constell
 	}
 }
 
+export type OntologyProposalStatus = "pending" | "applied" | "rejected" | "failed";
+
+export interface OntologyProposalRecord {
+	id: string;
+	operation: string;
+	status: OntologyProposalStatus;
+	payload: Record<string, unknown>;
+	confidence: number;
+	rationale: string;
+	evidence: unknown[];
+	risk: string | null;
+	sourceKind: string | null;
+	sourcePath: string | null;
+	createdBy: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export async function listOntologyProposals(
+	agentId: string,
+	status: OntologyProposalStatus = "pending",
+	limit = 50,
+): Promise<OntologyProposalRecord[]> {
+	const params = new URLSearchParams({ agent_id: agentId, status, limit: String(limit) });
+	const res = await fetch(`${API_BASE}/api/ontology/proposals?${params.toString()}`);
+	if (!res.ok) throw new Error(`Proposals unavailable (${res.status})`);
+	const body = (await res.json()) as { items?: OntologyProposalRecord[] };
+	return body.items ?? [];
+}
+
+/**
+ * Apply or reject, which are the same request with a different verb in the path.
+ * The daemon answers a refused decision with a JSON `error` and a 4xx — a merge
+ * whose target has since been renamed, say — so the message is returned rather
+ * than thrown: the inbox shows it against the row it belongs to.
+ */
+async function decideOntologyProposal(
+	agentId: string,
+	id: string,
+	decision: "apply" | "reject",
+	reason?: string,
+): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await fetch(`${API_BASE}/api/ontology/proposals/${encodeURIComponent(id)}/${decision}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, actor: "dashboard", ...(reason ? { reason } : {}) }),
+		});
+		const body = (await res.json().catch(() => null)) as { error?: string; status?: string } | null;
+		if (!res.ok) return { ok: false, error: body?.error ?? `Request failed (${res.status})` };
+		// `applied` is written inside the same transaction as the mutation, so any
+		// other status means the operation itself failed and left the graph alone.
+		if (decision === "apply" && body?.status !== "applied") {
+			return { ok: false, error: body?.error ?? `Proposal ended as ${body?.status ?? "unknown"}` };
+		}
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : "Request failed" };
+	}
+}
+
+export function applyOntologyProposal(agentId: string, id: string): Promise<{ ok: boolean; error?: string }> {
+	return decideOntologyProposal(agentId, id, "apply");
+}
+
+export function rejectOntologyProposal(
+	agentId: string,
+	id: string,
+	reason?: string,
+): Promise<{ ok: boolean; error?: string }> {
+	return decideOntologyProposal(agentId, id, "reject", reason);
+}
+
 export interface MarkdownDoc {
 	html: string;
 	source: "github" | "local";
@@ -3812,10 +3885,7 @@ export interface OAuthLoginHandle {
 	close(): void;
 }
 
-export async function startOAuthLogin(
-	providerId: string,
-	onConnected?: () => void,
-): Promise<OAuthLoginHandle> {
+export async function startOAuthLogin(providerId: string, onConnected?: () => void): Promise<OAuthLoginHandle> {
 	const handlers: Array<(event: OAuthLoginEvent) => void> = [];
 	const errorHandlers: Array<(message: string) => void> = [];
 	const controller = new AbortController();
@@ -3902,11 +3972,7 @@ export async function startOAuthLogin(
 	};
 }
 
-export async function completeOAuthInteraction(
-	sessionId: string,
-	responseId: string,
-	value: string,
-): Promise<boolean> {
+export async function completeOAuthInteraction(sessionId: string, responseId: string, value: string): Promise<boolean> {
 	const response = await authFetch(`${API_BASE}/api/inference/oauth/complete`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
