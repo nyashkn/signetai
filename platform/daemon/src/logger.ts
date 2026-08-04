@@ -35,6 +35,7 @@ export type LogCategory =
 	| "github-source" // GitHub source ingestion and fetch diagnostics
 	| "email-source" // Email source ingestion via the himalaya CLI
 	| "clickup-source" // ClickUp source ingestion and fetch diagnostics
+	| "source-thread" // Source threads bridged into the extraction pipeline
 	| "watcher" // File watcher events
 	| "embedding" // Embedding operations
 	| "harness" // Harness configuration

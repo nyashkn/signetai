@@ -45,6 +45,8 @@ import {
 } from "../source-index-progress";
 import { getSourceProvider } from "../source-providers";
 import { exportSourceSnapshot, importSourceSnapshot } from "../source-snapshots";
+import { bridgeSourceThreads } from "../source-thread-extraction";
+import { queueExtractionJob } from "./state";
 
 interface SourceIndexJobInput {
 	readonly source: SignetSourceEntry;
@@ -476,10 +478,11 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 		const provider = getSourceProvider(input.source.kind);
 		if (!provider) throw new Error(`Unsupported source provider: ${input.source.kind}`);
 		if (provider.sync) {
+			const agentId = resolveDaemonAgentId();
 			const result = await provider.sync({
 				source: input.source,
 				agentsDir: input.agentsDir,
-				agentId: resolveDaemonAgentId(),
+				agentId,
 				shouldContinue: () => isCurrentSourceIndexJob(input.source.id, job.id),
 				onProgress: (event) => {
 					if (!isCurrentSourceIndexJob(input.source.id, job.id)) return;
@@ -487,6 +490,15 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 				},
 			});
 			if (!isCurrentSourceIndexJob(input.source.id, job.id)) return;
+
+			// Indexed artifacts are inert until something reads them for meaning.
+			// This sits on the shared sync path rather than inside a connector: it
+			// keys on artifact kind, so every provider that writes threads gets it.
+			// It throws into the catch below on purpose — a bridge that failed
+			// quietly is how the graph ends up looking full and answering nothing.
+			const bridged = bridgeSourceThreads({ agentId, sourceId: input.source.id, sourceKind: input.source.kind });
+			for (const memoryId of bridged.memoryIds) queueExtractionJob(memoryId);
+
 			if (result.failures.length > 0) {
 				failSourceIndexJob(
 					input.source.id,
