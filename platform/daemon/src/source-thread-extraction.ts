@@ -43,8 +43,18 @@ export const THREAD_CONTAINERS: readonly ThreadContainerSpec[] = [
 	{ containerKind: "source_clickup_task", childKind: "source_clickup_comment" },
 ];
 
-/** Chars of digest handed to extraction. `extractFactsAndEntities` truncates at 12k. */
-const MAX_DIGEST_CHARS = 10_000;
+/**
+ * Chars of digest handed to extraction.
+ *
+ * Not the 12k `extractFactsAndEntities` would accept, and the difference is
+ * measured rather than tidy. A reasoning model spends completion budget on
+ * thinking before it writes anything: on a 10k-char digest, deepseek-v4-flash
+ * burned 2,733 reasoning tokens and then truncated its JSON mid-object at the
+ * 4,096-token ceiling, so the extraction parsed to nothing after being paid for.
+ * The digest is an input to extraction, not an archive — the artifacts remain
+ * the archive — so the cheap fix is to hand over less of it.
+ */
+const MAX_DIGEST_CHARS = 4_000;
 
 /** Body chars a thread needs before an LLM call is worth making. */
 export const MIN_THREAD_BODY_CHARS = 200;
