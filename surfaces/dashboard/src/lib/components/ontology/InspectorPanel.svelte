@@ -4,6 +4,7 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { ScrollArea } from "$lib/components/ui/scroll-area/index.js";
 import { ArrowLeft, CircleDot, Hexagon, Table2, User } from "$lib/icons";
 import { summarizeOntologyText } from "$lib/issue-848-format";
+import IdentityPanel from "./IdentityPanel.svelte";
 import { NODE_COLORS, entityNameFromGraph } from "./ontology-data";
 import { loadAspectDetail, loadEntityDetail, ontology, selectNode } from "./ontology-state.svelte";
 
@@ -198,6 +199,10 @@ function navigateTo(id: string, kind: "entity" | "aspect" | "attribute"): void {
 						<div class="section-label">DESCRIPTION</div>
 						<p class="desc-text">{detail.entity.description}</p>
 					</div>
+				{/if}
+
+				{#if ontology.selected?.kind === "entity"}
+					<IdentityPanel {agentId} entityId={ontology.selected.id} />
 				{/if}
 
 				{#if aspects.length > 0}

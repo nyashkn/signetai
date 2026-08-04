@@ -3358,6 +3358,62 @@ export async function getConstellationOverlay(agentId: string): Promise<Constell
 	}
 }
 
+export interface EntityAliasRecord {
+	id: string;
+	entityId: string;
+	alias: string;
+	canonicalAlias: string;
+	aliasKind?: string | null;
+	confidence: number;
+	source: string | null;
+	status: "active" | "archived";
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface TouchedItemRecord {
+	entityId: string;
+	name: string;
+	entityType: string;
+	relation: string;
+	strength: number;
+	sourceKind: string | null;
+	sourcePath: string | null;
+	occurredAt: string | null;
+	deepLink: string | null;
+}
+
+export interface WhatTouchedResult {
+	identity: {
+		entityIds: string[];
+		names: string[];
+		matchedVia: "id" | "name" | "alias" | "none";
+	};
+	items: TouchedItemRecord[];
+}
+
+export async function getEntityAliases(agentId: string, entityId: string): Promise<EntityAliasRecord[]> {
+	const params = new URLSearchParams({ agent_id: agentId, status: "active" });
+	const res = await fetch(
+		`${API_BASE}/api/ontology/entities/${encodeURIComponent(entityId)}/aliases?${params.toString()}`,
+	);
+	if (!res.ok) throw new Error(`Aliases unavailable (${res.status})`);
+	const body = (await res.json()) as { items?: EntityAliasRecord[] };
+	return body.items ?? [];
+}
+
+/**
+ * `who` accepts an entity id as readily as a name — identity resolution folds
+ * every alias in, so the panel passes the id it already has and never has to
+ * guess which spelling the graph is keyed on.
+ */
+export async function getWhatTouched(agentId: string, who: string, limit = 40): Promise<WhatTouchedResult> {
+	const params = new URLSearchParams({ agent_id: agentId, who, limit: String(limit) });
+	const res = await fetch(`${API_BASE}/api/knowledge/touched?${params.toString()}`);
+	if (!res.ok) throw new Error(`Trail unavailable (${res.status})`);
+	return (await res.json()) as WhatTouchedResult;
+}
+
 export type OntologyProposalStatus = "pending" | "applied" | "rejected" | "failed";
 
 export interface OntologyProposalRecord {
