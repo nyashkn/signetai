@@ -26,6 +26,7 @@
 import { createHash } from "node:crypto";
 import type { WriteDb } from "./db-accessor";
 import { getDbAccessor } from "./db-accessor";
+import { organizationFromEmailDomain } from "./principal-identity";
 
 /**
  * Connector-local edge vocabulary.
@@ -70,6 +71,8 @@ export interface IndexSourceParticipantsResult {
 	readonly edgesWritten: number;
 	/** Display-name aliases written for address-keyed people. */
 	readonly aliasesWritten: number;
+	/** Correspondents given a `member_of` edge derived from their mail domain. */
+	readonly organizationsLinked: number;
 	/** Identifiers already present under a non-person type; candidates for a retype proposal in P4. */
 	readonly typeConflicts: readonly string[];
 }
@@ -304,6 +307,86 @@ function upsertParticipantEdge(
 	return true;
 }
 
+/**
+ * The correspondent's organization, from the registrable label of their mail
+ * domain. Same rule P4a applies to the principal's own accounts, now applied to
+ * the people writing in — `@dock-blocks.com` says Matt is at Dock Blocks just
+ * as plainly as it says the principal is at PivotPlanIt.
+ *
+ * Consumer domains yield nothing, which is the whole reason this is safe:
+ * deriving an organization from `gmail.com` would invent an entity that every
+ * unrelated person also belongs to. Display casing is not recoverable from a
+ * domain, so orgs are created lowercase and renaming is a normal graph edit.
+ *
+ * Returns the org entity id, or null when there is nothing to derive.
+ */
+function upsertCorrespondentOrganization(
+	db: WriteDb,
+	input: IndexSourceParticipantsInput,
+	identifier: string,
+	personEntityId: string,
+	now: string,
+): string | null {
+	const label = organizationFromEmailDomain(identifier);
+	if (label === null) return null;
+	const canonical = toCanonicalName(label);
+	if (canonical.length === 0) return null;
+
+	const existing = db
+		.prepare("SELECT id FROM entities WHERE canonical_name = ? AND agent_id = ? LIMIT 1")
+		.get(canonical, input.agentId) as { id: string } | null | undefined;
+
+	let orgId: string;
+	if (existing) {
+		// Never retype an existing row. If the graph already holds this name as
+		// something else, that is a conflict for the proposal loop to adjudicate,
+		// not something a connector silently rewrites.
+		orgId = existing.id;
+	} else {
+		orgId = idFor(input.agentId, "organization", canonical);
+		db.prepare(
+			`INSERT INTO entities
+			 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at,
+			  source_id, source_kind, source_path, source_root)
+			 VALUES (?, ?, ?, 'organization', ?, 1, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			orgId,
+			label,
+			canonical,
+			input.agentId,
+			now,
+			now,
+			input.sourceId,
+			input.sourceKind,
+			input.sourcePath,
+			input.sourceRoot,
+		);
+	}
+
+	// `member_of` is transport-asserted here: the address is the string the mail
+	// server itself authenticated, so it enters at full strength like the
+	// envelope participants it comes from.
+	db.prepare(
+		`INSERT OR IGNORE INTO entity_dependencies
+		 (id, source_entity_id, target_entity_id, agent_id, dependency_type, strength, confidence, reason,
+		  created_at, updated_at, source_id, source_kind, source_path, source_root)
+		 VALUES (?, ?, ?, ?, 'member_of', 1, 1, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(
+		idFor("dep", input.agentId, "member_of", personEntityId, orgId),
+		personEntityId,
+		orgId,
+		input.agentId,
+		`user-asserted: mail domain of ${identifier}`,
+		now,
+		now,
+		input.sourceId,
+		input.sourceKind,
+		input.sourcePath,
+		input.sourceRoot,
+	);
+	return orgId;
+}
+
 export function indexSourceParticipantsInTx(
 	db: WriteDb,
 	input: IndexSourceParticipantsInput,
@@ -322,6 +405,7 @@ export function indexSourceParticipantsInTx(
 	let personsLinked = 0;
 	let edgesWritten = 0;
 	let aliasesWritten = 0;
+	let organizationsLinked = 0;
 	const typeConflicts = new Set<string>();
 
 	for (const participant of input.participants) {
@@ -332,9 +416,19 @@ export function indexSourceParticipantsInTx(
 		if (person.typeConflict) typeConflicts.add(participant.identifier);
 		if (upsertParticipantEdge(db, input, participant, person.id, now)) edgesWritten++;
 		if (upsertDisplayNameAlias(db, input, participant, person.id, now)) aliasesWritten++;
+		if (upsertCorrespondentOrganization(db, input, participant.identifier, person.id, now) !== null) {
+			organizationsLinked++;
+		}
 	}
 
-	return { personsCreated, personsLinked, edgesWritten, aliasesWritten, typeConflicts: [...typeConflicts] };
+	return {
+		personsCreated,
+		personsLinked,
+		edgesWritten,
+		aliasesWritten,
+		organizationsLinked,
+		typeConflicts: [...typeConflicts],
+	};
 }
 
 export function indexSourceParticipants(input: IndexSourceParticipantsInput): IndexSourceParticipantsResult {

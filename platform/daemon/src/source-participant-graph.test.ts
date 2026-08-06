@@ -160,6 +160,43 @@ describe("display-name aliases from participants", () => {
 		expect(edges.map((row) => row.target_entity_id)).toEqual(["ent_principal"]);
 	});
 
+	it("derives a correspondent's organization from their mail domain", () => {
+		const result = index([fromMatt]);
+		expect(result.organizationsLinked).toBe(1);
+
+		const org = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						"SELECT id, name, entity_type FROM entities WHERE agent_id = 'default' AND entity_type = 'organization'",
+					)
+					.all() as Array<{ id: string; name: string; entity_type: string }>,
+		);
+		expect(org.map((row) => row.name)).toEqual(["dock-blocks"]);
+
+		const edges = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT target_entity_id, reason FROM entity_dependencies WHERE dependency_type = 'member_of'")
+					.all() as Array<{ target_entity_id: string; reason: string }>,
+		);
+		expect(edges).toHaveLength(1);
+		expect(edges[0]?.target_entity_id).toBe(org[0]?.id);
+		expect(edges[0]?.reason).toContain("mail domain of matt@dock-blocks.com");
+	});
+
+	it("derives no organization from a consumer mail domain", () => {
+		// An org from `gmail.com` would be an entity every unrelated person also
+		// belongs to, which is worse than no org at all.
+		const result = index([{ ...fromMatt, identifier: "westmatt81@gmail.com", displayName: "Matt West (personal)" }]);
+		expect(result.organizationsLinked).toBe(0);
+		const orgs = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT COUNT(*) AS n FROM entities WHERE entity_type = 'organization'").get() as { n: number },
+		);
+		expect(orgs.n).toBe(0);
+	});
+
 	it("does not alias a display name that merely repeats the address", () => {
 		expect(index([{ ...fromMatt, displayName: "matt@dock-blocks.com" }]).aliasesWritten).toBe(0);
 		expect(aliases()).toHaveLength(0);
