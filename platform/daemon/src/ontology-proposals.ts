@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	ATTRIBUTE_KINDS,
 	type AttributeKind,
@@ -1699,6 +1700,7 @@ function applyMergeEntities(
 	agentId: string,
 	proposal: ProposalRow,
 	payload: Readonly<Record<string, unknown>>,
+	actor: string | null,
 ): Readonly<Record<string, unknown>> {
 	const sources = sourceMergeSpecs(payload);
 	const plan = buildEntityMergePlan(db, {
@@ -1718,6 +1720,34 @@ function applyMergeEntities(
 		readonly aliases: number;
 	}> = [];
 	for (const source of plan.sources) {
+		// Snapshot before anything moves. After the merge these rows are
+		// indistinguishable from the target's own, which is exactly why a merge
+		// could not be undone: the JSON blob in `ontology_proposals.result`
+		// records that a merge happened, never which edge belonged to whom.
+		const sourceRow = db
+			.prepare("SELECT * FROM entities WHERE id = ? AND agent_id = ?")
+			.get(source.id, agentId) as Record<string, unknown> | null;
+		const movedDependencyIds = (
+			db
+				.prepare(
+					`SELECT id FROM entity_dependencies
+					 WHERE agent_id = ? AND (source_entity_id = ? OR target_entity_id = ?)`,
+				)
+				.all(agentId, source.id, source.id) as Array<{ id: string }>
+		).map((row) => row.id);
+		const movedMemoryIds = (
+			db.prepare("SELECT memory_id FROM memory_entity_mentions WHERE entity_id = ?").all(source.id) as Array<{
+				memory_id: string;
+			}>
+		).map((row) => row.memory_id);
+		const movedAspectIds = (
+			db
+				.prepare("SELECT id FROM entity_aspects WHERE entity_id = ? AND agent_id = ?")
+				.all(source.id, agentId) as Array<{
+				id: string;
+			}>
+		).map((row) => row.id);
+
 		const movedAspects = mergeEntityAspects(db, agentId, source.id, plan.target.id);
 		mergeEntityEdges(db, agentId, source.id, plan.target.id);
 		const aliases = mergeEntityAliases(db, agentId, source, plan.target.id);
@@ -1728,6 +1758,30 @@ function applyMergeEntities(
 			 WHERE id = ? AND agent_id = ?`,
 		).run(source.id, plan.target.id, agentId);
 		db.prepare("DELETE FROM entities WHERE id = ? AND agent_id = ?").run(source.id, agentId);
+		db.prepare(
+			`INSERT INTO entity_merge_lineage
+			 (id, agent_id, proposal_id, actor, target_entity_id, source_entity_id, source_name,
+			  source_canonical_name, source_entity_type, source_row_json, moved_json, merged_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		).run(
+			randomUUID(),
+			agentId,
+			proposal.id,
+			// `applied_by` is stamped after the operation runs, so it is still null here.
+			actor ?? proposal.applied_by ?? null,
+			plan.target.id,
+			source.id,
+			source.name,
+			typeof sourceRow?.canonical_name === "string" ? sourceRow.canonical_name : null,
+			typeof sourceRow?.entity_type === "string" ? sourceRow.entity_type : null,
+			JSON.stringify(sourceRow ?? {}),
+			JSON.stringify({
+				dependencyIds: movedDependencyIds,
+				memoryIds: movedMemoryIds,
+				aspectIds: movedAspectIds,
+				aliasesRepointed: aliases,
+			}),
+		);
 		merged.push({ name: source.name, entityId: source.id, movedAspects, aliases });
 	}
 	if (merged.length === 0) throw new OntologyProposalError("No distinct source entities to merge", 400);
@@ -2026,7 +2080,8 @@ function applyOperation(db: WriteDb, proposal: ProposalRow, actor: string): Read
 		return applyArchiveAspect(db, proposal.agent_id, proposal, payload, actor);
 	if (proposal.operation === "add_claim_value") return applyAddClaimValue(db, proposal.agent_id, proposal, payload);
 	if (proposal.operation === "set_claim_value") return applySetClaimValue(db, proposal.agent_id, proposal, payload);
-	if (proposal.operation === "merge_entities") return applyMergeEntities(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "merge_entities")
+		return applyMergeEntities(db, proposal.agent_id, proposal, payload, actor);
 	if (proposal.operation === "supersede_claim_value") {
 		return applySupersedeClaimValue(db, proposal.agent_id, proposal, payload);
 	}

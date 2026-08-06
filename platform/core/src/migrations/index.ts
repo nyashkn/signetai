@@ -112,6 +112,7 @@ import { up as semanticMemoryKind } from "./103-semantic-memory-kind";
 import { up as derivedMemoryProvenance } from "./104-derived-memory-provenance";
 import { up as agentScopedEntityName } from "./105-agent-scoped-entity-name";
 import { up as principalIdentity } from "./106-principal-identity";
+import { up as entityMergeLineage } from "./107-entity-merge-lineage";
 
 // -- Public interface consumed by Database.init() --
 
@@ -995,6 +996,14 @@ export const MIGRATIONS: readonly Migration[] = [
 				{ table: "entity_aliases", column: "org_entity_id", optional: true },
 				{ table: "agents", column: "principal_entity_id", optional: true },
 			],
+		},
+	},
+	{
+		version: 107,
+		name: "entity-merge-lineage",
+		up: entityMergeLineage,
+		artifacts: {
+			tables: ["entity_merge_lineage"],
 		},
 	},
 ];

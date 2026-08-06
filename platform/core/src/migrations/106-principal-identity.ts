@@ -1,10 +1,15 @@
 import type { MigrationDb } from "./index";
 
 function hasTable(db: MigrationDb, table: string): boolean {
+	// `.get()` answers `null` for no row, not `undefined` — a `!== undefined`
+	// guard is always true, so this reported every table as present and the
+	// migration silently did nothing. Same shape as the `hasIndexedBody` defect
+	// in the email connector.
 	const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as
 		| { name: string }
+		| null
 		| undefined;
-	return row !== undefined;
+	return row !== undefined && row !== null;
 }
 
 function hasColumn(db: MigrationDb, table: string, column: string): boolean {

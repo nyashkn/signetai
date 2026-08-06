@@ -1419,6 +1419,44 @@ describe("ontology proposals", () => {
 		expect(survivors).toEqual({ dependency: 1, relation: 1 });
 	});
 
+	it("records enough lineage to reconstruct what a merge consumed", () => {
+		insertEntity("ent-keep", "Matt West", "matt west", "ant", 5, false, "person");
+		insertEntity("ent-drop", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 2, false, "person");
+		insertEntity("ent-msg", "Sales Cycle Time", "sales cycle time", "ant", 1, false, "artifact");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_dependencies (id, source_entity_id, target_entity_id, dependency_type, reason, agent_id, created_at, updated_at)
+				 VALUES ('dep-authored', 'ent-msg', 'ent-drop', 'related_to', 'user-asserted', 'ant', datetime('now'), datetime('now'))`,
+			).run();
+		});
+
+		const merge = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: { target_entity_id: "ent-keep", source_entity_ids: ["ent-drop"], force: true },
+		});
+		expect(applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: merge.id, actor: "test" }).status).toBe(
+			"applied",
+		);
+
+		const lineage = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT * FROM entity_merge_lineage WHERE agent_id = 'ant'").all() as Array<Record<string, unknown>>,
+		);
+		expect(lineage).toHaveLength(1);
+		const row = lineage[0];
+		expect(row?.source_entity_id).toBe("ent-drop");
+		expect(row?.target_entity_id).toBe("ent-keep");
+		expect(row?.source_name).toBe("westmatt81@gmail.com");
+		expect(row?.proposal_id).toBe(merge.id);
+		expect(row?.actor).toBe("test");
+
+		// The edge is the part attribution cannot be rebuilt without: after the
+		// merge it points at the target and is indistinguishable from its own.
+		expect(JSON.parse(String(row?.moved_json)).dependencyIds).toEqual(["dep-authored"]);
+		expect(JSON.parse(String(row?.source_row_json)).canonical_name).toBe("westmatt81@gmail.com");
+	});
+
 	it("applies ID-first merge_entities when entity names are ambiguous", () => {
 		const target = createOntologyProposal(getDbAccessor(), {
 			agentId: "ant",
