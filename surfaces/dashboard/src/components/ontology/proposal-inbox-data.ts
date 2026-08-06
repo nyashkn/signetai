@@ -1,4 +1,4 @@
-import type { OntologyProposalRecord } from "$lib/api";
+import type { OntologyProposalRecord } from "@/lib/ontology-api";
 
 /**
  * Proposal payloads are per-operation `Record<string, unknown>` — the daemon

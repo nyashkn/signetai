@@ -1,6 +1,5 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
-import type { OntologyProposalRecord } from "$lib/api";
+import type { OntologyProposalRecord } from "@/lib/ontology-api";
 import { proposalEvidenceLines, proposalHeadline } from "./proposal-inbox-data";
 
 function proposal(overrides: Partial<OntologyProposalRecord>): OntologyProposalRecord {

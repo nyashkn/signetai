@@ -1,6 +1,5 @@
-// @ts-nocheck
 import { describe, expect, it } from "bun:test";
-import type { TouchedItemRecord } from "$lib/api";
+import type { TouchedItemRecord } from "@/lib/ontology-api";
 import { groupTouchedBySource, touchedTitle } from "./identity-panel-data";
 
 function item(overrides: Partial<TouchedItemRecord>): TouchedItemRecord {

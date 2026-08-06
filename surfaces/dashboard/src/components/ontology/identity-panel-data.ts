@@ -1,4 +1,4 @@
-import type { TouchedItemRecord } from "$lib/api";
+import type { TouchedItemRecord } from "@/lib/ontology-api";
 
 /**
  * Connector-minted entities are named `<subject> - source:email:<hash>:document:<uri>`

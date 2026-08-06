@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useAsync } from "@/lib/use-async";
 import { cn } from "@/lib/utils";
+import { IdentitySection } from "@/components/ontology/identity-section";
+import { ProposalInbox } from "@/components/ontology/proposal-inbox";
 import type { GraphSceneData, GraphSceneHandle, SceneEdge, SceneNode } from "@/lib/graph-scene";
 
 const LEGEND = [
@@ -40,6 +42,14 @@ export function GraphView() {
 	);
 	const stats = useAsync(() => api.getKnowledgeStats(), { intervalMs: 30_000 }).data;
 	const sources = useAsync(() => api.getSources(), { intervalMs: 30_000 }).data?.sources;
+	// Ontology routes are per-agent; the daemon's own id is the only one the
+	// dashboard ever addresses, so it is read rather than chosen.
+	const agentId = useAsync(() => api.getStatus(), {}).data?.agentId ?? "default";
+	const [inboxOpen, setInboxOpen] = useState(false);
+	// Each panel invalidates the other: an applied merge rewrites the aliases the
+	// identity section just read, and a merge queued there is a new queue row.
+	const [identityReload, setIdentityReload] = useState(0);
+	const [inboxReload, setInboxReload] = useState(0);
 	const [legendOpen, setLegendOpen] = useState(false);
 	const [detail, setDetail] = useState<EntityDetail | null>(null);
 	const [responded, setResponded] = useState(false);
@@ -256,6 +266,23 @@ export function GraphView() {
 				</label>
 			</div>
 
+			{/* review queue toggle — merges are the one op that never self-applies */}
+			<button
+				type="button"
+				className="graph-inbox-btn"
+				aria-expanded={inboxOpen}
+				onClick={() => setInboxOpen((open) => !open)}
+			>
+				Review queue
+			</button>
+			<ProposalInbox
+				key={inboxReload}
+				agentId={agentId}
+				open={inboxOpen}
+				onClose={() => setInboxOpen(false)}
+				onDecided={() => setIdentityReload((n) => n + 1)}
+			/>
+
 			{/* floating legend gear + popover */}
 			<button
 				type="button"
@@ -340,6 +367,16 @@ export function GraphView() {
 									</div>
 								</div>
 							)}
+							{/* Keyed on the decision counter: an applied merge rewrites the
+							    aliases this section already read, and a remount is a cheaper
+							    refresh contract than threading a reload token through. */}
+							<IdentitySection
+								key={`${detail.id}:${identityReload}`}
+								agentId={agentId}
+								entityId={detail.id}
+								entityName={detail.name}
+								onQueuedMerge={() => setInboxReload((n) => n + 1)}
+							/>
 							<div className={cn("gr-acc", logOpen && "open")}>
 								<button type="button" className="gr-acc-trigger" onClick={() => setLogOpen((open) => !open)}>
 									<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>

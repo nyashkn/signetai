@@ -13,8 +13,10 @@
 
 const API_BASE = "";
 
-/** Appends an optional API key/auth header if one is stored (dashboard auth). */
-function authHeaders(): HeadersInit {
+/** Appends an optional API key/auth header if one is stored (dashboard auth).
+ *  Exported so sibling clients (ontology-api.ts) authenticate identically
+ *  without re-implementing the token lookup. */
+export function authHeaders(): HeadersInit {
 	const token = typeof localStorage !== "undefined" ? localStorage.getItem("signet-token") : null;
 	return token ? { Authorization: `Bearer ${token}` } : {};
 }
