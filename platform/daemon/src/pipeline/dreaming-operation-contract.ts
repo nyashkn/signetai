@@ -47,11 +47,7 @@ export const DREAMING_ONTOLOGY_PAYLOAD_SCHEMAS = {
 		// `z.object({}).catchall(...)` rather than `z.record(...)`: a record emits
 		// `propertyNames`, which OpenAI rejects outright, so the whole tool
 		// catalogue becomes unusable on that provider. Same shape on the wire.
-		details: z
-			.object({})
-			.catchall(z.string())
-			.describe("Inspection facts about the flagged target.")
-			.optional(),
+		details: z.object({}).catchall(z.string()).describe("Inspection facts about the flagged target.").optional(),
 		priority: z.number().finite().min(0).max(100).describe("Priority of the flag (0-100).").optional(),
 	}),
 	archive_entity: payload({ target: entityId, ...reasonField }),

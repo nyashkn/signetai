@@ -300,7 +300,10 @@ describe("interactive semantic mutation cutover", () => {
 			});
 			expect(res.status).toBe(409);
 			const body = (await res.json()) as { readonly error: string };
-			expect(body.error).toBe("alias already exists");
+			// The 409 names the current holder: one handle resolves to one entity per
+			// agent, so the caller's next move is to unlink it from *that* entity,
+			// and "alias already exists" leaves them with nowhere to go.
+			expect(body.error).toContain("alias already held by");
 		});
 
 		it("DELETE /api/ontology/entities/:id/aliases/:aliasId archives and returns the item", async () => {

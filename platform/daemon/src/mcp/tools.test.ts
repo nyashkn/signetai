@@ -650,7 +650,10 @@ describe("createMcpServer", () => {
 		});
 
 		expect(cap.url).toBe("http://localhost:3850/api/dream/operations");
-		expect(JSON.parse(cap.body ?? "{}")).toMatchObject({ agent_id: "agent-a", operations: [{ operation: "create_entity" }] });
+		expect(JSON.parse(cap.body ?? "{}")).toMatchObject({
+			agent_id: "agent-a",
+			operations: [{ operation: "create_entity" }],
+		});
 		expect(result.isError).toBeUndefined();
 	});
 

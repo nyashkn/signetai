@@ -357,16 +357,20 @@ describe("listKnowledgeEntities (issue #515)", () => {
 		seedEntity("e-matt", "Matt West");
 		seedEntity("e-org", "Dock Blocks", { entityType: "organization" });
 
-		const created = createEntityAlias(getDbAccessor(), {
+		// Alias writes go through the audited operation now — upstream retired the
+		// direct writer — so this also asserts the kind and org survive that path.
+		applyOntologyOperation(getDbAccessor(), {
 			agentId: "default",
-			entityId: "e-matt",
-			alias: "+1 555 0100",
-			aliasKind: "phone",
-			orgEntityId: "e-org",
-			source: "operator",
+			actor: "operator",
+			operation: "create_entity_alias",
+			payload: {
+				entity_id: "e-matt",
+				alias: "+1 555 0100",
+				alias_kind: "phone",
+				org_entity_id: "e-org",
+				source: "operator",
+			},
 		});
-		expect(created.aliasKind).toBe("phone");
-		expect(created.orgEntityId).toBe("e-org");
 
 		const [listed] = listEntityAliases(getDbAccessor(), { agentId: "default", entityId: "e-matt" });
 		expect(listed?.aliasKind).toBe("phone");
@@ -382,12 +386,16 @@ describe("listKnowledgeEntities (issue #515)", () => {
 		// entity_aliases.org_entity_id declares REFERENCES, but nothing in this repo
 		// sets PRAGMA foreign_keys = ON, so the constraint never fires. Checked here.
 		expect(() =>
-			createEntityAlias(getDbAccessor(), {
+			applyOntologyOperation(getDbAccessor(), {
 				agentId: "default",
-				entityId: "e-matt",
-				alias: "matt@dock-blocks.com",
-				aliasKind: "email",
-				orgEntityId: "e-missing",
+				actor: "operator",
+				operation: "create_entity_alias",
+				payload: {
+					entity_id: "e-matt",
+					alias: "matt@dock-blocks.com",
+					alias_kind: "email",
+					org_entity_id: "e-missing",
+				},
 			}),
 		).toThrow("Organization entity not found");
 	});
@@ -400,12 +408,16 @@ describe("listKnowledgeEntities (issue #515)", () => {
 
 		seedEntity("e-addr", "westmatt81@gmail.com", { entityType: "person", mentions: 9 });
 		seedEntity("e-name", "Matt West", { entityType: "person", mentions: 3 });
-		createEntityAlias(getDbAccessor(), {
+		applyOntologyOperation(getDbAccessor(), {
 			agentId: "default",
-			entityId: "e-addr",
-			alias: "Matt West",
-			aliasKind: "display_name",
-			source: "To: header",
+			actor: "operator",
+			operation: "create_entity_alias",
+			payload: {
+				entity_id: "e-addr",
+				alias: "Matt West",
+				alias_kind: "display_name",
+				source: "To: header",
+			},
 		});
 
 		const byId = new Map(

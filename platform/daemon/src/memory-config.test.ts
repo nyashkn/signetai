@@ -209,7 +209,6 @@ describe("loadMemoryConfig", () => {
 		expect(second.pipelineV2.graph.enabled).toBe(true);
 	});
 
-
 	it("loads embedding prompt-submit timeout from agent.yaml", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(
