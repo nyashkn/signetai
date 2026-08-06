@@ -74,6 +74,8 @@ function rowToEntityAlias(r: Record<string, unknown>): EntityAlias {
 		agentId: r.agent_id as string,
 		alias: r.alias as string,
 		canonicalAlias: r.canonical_alias as string,
+		aliasKind: typeof r.alias_kind === "string" ? r.alias_kind : null,
+		orgEntityId: typeof r.org_entity_id === "string" ? r.org_entity_id : null,
 		confidence: typeof r.confidence === "number" ? r.confidence : 1,
 		source: typeof r.source === "string" ? r.source : null,
 		status: r.status === "archived" ? "archived" : "active",
@@ -1027,6 +1029,8 @@ export function createEntityAlias(
 		readonly agentId: string;
 		readonly entityId: string;
 		readonly alias: string;
+		readonly aliasKind?: string | null;
+		readonly orgEntityId?: string | null;
 		readonly confidence?: number;
 		readonly source?: string | null;
 	},
@@ -1047,16 +1051,64 @@ export function createEntityAlias(
 			.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status, 'active') = 'active'")
 			.get(params.entityId, params.agentId) as { id: string } | undefined;
 		if (!entity) throw new Error("Entity not found");
+		// org_entity_id declares REFERENCES entities(id), but nothing in this repo
+		// turns foreign keys on, so the constraint is decorative. Check it here or a
+		// typo silently writes an org pointer that resolves to nothing forever.
+		if (params.orgEntityId) {
+			const org = db
+				.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status, 'active') = 'active'")
+				.get(params.orgEntityId, params.agentId) as { id: string } | undefined;
+			if (!org) throw new Error("Organization entity not found");
+		}
 		db.prepare(
 			`INSERT INTO entity_aliases
-			 (id, entity_id, agent_id, alias, canonical_alias, confidence, source, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		).run(id, params.entityId, params.agentId, alias, canonical, confidence, params.source ?? null, ts, ts);
+			 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, org_entity_id, confidence, source,
+			  status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		).run(
+			id,
+			params.entityId,
+			params.agentId,
+			alias,
+			canonical,
+			params.aliasKind ?? null,
+			params.orgEntityId ?? null,
+			confidence,
+			params.source ?? null,
+			ts,
+			ts,
+		);
 		const row = db.prepare("SELECT * FROM entity_aliases WHERE id = ? AND agent_id = ?").get(id, params.agentId) as
 			| Record<string, unknown>
 			| undefined;
 		if (!row) throw new Error("Alias not found after insert");
 		return rowToEntityAlias(row);
+	});
+}
+
+/**
+ * Who currently answers to this handle. Exists so a 409 can name the holder:
+ * "alias already exists" leaves the caller with no next move, and the next move
+ * (unlink it from that entity, or accept they are different people) depends
+ * entirely on who has it.
+ */
+export function findAliasHolder(
+	accessor: DbAccessor,
+	params: { readonly agentId: string; readonly alias: string },
+): { readonly entityId: string; readonly name: string } | null {
+	const canonical = toCanonicalName(params.alias);
+	if (canonical.length === 0) return null;
+	return accessor.withReadDb((db) => {
+		const row = db
+			.prepare(
+				`SELECT e.id AS entity_id, e.name AS name
+				 FROM entity_aliases a
+				 JOIN entities e ON e.id = a.entity_id
+				 WHERE a.agent_id = ? AND a.canonical_alias = ? AND a.status = 'active'
+				 LIMIT 1`,
+			)
+			.get(params.agentId, canonical) as { entity_id: string; name: string } | undefined;
+		return row ? { entityId: row.entity_id, name: row.name } : null;
 	});
 }
 

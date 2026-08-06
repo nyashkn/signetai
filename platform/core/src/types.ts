@@ -711,6 +711,15 @@ export interface EntityAlias {
 	readonly agentId: string;
 	readonly alias: string;
 	readonly canonicalAlias: string;
+	/**
+	 * What kind of handle this is — email, github_login, phone, display_name.
+	 * Plain string for the same reason `Entity.entityType` is: the column is TEXT
+	 * and the vocabulary (`ALIAS_KINDS`, daemon-side) is validated at the route
+	 * boundary rather than pinned in a shared type every writer must import.
+	 */
+	readonly aliasKind: string | null;
+	/** Which organization the person was acting for when they used this handle. */
+	readonly orgEntityId: string | null;
 	readonly confidence: number;
 	readonly source: string | null;
 	readonly status: OntologyRowStatus;

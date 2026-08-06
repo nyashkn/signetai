@@ -51,6 +51,8 @@ interface EntityAliasItem {
 	readonly id?: string;
 	readonly alias?: string;
 	readonly canonicalAlias?: string;
+	readonly aliasKind?: string | null;
+	readonly orgEntityId?: string | null;
 	readonly confidence?: number;
 	readonly source?: string | null;
 	readonly status?: string;
@@ -548,7 +550,10 @@ function printEntityAliases(data: unknown): void {
 	for (const item of items) {
 		const status = item.status ? chalk.dim(` ${item.status}`) : "";
 		const confidence = typeof item.confidence === "number" ? chalk.dim(` · ${item.confidence.toFixed(2)}`) : "";
-		console.log(`  ${chalk.cyan(item.alias ?? "unknown")} ${chalk.dim(item.id ?? "unknown")}${status}${confidence}`);
+		const kind = item.aliasKind ? chalk.dim(` [${item.aliasKind}]`) : "";
+		console.log(
+			`  ${chalk.cyan(item.alias ?? "unknown")}${kind} ${chalk.dim(item.id ?? "unknown")}${status}${confidence}`,
+		);
 		if (item.source) console.log(chalk.dim(`    source ${item.source}`));
 	}
 	console.log();
@@ -1397,6 +1402,8 @@ export function registerOntologyCommands(program: Command, deps: OntologyDeps): 
 			.description("Add an alias for an entity id")
 			.argument("<entity-id>")
 			.argument("<alias>")
+			.option("--kind <kind>", "Handle kind: email, github_login, clickup_member, discord_id, phone, display_name")
+			.option("--org <entity-id>", "Organization entity this handle belongs to")
 			.option("--confidence <n>", "Alias confidence 0..1", Number.parseFloat)
 			.option("--source <text>", "Alias source label"),
 	).action(async (entityId: string, aliasValue: string, options) => {
@@ -1409,6 +1416,8 @@ export function registerOntologyCommands(program: Command, deps: OntologyDeps): 
 			`/api/ontology/entities/${encodeURIComponent(entityId)}/aliases${query ? `?${query}` : ""}`,
 			{
 				alias: aliasValue,
+				alias_kind: options.kind,
+				org_entity_id: options.org,
 				confidence: options.confidence,
 				source: options.source,
 			},

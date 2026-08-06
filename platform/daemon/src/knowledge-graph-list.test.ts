@@ -346,6 +346,48 @@ describe("listKnowledgeEntities (issue #515)", () => {
 		expect(listEntityAliases(getDbAccessor(), { agentId: "default", entityId: "e-signet" })).toHaveLength(0);
 	});
 
+	test("alias kind and organization survive the round trip", () => {
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("e-matt", "Matt West");
+		seedEntity("e-org", "Dock Blocks", { entityType: "organization" });
+
+		const created = createEntityAlias(getDbAccessor(), {
+			agentId: "default",
+			entityId: "e-matt",
+			alias: "+1 555 0100",
+			aliasKind: "phone",
+			orgEntityId: "e-org",
+			source: "operator",
+		});
+		expect(created.aliasKind).toBe("phone");
+		expect(created.orgEntityId).toBe("e-org");
+
+		const [listed] = listEntityAliases(getDbAccessor(), { agentId: "default", entityId: "e-matt" });
+		expect(listed?.aliasKind).toBe("phone");
+		expect(listed?.orgEntityId).toBe("e-org");
+	});
+
+	test("an alias cannot point at an organization that does not exist", () => {
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("e-matt", "Matt West");
+
+		// entity_aliases.org_entity_id declares REFERENCES, but nothing in this repo
+		// sets PRAGMA foreign_keys = ON, so the constraint never fires. Checked here.
+		expect(() =>
+			createEntityAlias(getDbAccessor(), {
+				agentId: "default",
+				entityId: "e-matt",
+				alias: "matt@dock-blocks.com",
+				aliasKind: "email",
+				orgEntityId: "e-missing",
+			}),
+		).toThrow("Organization entity not found");
+	});
+
 	test("builds a bounded constellation graph without loading every graph row", () => {
 		dbPath = makeDbPath();
 		initDbAccessor(dbPath);

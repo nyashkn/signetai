@@ -148,16 +148,28 @@ List aliases for an entity id. Query parameters: `agent_id` and `status`.
 ### POST /api/ontology/entities/:id/aliases
 
 Create an active alias for an entity id. Body parameters: `alias`,
-`confidence`, and `source`. `confidence` is clamped to `0..1` and defaults to
-`1.0`.
+`alias_kind`, `org_entity_id`, `confidence`, and `source`. `confidence` is
+clamped to `0..1` and defaults to `1.0`.
+
+`alias_kind` says what kind of handle this is, and must be one of `email`,
+`github_login`, `clickup_member`, `discord_id`, `phone`, `display_name`. An
+unrecognised kind returns `400`. `org_entity_id` records which organization the
+person was acting for when they used the handle; it must name an existing
+entity or the request returns `404`.
 
 ```json
 {
-  "alias": "SignetAI",
+  "alias": "+1 555 0100",
+  "alias_kind": "phone",
+  "org_entity_id": "entity_dock_blocks",
   "confidence": 0.95,
   "source": "operator"
 }
 ```
+
+One handle resolves to one entity per agent. Claiming an alias that another
+entity already holds returns `409` naming the current holder — unlink it there
+first, or accept that the two are different people.
 
 ### DELETE /api/ontology/entities/:id/aliases/:aliasId
 

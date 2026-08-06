@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import { requirePermission } from "../auth";
 import { getDbAccessor } from "../db-accessor";
-import { archiveEntityAlias, createEntityAlias, listEntityAliases } from "../knowledge-graph";
+import { archiveEntityAlias, createEntityAlias, findAliasHolder, listEntityAliases } from "../knowledge-graph";
 import { getInferenceProviderOrNull } from "../llm";
 import {
 	OntologyAssertionError,
@@ -41,6 +41,7 @@ import {
 	proposeDuplicateEntityMerges,
 	rejectOntologyProposal,
 } from "../ontology-proposals";
+import { ALIAS_KINDS, isAliasKind } from "../principal-identity";
 import { authConfig } from "./state";
 import { parseBoundedInt, resolveScopedAgentId } from "./utils";
 
@@ -198,19 +199,34 @@ export function registerOntologyRoutes(app: Hono): void {
 		const body = await readJsonRecord(c);
 		const alias = readString(body, "alias");
 		if (!alias) return c.json({ error: "alias is required" }, 400);
+		const aliasKind = readString(body, "alias_kind");
+		if (aliasKind && !isAliasKind(aliasKind)) {
+			return c.json({ error: `alias_kind must be one of: ${ALIAS_KINDS.join(", ")}` }, 400);
+		}
 		try {
 			const item = createEntityAlias(getDbAccessor(), {
 				agentId: scoped.agentId,
 				entityId: c.req.param("id"),
 				alias,
+				aliasKind: aliasKind ?? null,
+				orgEntityId: readString(body, "org_entity_id") ?? null,
 				confidence: readNumber(body, "confidence"),
 				source: readString(body, "source") ?? null,
 			});
 			return c.json({ item }, 201);
 		} catch (err) {
 			const message = messageForError(err);
-			if (message.includes("UNIQUE")) return c.json({ error: "alias already exists" }, 409);
-			if (message === "Entity not found") return c.json({ error: message }, 404);
+			// One handle resolves to one entity per agent (migration 077's unique
+			// index). A collision is the invariant holding, not a server fault — the
+			// caller has to unlink the current holder first.
+			if (message.includes("UNIQUE")) {
+				const holder = findAliasHolder(getDbAccessor(), { agentId: scoped.agentId, alias });
+				return c.json(
+					{ error: holder ? `alias already held by ${holder.name} (${holder.entityId})` : "alias already exists" },
+					409,
+				);
+			}
+			if (message.endsWith("not found")) return c.json({ error: message }, 404);
 			return c.json({ error: message }, 400);
 		}
 	});
