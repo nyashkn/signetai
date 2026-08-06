@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import { requirePermission } from "../auth";
 import { getDbAccessor } from "../db-accessor";
+import { type ResolvedActor, mayApplyOntologyOperation, resolveOntologyActor } from "../ontology-actor";
 import { findAliasHolder, listEntityAliases } from "../knowledge-graph";
 import { getInferenceProviderOrNull } from "../llm";
 import {
@@ -114,6 +115,21 @@ function resolveAgent(c: Context, requested: string | undefined): { agentId: str
 		return { agentId: scoped.agentId, response: c.json({ error: scoped.error }, 403) };
 	}
 	return { agentId: scoped.agentId };
+}
+
+/**
+ * The caller's identity for graph writes.
+ *
+ * A body field and a header are claims; a verified token is a fact. This is
+ * the one place that distinction is made, so no route has to remember it.
+ */
+function callerFor(c: Context, body: Readonly<Record<string, unknown>>): ResolvedActor {
+	return resolveOntologyActor({
+		claims: c.get("auth")?.claims ?? null,
+		headerActor: c.req.header("x-signet-actor") ?? null,
+		headerActorType: c.req.header("x-signet-actor-type") ?? null,
+		bodyActor: readString(body, "actor") ?? readString(body, "created_by"),
+	});
 }
 
 export function registerOntologyRoutes(app: Hono): void {
@@ -615,11 +631,12 @@ export function registerOntologyRoutes(app: Hono): void {
 		if (!operation) return c.json({ error: "operation is required" }, 400);
 		const payload = asRecord(body.payload);
 		if (Object.keys(payload).length === 0) return c.json({ error: "payload object is required" }, 400);
+		const caller = callerFor(c, body);
 		try {
 			return c.json(
 				applyOntologyOperation(getDbAccessor(), {
 					agentId: scoped.agentId,
-					actor: readString(body, "actor") ?? c.req.header("x-signet-actor") ?? "operator",
+					actor: caller.actor,
 					operation,
 					payload,
 					reason: readString(body, "reason") ?? readString(body, "rationale"),
@@ -631,7 +648,11 @@ export function registerOntologyRoutes(app: Hono): void {
 					sourcePath: readString(body, "source_path") ?? null,
 					sourceRoot: readString(body, "source_root") ?? null,
 					dryRun: readBoolean(body, "dry_run") ?? false,
-					propose: readBoolean(body, "propose") ?? false,
+					// A caller who may not apply a destructive operation does not get an
+					// error, it gets a proposal. Refusing outright would leave an agent
+					// that spotted a real duplicate with nowhere to put it, and the
+					// operator with nothing to review.
+					propose: (readBoolean(body, "propose") ?? false) || !mayApplyOntologyOperation(caller, operation),
 				}),
 			);
 		} catch (err) {
@@ -762,12 +783,23 @@ export function registerOntologyRoutes(app: Hono): void {
 		const body = await readJsonRecord(c);
 		const scoped = resolveAgent(c, c.req.query("agent_id") ?? readString(body, "agent_id"));
 		if (scoped.response) return scoped.response;
+		const caller = callerFor(c, body);
+		// Deciding a pending proposal is the operator's act by definition. An agent
+		// that could approve its own proposal would make the queue ceremony rather
+		// than review — this is the one place a refusal is right, because the work
+		// is already queued and nothing is lost by saying no.
+		if (!caller.mayApplyDestructive) {
+			return c.json(
+				{ error: `${caller.role} may propose but not decide; an operator applies this from the review queue` },
+				403,
+			);
+		}
 		try {
 			return c.json(
 				applyOntologyProposal(getDbAccessor(), {
 					agentId: scoped.agentId,
 					id: c.req.param("id"),
-					actor: readString(body, "actor") ?? c.req.header("x-signet-actor") ?? "operator",
+					actor: caller.actor,
 				}),
 			);
 		} catch (err) {
