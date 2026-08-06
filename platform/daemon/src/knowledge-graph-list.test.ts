@@ -388,6 +388,35 @@ describe("listKnowledgeEntities (issue #515)", () => {
 		).toThrow("Organization entity not found");
 	});
 
+	test("a listed entity says what it resolves with", () => {
+		// Browsing is where linking would otherwise look broken: both rows stay in
+		// the table, so without this the list shows two Matts as unrelated.
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("e-addr", "westmatt81@gmail.com", { entityType: "person", mentions: 9 });
+		seedEntity("e-name", "Matt West", { entityType: "person", mentions: 3 });
+		createEntityAlias(getDbAccessor(), {
+			agentId: "default",
+			entityId: "e-addr",
+			alias: "Matt West",
+			aliasKind: "display_name",
+			source: "To: header",
+		});
+
+		const byId = new Map(
+			listKnowledgeEntities(getDbAccessor(), { agentId: "default", limit: 10, offset: 0 }).map((item) => [
+				item.entity.id,
+				item,
+			]),
+		);
+		expect(byId.get("e-addr")?.aliasCount).toBe(1);
+		expect(byId.get("e-addr")?.resolvesToEntityId).toBeNull();
+		// The row whose own name is someone else's handle is the one that needs the
+		// pointer — it is the spelling, not the identity.
+		expect(byId.get("e-name")?.resolvesToEntityId).toBe("e-addr");
+	});
+
 	test("builds a bounded constellation graph without loading every graph row", () => {
 		dbPath = makeDbPath();
 		initDbAccessor(dbPath);

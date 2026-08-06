@@ -74,4 +74,63 @@ describe("knowledge graph hygiene report", () => {
 		);
 		expect(mentions.count).toBe(0);
 	});
+
+	test("reports two linked-but-unmerged rows as one identity", () => {
+		// Linking is how P9 says "these are the same person", and it leaves both
+		// rows in `entities` under different canonical names. A GROUP BY
+		// canonical_name cannot see that, so the graph reads as clean while
+		// holding two Matts.
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("ent-addr", "westmatt81@gmail.com", 9, "person");
+		seedEntity("ent-name", "Matt West", 3, "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status,
+				  created_at, updated_at)
+				 VALUES ('al-1', 'ent-addr', 'default', 'Matt West', 'matt west', 'display_name', 1.0,
+				         'To: header', 'active', '2026-04-19T00:00:00.000Z', '2026-04-19T00:00:00.000Z')`,
+			).run();
+		});
+
+		const report = getKnowledgeHygieneReport(getDbAccessor(), {
+			agentId: "default",
+			limit: 10,
+			memoryLimit: 10,
+		});
+
+		const linked = report.duplicateEntities.filter((group) => group.linkedBy === "alias");
+		expect(linked).toHaveLength(1);
+		expect(linked[0]?.ids.sort()).toEqual(["ent-addr", "ent-name"]);
+		expect(linked[0]?.canonicalName).toBe("matt west");
+	});
+
+	test("an archived alias is not a live duplicate", () => {
+		// Unlinking is the documented reversal. If an archived alias still reported,
+		// every undone link would come back as a permanent finding.
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("ent-addr", "westmatt81@gmail.com", 9, "person");
+		seedEntity("ent-name", "Matt West", 3, "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status,
+				  created_at, updated_at)
+				 VALUES ('al-1', 'ent-addr', 'default', 'Matt West', 'matt west', 'display_name', 1.0,
+				         'To: header', 'archived', '2026-04-19T00:00:00.000Z', '2026-04-19T00:00:00.000Z')`,
+			).run();
+		});
+
+		const report = getKnowledgeHygieneReport(getDbAccessor(), {
+			agentId: "default",
+			limit: 10,
+			memoryLimit: 10,
+		});
+
+		expect(report.duplicateEntities.filter((group) => group.linkedBy === "alias")).toHaveLength(0);
+	});
 });

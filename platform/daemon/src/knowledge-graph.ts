@@ -688,6 +688,15 @@ export interface KnowledgeEntityListItem {
 	readonly attributeCount: number;
 	readonly constraintCount: number;
 	readonly dependencyCount: number;
+	/** Active handles this entity answers to. */
+	readonly aliasCount: number;
+	/**
+	 * The entity this row is a spelling of, when its own name is an active alias
+	 * of a different entity. Linking without merging leaves both rows in the
+	 * table, so a list that ignores this shows two Matts and calls them
+	 * unrelated.
+	 */
+	readonly resolvesToEntityId: string | null;
 }
 
 export interface KnowledgeEntityDetail {
@@ -1566,7 +1575,17 @@ export function listKnowledgeEntities(
 						  AND COALESCE(src.status, 'active') = 'active'
 						  AND COALESCE(dst.status, 'active') = 'active'
 						  AND (dep.source_entity_id = e.id OR dep.target_entity_id = e.id)
-					) AS dependency_count
+					) AS dependency_count,
+					(
+						SELECT COUNT(*) FROM entity_aliases al
+						WHERE al.entity_id = e.id AND al.agent_id = e.agent_id AND al.status = 'active'
+					) AS alias_count,
+					(
+						SELECT al.entity_id FROM entity_aliases al
+						WHERE al.agent_id = e.agent_id AND al.status = 'active'
+						  AND al.canonical_alias = e.canonical_name AND al.entity_id != e.id
+						LIMIT 1
+					) AS resolves_to_entity_id
 				 FROM page p
 				 JOIN entities e ON e.id = p.id
 				 ORDER BY e.pinned DESC, e.pinned_at DESC, e.mentions DESC, e.updated_at DESC, e.name ASC`,
@@ -1579,6 +1598,8 @@ export function listKnowledgeEntities(
 			attributeCount: Number(row.attribute_count ?? 0),
 			constraintCount: Number(row.constraint_count ?? 0),
 			dependencyCount: Number(row.dependency_count ?? 0),
+			aliasCount: Number(row.alias_count ?? 0),
+			resolvesToEntityId: typeof row.resolves_to_entity_id === "string" ? row.resolves_to_entity_id : null,
 		}));
 	});
 }

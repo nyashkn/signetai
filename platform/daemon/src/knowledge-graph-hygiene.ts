@@ -60,6 +60,13 @@ export interface DuplicateEntityGroup {
 	readonly count: number;
 	readonly ids: string[];
 	readonly names: string[];
+	/**
+	 * How the rows were found to be one identity. `canonical_name` is the
+	 * original exact-string match; `alias` is a row whose name is another
+	 * entity's active handle — the same person, different spellings, and
+	 * invisible to a `GROUP BY canonical_name`.
+	 */
+	readonly linkedBy: "canonical_name" | "alias";
 }
 
 export interface AttributeHygieneSummary {
@@ -185,6 +192,43 @@ export function getKnowledgeHygieneReport(
 			count: row.count,
 			ids: row.ids?.split("\u001f") ?? [],
 			names: row.names?.split("\u001f") ?? [],
+			linkedBy: "canonical_name" as const,
+		}));
+
+		// Linked-but-unmerged identities. P9 makes linking the normal way to say
+		// "these are the same person", and a link leaves both rows in `entities`
+		// under different canonical names — so the query above cannot see them,
+		// and the graph reads as clean while holding two Matts.
+		const aliasLinkedEntities = (
+			db
+				.prepare(
+					`SELECT a.canonical_alias AS canonical_name,
+					        holder.id AS holder_id, holder.name AS holder_name,
+					        other.id AS other_id, other.name AS other_name
+					 FROM entity_aliases a
+					 JOIN entities holder ON holder.id = a.entity_id AND holder.agent_id = a.agent_id
+					 JOIN entities other ON other.canonical_name = a.canonical_alias
+					   AND other.agent_id = a.agent_id AND other.id != a.entity_id
+					 WHERE a.agent_id = ?
+					   AND a.status = 'active'
+					   AND COALESCE(holder.status, 'active') = 'active'
+					   AND COALESCE(other.status, 'active') = 'active'
+					 ORDER BY a.canonical_alias ASC
+					 LIMIT ?`,
+				)
+				.all(opts.agentId, limit) as Array<{
+				canonical_name: string;
+				holder_id: string;
+				holder_name: string;
+				other_id: string;
+				other_name: string;
+			}>
+		).map((row) => ({
+			canonicalName: row.canonical_name,
+			count: 2,
+			ids: [row.holder_id, row.other_id],
+			names: [row.holder_name, row.other_name],
+			linkedBy: "alias" as const,
 		}));
 
 		const attributeSummary = db
@@ -246,7 +290,7 @@ export function getKnowledgeHygieneReport(
 		return {
 			agentId: opts.agentId,
 			suspiciousEntities,
-			duplicateEntities,
+			duplicateEntities: [...duplicateEntities, ...aliasLinkedEntities].slice(0, limit),
 			attributeSummary: {
 				missingGroupKey: attributeSummary.missingGroupKey ?? 0,
 				missingClaimKey: attributeSummary.missingClaimKey ?? 0,
