@@ -274,13 +274,131 @@ describe("createMcpServer", () => {
 		expect(names).toContain("secret_exec");
 		expect(names).toContain("secret_exec_status");
 		expect(names).toContain("session_bypass");
+		expect(names).toContain("identity_handles");
+		expect(names).toContain("identity_link");
+		expect(names).toContain("identity_unlink");
+		expect(names).toContain("ontology_propose");
 		for (const name of GRAPHIQ_TOOL_NAMES) {
 			expect(names).toContain(name);
 		}
 		for (const alias of GRAPHIQ_COMPAT_ALIASES) {
 			expect(names).toContain(alias);
 		}
-		expect(names.length).toBe(59);
+		expect(names.length).toBe(63);
+	});
+
+	describe("identity write tools", () => {
+		function mockFetchSequence(
+			responses: ReadonlyArray<{ status: number; body: unknown }>,
+			calls: Array<{ url: string; method: string; body: string | undefined }>,
+		): void {
+			let index = 0;
+			globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({
+					url: typeof input === "string" ? input : input.toString(),
+					method: init?.method ?? "GET",
+					body: init?.body as string | undefined,
+				});
+				const next = responses[Math.min(index, responses.length - 1)];
+				index += 1;
+				return new Response(JSON.stringify(next?.body ?? {}), {
+					status: next?.status ?? 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as unknown as typeof fetch;
+		}
+
+		it("links a handle by entity name, not by an id the caller has to know", async () => {
+			const calls: Array<{ url: string; method: string; body: string | undefined }> = [];
+			mockFetchSequence(
+				[
+					{ status: 200, body: { id: "ent-matt" } },
+					{ status: 200, body: { id: "ent-dock" } },
+					{ status: 201, body: { item: { id: "al-1", aliasKind: "phone" } } },
+				],
+				calls,
+			);
+
+			const result = await callTool(server, "identity_link", {
+				entity: "Matt West",
+				handle: "+1 555 0100",
+				kind: "phone",
+				organization: "Dock Blocks",
+				source: "operator: business card",
+			});
+
+			expect(result.isError).toBeUndefined();
+			const post = calls[2];
+			expect(post?.method).toBe("POST");
+			expect(post?.url).toContain("/api/ontology/entities/ent-matt/aliases");
+			const body = JSON.parse(post?.body ?? "{}") as Record<string, unknown>;
+			expect(body.alias).toBe("+1 555 0100");
+			expect(body.alias_kind).toBe("phone");
+			// The organization is a name too — resolved, not passed through raw, or the
+			// alias would point at a string that is not an entity id.
+			expect(body.org_entity_id).toBe("ent-dock");
+		});
+
+		it("unlinks by the handle itself rather than an alias id", async () => {
+			const calls: Array<{ url: string; method: string; body: string | undefined }> = [];
+			mockFetchSequence(
+				[
+					{ status: 200, body: { id: "ent-matt" } },
+					{ status: 200, body: { items: [{ id: "al-9", alias: "Matt", canonicalAlias: "matt" }] } },
+					{ status: 200, body: { item: { id: "al-9", status: "archived" } } },
+				],
+				calls,
+			);
+
+			const result = await callTool(server, "identity_unlink", { entity: "Matt West", handle: "MATT" });
+
+			expect(result.isError).toBeUndefined();
+			expect(calls[2]?.method).toBe("DELETE");
+			expect(calls[2]?.url).toContain("/api/ontology/entities/ent-matt/aliases/al-9");
+		});
+
+		it("reports a handle this entity does not answer to instead of deleting something else", async () => {
+			const calls: Array<{ url: string; method: string; body: string | undefined }> = [];
+			mockFetchSequence(
+				[
+					{ status: 200, body: { id: "ent-matt" } },
+					{ status: 200, body: { items: [{ id: "al-9", alias: "Matt", canonicalAlias: "matt" }] } },
+				],
+				calls,
+			);
+
+			const result = await callTool(server, "identity_unlink", { entity: "Matt West", handle: "Michael" });
+
+			expect(result.isError).toBe(true);
+			expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+		});
+
+		it("routes a destructive change to the proposal queue, never to apply", async () => {
+			const calls: Array<{ url: string; method: string; body: string | undefined }> = [];
+			mockFetchSequence([{ status: 201, body: { id: "prop-1", status: "pending" } }], calls);
+
+			await callTool(server, "ontology_propose", {
+				operation: "merge_entities",
+				payload: { target_entity_id: "ent-matt", source_entity_ids: ["ent-other"] },
+				rationale: "Same person, two rows.",
+				evidence: ["From: Matt West <matt@dock-blocks.com>"],
+			});
+
+			// A merge hard-deletes the source entity and there is no lineage table, so
+			// the one thing this tool must never do is reach /operations/apply.
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.url).toContain("/api/ontology/proposals");
+			expect(calls[0]?.url).not.toContain("/apply");
+			expect(calls[0]?.method).toBe("POST");
+		});
+
+		it("exposes no direct-apply path for merge, rename or archive", () => {
+			const names = getToolNames(server);
+			expect(names).not.toContain("merge_entities");
+			expect(names).not.toContain("identity_merge");
+			expect(names).not.toContain("ontology_apply");
+			expect(names.filter((name) => name.includes("apply"))).toEqual([]);
+		});
 	});
 
 	it("registers generic code tools when GraphIQ has an active project", async () => {

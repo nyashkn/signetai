@@ -151,6 +151,10 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"knowledge_expand",
 	"knowledge_what_touched",
 	"knowledge_trail",
+	"identity_handles",
+	"identity_link",
+	"identity_unlink",
+	"ontology_propose",
 	"knowledge_tree",
 	"knowledge_list_entities",
 	"knowledge_get_entity",
@@ -2072,6 +2076,191 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			if (agent_id !== undefined) params.set("agent_id", agent_id);
 			const result = await fetchDaemon<unknown>(baseUrl, `/api/knowledge/trail?${params.toString()}`);
 			if (!result.ok) return errorResult(`trail failed: ${result.error}`);
+			return textResult(result.data);
+		},
+	);
+
+	// -----------------------------------------------------------------------
+	// Identity writes
+	//
+	// An alias is additive and reversible (`status = 'archived'`), so it applies
+	// directly with its evidence recorded, per the apply-first doctrine in
+	// docs/specs/approved/ontology-proposal-loop.md. Destructive operations —
+	// merge, rename, archive — are deliberately unreachable from here except as a
+	// pending proposal through `ontology_propose`: a merge hard-deletes the source
+	// entity and there is no lineage table to undo it from.
+	// -----------------------------------------------------------------------
+
+	async function resolveEntityId(entity: string, agentId: string | undefined): Promise<string | null> {
+		const params = new URLSearchParams({ name: entity });
+		if (agentId !== undefined) params.set("agent_id", agentId);
+		const result = await fetchDaemon<{ id?: string }>(baseUrl, `/api/knowledge/navigation/entity?${params.toString()}`);
+		if (result.ok && typeof result.data?.id === "string") return result.data.id;
+		// Not a name we know. It may already be an id — the alias routes 404 on a
+		// bad one, which is a better error than "Entity not found" against a name
+		// the caller never supplied.
+		return entity.length > 0 ? entity : null;
+	}
+
+	server.registerTool(
+		"identity_handles",
+		{
+			title: "Identity Handles",
+			description:
+				"Every handle one person or organization answers to — email addresses, " +
+				"logins, phone numbers, display names — with the evidence that asserted " +
+				"each. Check this before linking: one handle resolves to one entity, so a " +
+				"handle someone else already holds will be refused.",
+			inputSchema: z.object({
+				entity: z.string().describe("Entity name or id, e.g. 'Matt West'"),
+				status: z.enum(["active", "archived", "all"]).optional().describe("Default active"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+		},
+		async ({ entity, status, agent_id }) => {
+			const entityId = await resolveEntityId(entity, agent_id);
+			if (entityId === null) return errorResult("entity is required");
+			const params = new URLSearchParams();
+			if (status !== undefined) params.set("status", status);
+			if (agent_id !== undefined) params.set("agent_id", agent_id);
+			const query = params.toString();
+			const result = await fetchDaemon<unknown>(
+				baseUrl,
+				`/api/ontology/entities/${encodeURIComponent(entityId)}/aliases${query ? `?${query}` : ""}`,
+			);
+			if (!result.ok) return errorResult(`identity_handles failed: ${result.error}`);
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"identity_link",
+		{
+			title: "Link Identity",
+			description:
+				"Record that a handle belongs to a person or organization, without merging " +
+				"anything. Both rows keep their own history and the handle resolves to the " +
+				"same identity from either spelling. Cite what asserted it in `source` — a " +
+				"literal mail header beats a guess, and the source is what a reviewer reads. " +
+				"Never link an organization's display name to a person, never a name under " +
+				"three characters, and never a handle another entity already holds.",
+			inputSchema: z.object({
+				entity: z.string().describe("Entity name or id the handle belongs to"),
+				handle: z.string().describe("The handle itself — an address, a login, a phone number, a spelling"),
+				kind: z
+					.enum(["email", "github_login", "clickup_member", "discord_id", "phone", "display_name"])
+					.describe("What kind of handle this is"),
+				source: z
+					.string()
+					.describe('Evidence for the pairing, e.g. "From: Matt West <matt@dock-blocks.com> in <CAO-UE0...>"'),
+				organization: z.string().optional().describe("Entity name or id of the org this handle belongs to"),
+				confidence: z.number().optional().describe("0..1, default 1.0"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({ entity, handle, kind, source, organization, confidence, agent_id }) => {
+			const entityId = await resolveEntityId(entity, agent_id);
+			if (entityId === null) return errorResult("entity is required");
+			const orgId = organization === undefined ? undefined : await resolveEntityId(organization, agent_id);
+			const params = new URLSearchParams();
+			if (agent_id !== undefined) params.set("agent_id", agent_id);
+			const query = params.toString();
+			const result = await fetchDaemon<unknown>(
+				baseUrl,
+				`/api/ontology/entities/${encodeURIComponent(entityId)}/aliases${query ? `?${query}` : ""}`,
+				{
+					method: "POST",
+					body: {
+						alias: handle,
+						alias_kind: kind,
+						org_entity_id: orgId ?? undefined,
+						confidence,
+						source,
+					},
+				},
+			);
+			if (!result.ok) return errorResult(`identity_link failed: ${result.error}`);
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"identity_unlink",
+		{
+			title: "Unlink Identity",
+			description:
+				"Archive a handle so it stops resolving to this entity. Reverses a link; it " +
+				"cannot reverse a merge, because a merge already deleted the other row.",
+			inputSchema: z.object({
+				entity: z.string().describe("Entity name or id currently holding the handle"),
+				handle: z.string().describe("The handle to detach, exactly as `identity_handles` lists it"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({ entity, handle, agent_id }) => {
+			const entityId = await resolveEntityId(entity, agent_id);
+			if (entityId === null) return errorResult("entity is required");
+			const scope = new URLSearchParams();
+			if (agent_id !== undefined) scope.set("agent_id", agent_id);
+			const query = scope.toString();
+			const listed = await fetchDaemon<{ items?: Array<{ id?: string; alias?: string; canonicalAlias?: string }> }>(
+				baseUrl,
+				`/api/ontology/entities/${encodeURIComponent(entityId)}/aliases${query ? `?${query}` : ""}`,
+			);
+			if (!listed.ok) return errorResult(`identity_unlink failed: ${listed.error}`);
+			const wanted = handle.trim().toLowerCase().replace(/\s+/g, " ");
+			const match = (listed.data?.items ?? []).find(
+				(item) => item.canonicalAlias === wanted || item.alias?.trim().toLowerCase() === wanted,
+			);
+			if (!match?.id) return errorResult(`${entity} does not answer to "${handle}"`);
+			const result = await fetchDaemon<unknown>(
+				baseUrl,
+				`/api/ontology/entities/${encodeURIComponent(entityId)}/aliases/${encodeURIComponent(match.id)}${
+					query ? `?${query}` : ""
+				}`,
+				{ method: "DELETE" },
+			);
+			if (!result.ok) return errorResult(`identity_unlink failed: ${result.error}`);
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"ontology_propose",
+		{
+			title: "Propose Ontology Change",
+			description:
+				"Queue a graph change for the operator to review. This is the only route to " +
+				"the destructive operations — `merge_entities` collapses two entities and " +
+				"hard-deletes one, `rename_entity` and `archive_entity` rewrite what a name " +
+				"resolves to — and none of them apply from here. Populate `evidence` with " +
+				"the literal text that justifies it; a proposal without citations is one an " +
+				"operator dismisses. To assert that two rows are the same person without " +
+				"deleting either, use `identity_link` instead.",
+			inputSchema: z.object({
+				operation: z
+					.string()
+					.describe("e.g. merge_entities, rename_entity, archive_entity, create_entity, add_claim_value"),
+				// Not z.record: it emits `propertyNames`, which OpenAI rejects outright.
+				payload: z
+					.object({})
+					.passthrough()
+					.describe("Operation payload, e.g. {target_entity_id, source_entity_ids}"),
+				rationale: z.string().describe("One line: why this is the same thing, or why it should change"),
+				evidence: z.array(z.unknown()).optional().describe("Literal quotes, message ids, file paths"),
+				confidence: z.number().optional().describe("0..1"),
+				agent_id: z.string().optional().describe("Agent scope, default default"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({ operation, payload, rationale, evidence, confidence, agent_id }) => {
+			const result = await fetchDaemon<unknown>(baseUrl, "/api/ontology/proposals", {
+				method: "POST",
+				body: { operation, payload, rationale, evidence, confidence, agent_id },
+			});
+			if (!result.ok) return errorResult(`ontology_propose failed: ${result.error}`);
 			return textResult(result.data);
 		},
 	);

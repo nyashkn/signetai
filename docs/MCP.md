@@ -498,6 +498,82 @@ Poll a queued `secret_exec` job and retrieve redacted output when it finishes.
 
 **Daemon endpoint:** `GET /api/secrets/exec/:jobId`
 
+### identity_handles
+
+Every handle an entity answers to, with the evidence that asserted each.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `entity` | string | yes | Entity name or id |
+| `status` | string | no | `active`, `archived`, or `all`. Default `active` |
+| `agent_id` | string | no | Agent scope |
+
+**Daemon endpoint:** `GET /api/ontology/entities/:id/aliases`
+
+### identity_link
+
+Record that a handle belongs to an entity. This is a link, not a merge: both
+rows keep their own history, and the handle resolves to the same identity from
+either spelling.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `entity` | string | yes | Entity name or id the handle belongs to |
+| `handle` | string | yes | Address, login, phone number, or spelling |
+| `kind` | string | yes | `email`, `github_login`, `clickup_member`, `discord_id`, `phone`, `display_name` |
+| `source` | string | yes | Evidence for the pairing — cite the literal header |
+| `organization` | string | no | Entity name or id of the org this handle belongs to |
+| `confidence` | number | no | `0..1`, default `1.0` |
+| `agent_id` | string | no | Agent scope |
+
+Applies immediately. An alias is additive and reversible, so it follows the
+apply-first rule in `docs/specs/approved/ontology-proposal-loop.md`. One handle
+resolves to one entity per agent, so a handle another entity already holds is
+refused with `409` naming the holder.
+
+**Daemon endpoint:** `POST /api/ontology/entities/:id/aliases`
+
+### identity_unlink
+
+Archive a handle so it stops resolving to an entity. Reverses a link; it cannot
+reverse a merge, because a merge already deleted the other row.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `entity` | string | yes | Entity name or id currently holding the handle |
+| `handle` | string | yes | The handle to detach |
+| `agent_id` | string | no | Agent scope |
+
+**Daemon endpoint:** `DELETE /api/ontology/entities/:id/aliases/:aliasId`
+
+### ontology_propose
+
+Queue a graph change for operator review. This is the only MCP route to the
+destructive operations — `merge_entities` hard-deletes the source entity and no
+lineage table exists to undo it, and `rename_entity` / `archive_entity` rewrite
+what a name resolves to. None of them apply from MCP.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `operation` | string | yes | e.g. `merge_entities`, `rename_entity`, `archive_entity` |
+| `payload` | object | yes | Operation payload |
+| `rationale` | string | yes | Why this is the same thing, or why it should change |
+| `evidence` | array | no | Literal quotes, message ids, file paths |
+| `confidence` | number | no | `0..1` |
+| `agent_id` | string | no | Agent scope |
+
+**Returns:** The created proposal, `status: "pending"`.
+
+**Daemon endpoint:** `POST /api/ontology/proposals`
+
 ### Optional GraphIQ Code Tools
 
 The MCP server registers generic GraphIQ code retrieval tools as stable tool
