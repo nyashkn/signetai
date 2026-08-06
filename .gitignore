@@ -44,10 +44,10 @@ Thumbs.db
 coverage/
 dogfood-output/
 dist/native/
-email*
-# `email*` is unanchored, so it silently swallows source files at any depth.
-# The email source connector lives here and must be tracked.
-!platform/daemon/src/email-*.ts
+# Anchored on purpose. Unanchored, `email*` matches at every depth and silently
+# swallows source files — it hid the entire email connector from git once, and a
+# file that is never staged looks exactly like a file that was never written.
+/email*
 node_modules/
 npm-debug.log*
 package-lock.json

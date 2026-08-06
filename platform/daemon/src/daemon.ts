@@ -1469,7 +1469,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 		});
 	}
 
-	if (!pipelinePaused && !memoryCfg.pipelineV2.mutationsFrozen) {
+	if (memoryCfg.dreaming.enabled && !pipelinePaused && !memoryCfg.pipelineV2.mutationsFrozen) {
 		try {
 			dreamingWorkerHandle = startDreamingWorker(getDbAccessor(), memoryCfg.dreaming, AGENTS_DIR, defaultAgentId, {
 				acpxMcp: {

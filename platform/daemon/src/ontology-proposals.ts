@@ -1611,11 +1611,18 @@ function mergeEntityEdges(db: WriteDb, agentId: string, sourceId: string, target
 		sourceId,
 		agentId,
 	);
-	db.prepare("DELETE FROM entity_dependencies WHERE source_entity_id = target_entity_id AND agent_id = ?").run(agentId);
+	// Only edges that just *became* self-loops belong to this merge, and the only
+	// id that can newly collapse onto itself is the target. The unscoped form
+	// ("every self-loop for this agent") deleted pre-existing rows no merge
+	// created — `relations` has no agent_id column at all, so its unscoped form
+	// reached across agents outright.
+	db.prepare(
+		"DELETE FROM entity_dependencies WHERE source_entity_id = ? AND target_entity_id = ? AND agent_id = ?",
+	).run(targetId, targetId, agentId);
 
 	db.prepare("UPDATE relations SET source_entity_id = ? WHERE source_entity_id = ?").run(targetId, sourceId);
 	db.prepare("UPDATE relations SET target_entity_id = ? WHERE target_entity_id = ?").run(targetId, sourceId);
-	db.prepare("DELETE FROM relations WHERE source_entity_id = target_entity_id").run();
+	db.prepare("DELETE FROM relations WHERE source_entity_id = ? AND target_entity_id = ?").run(targetId, targetId);
 	db.prepare(
 		"INSERT OR IGNORE INTO memory_entity_mentions (memory_id, entity_id) SELECT memory_id, ? FROM memory_entity_mentions WHERE entity_id = ?",
 	).run(targetId, sourceId);
@@ -1690,6 +1697,7 @@ function mergeEntityAliases(
 function applyMergeEntities(
 	db: WriteDb,
 	agentId: string,
+	proposal: ProposalRow,
 	payload: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
 	const sources = sourceMergeSpecs(payload);
@@ -1723,6 +1731,14 @@ function applyMergeEntities(
 		merged.push({ name: source.name, entityId: source.id, movedAspects, aliases });
 	}
 	if (merged.length === 0) throw new OntologyProposalError("No distinct source entities to merge", 400);
+	// Merge was the one operation that stamped nothing, so the surviving row
+	// carried no trace of the decision that consumed two others — the single
+	// most destructive write in the graph was also the least attributable.
+	db.prepare(
+		`UPDATE entities
+		 SET proposal_id = ?, proposal_evidence = ?, updated_at = datetime('now')
+		 WHERE id = ? AND agent_id = ?`,
+	).run(proposal.id, JSON.stringify(proposalAuditEvidence(proposal)), plan.target.id, agentId);
 	return {
 		targetEntityId: plan.target.id,
 		targetEntityName: plan.target.name,
@@ -2010,7 +2026,7 @@ function applyOperation(db: WriteDb, proposal: ProposalRow, actor: string): Read
 		return applyArchiveAspect(db, proposal.agent_id, proposal, payload, actor);
 	if (proposal.operation === "add_claim_value") return applyAddClaimValue(db, proposal.agent_id, proposal, payload);
 	if (proposal.operation === "set_claim_value") return applySetClaimValue(db, proposal.agent_id, proposal, payload);
-	if (proposal.operation === "merge_entities") return applyMergeEntities(db, proposal.agent_id, payload);
+	if (proposal.operation === "merge_entities") return applyMergeEntities(db, proposal.agent_id, proposal, payload);
 	if (proposal.operation === "supersede_claim_value") {
 		return applySupersedeClaimValue(db, proposal.agent_id, proposal, payload);
 	}

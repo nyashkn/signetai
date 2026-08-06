@@ -71,6 +71,7 @@ function isValidTimeZone(timeZone: string): boolean {
 }
 
 export const DEFAULT_DREAMING: DreamingConfig = {
+	enabled: true,
 	tokenThreshold: 100_000,
 	maxInterval: 6 * 60 * 60 * 1_000,
 	timeout: 600_000,
@@ -973,6 +974,7 @@ export function loadDreamingConfig(yaml: Record<string, unknown>): DreamingConfi
 	if (!raw) return structuredClone(DEFAULT_DREAMING);
 	const dd = DEFAULT_DREAMING;
 	return {
+		enabled: typeof raw.enabled === "boolean" ? raw.enabled : dd.enabled,
 		tokenThreshold: clampWarn("tokenThreshold", raw.tokenThreshold, 10_000, 1_000_000, dd.tokenThreshold),
 		maxInterval: clampWarn("maxInterval", raw.maxInterval, 5 * 60 * 1_000, 7 * 24 * 60 * 60 * 1_000, dd.maxInterval),
 		timeout: clampWarn("timeout", raw.timeout, 30_000, 1_800_000, dd.timeout),

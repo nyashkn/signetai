@@ -33,6 +33,19 @@ describe("loadDreamingConfig", () => {
 			7 * 24 * 60 * 60 * 1_000,
 		);
 	});
+
+	it("honours an explicit off switch", () => {
+		// `DreamingConfig` had no `enabled` field, so this key was dropped by the
+		// parser: the config file read as "dreaming is off" and the worker started
+		// regardless. A config key that silently means nothing is worse than one
+		// that errors, because it is indistinguishable from a working one.
+		expect(loadDreamingConfig({}).enabled).toBe(true);
+		expect(loadDreamingConfig({ memory: { dreaming: {} } }).enabled).toBe(true);
+		expect(loadDreamingConfig({ memory: { dreaming: { enabled: false } } }).enabled).toBe(false);
+		// Not a boolean is not an off switch — falling back to the default beats
+		// guessing what `enabled: "no"` was supposed to mean.
+		expect(loadDreamingConfig({ memory: { dreaming: { enabled: "false" } } }).enabled).toBe(true);
+	});
 });
 
 function makeTempAgentsDir(): string {

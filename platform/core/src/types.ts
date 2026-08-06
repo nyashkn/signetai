@@ -479,6 +479,13 @@ export interface PipelineReflectionsConfig {
 }
 
 export interface DreamingConfig {
+	/**
+	 * Dreaming owns every semantic write, so switching it off stops the graph
+	 * growing. Until this existed `memory.dreaming.enabled` was silently dropped
+	 * by the parser — the key read as "off" in the config file and the worker
+	 * started anyway.
+	 */
+	readonly enabled: boolean;
 	readonly tokenThreshold: number;
 	/** Maximum time that non-empty episodic evidence may wait below the token threshold. */
 	readonly maxInterval: number;

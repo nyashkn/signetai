@@ -1347,6 +1347,78 @@ describe("ontology proposals", () => {
 		]);
 	});
 
+	it("stamps the surviving entity with the proposal that consumed the others", () => {
+		insertEntity("ent-keep", "Matt West", "matt west", "ant", 5, false, "person");
+		insertEntity("ent-drop", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 2, false, "person");
+
+		const merge = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: { target_entity_id: "ent-keep", source_entity_ids: ["ent-drop"], force: true },
+			rationale: "Header-derived pairing.",
+			evidence: [{ quote: "From: Matt West <westmatt81@gmail.com>", source_id: "<abc@mail>" }],
+		});
+		expect(applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: merge.id, actor: "test" }).status).toBe(
+			"applied",
+		);
+
+		// Merge is the most destructive write in the graph and was the only
+		// operation that recorded nothing on the row it left behind.
+		const row = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT proposal_id, proposal_evidence FROM entities WHERE id = ?").get("ent-keep") as
+					| { proposal_id: string | null; proposal_evidence: string | null }
+					| undefined,
+		);
+		expect(row?.proposal_id).toBe(merge.id);
+		expect(JSON.parse(row?.proposal_evidence ?? "[]")).toEqual([
+			{ quote: "From: Matt West <westmatt81@gmail.com>", source_id: "<abc@mail>" },
+		]);
+	});
+
+	it("deletes only the self-loops this merge created", () => {
+		insertEntity("ent-keep", "Matt West", "matt west", "ant", 5, false, "person");
+		insertEntity("ent-drop", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 2, false, "person");
+		insertEntity("ent-other", "Unrelated", "unrelated", "ant", 1, false, "person");
+		insertEntity("ent-mine", "Other Agent Row", "other agent row", "bee", 1, false, "person");
+
+		// Pre-existing self-loops that no merge created. The unscoped DELETE took
+		// every self-loop for the agent, and `relations` has no agent_id column so
+		// its unscoped form reached across agents outright.
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_dependencies (id, source_entity_id, target_entity_id, dependency_type, reason, agent_id, created_at, updated_at)
+				 VALUES (?, ?, ?, 'related_to', 'user-asserted', ?, datetime('now'), datetime('now'))`,
+			).run("dep-self", "ent-other", "ent-other", "ant");
+			// `relations` carries no agent_id, which is exactly why the unscoped
+			// DELETE could not be filtered and reached other agents' rows.
+			db.prepare(
+				`INSERT INTO relations (id, source_entity_id, target_entity_id, relation_type, created_at)
+				 VALUES (?, ?, ?, 'related_to', datetime('now'))`,
+			).run("rel-other-agent", "ent-mine", "ent-mine");
+		});
+
+		const merge = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "merge_entities",
+			payload: { target_entity_id: "ent-keep", source_entity_ids: ["ent-drop"], force: true },
+		});
+		expect(applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: merge.id, actor: "test" }).status).toBe(
+			"applied",
+		);
+
+		const survivors = getDbAccessor().withReadDb((db) => ({
+			dependency: (
+				db.prepare("SELECT COUNT(*) AS n FROM entity_dependencies WHERE id = 'dep-self'").get() as {
+					n: number;
+				}
+			).n,
+			relation: (db.prepare("SELECT COUNT(*) AS n FROM relations WHERE id = 'rel-other-agent'").get() as { n: number })
+				.n,
+		}));
+		expect(survivors).toEqual({ dependency: 1, relation: 1 });
+	});
+
 	it("applies ID-first merge_entities when entity names are ambiguous", () => {
 		const target = createOntologyProposal(getDbAccessor(), {
 			agentId: "ant",
