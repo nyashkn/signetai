@@ -1,3 +1,4 @@
+import { IdentityBrief } from "@/components/ontology/identity-brief";
 import { Surface } from "@/components/ui/surface";
 import { type DailyReflection, api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -313,6 +314,11 @@ export function DailyBrief({
 					)}
 				</div>
 			)}
+
+			{/* Identity decisions the graph is waiting on. Renders nothing when the
+			    queue is empty — a permanently visible empty block trains the eye to
+			    skip the whole card. */}
+			<IdentityBrief agentId={agentId ?? "default"} />
 
 			{children}
 		</Surface>
