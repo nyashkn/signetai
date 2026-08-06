@@ -127,6 +127,39 @@ describe("display-name aliases from participants", () => {
 		expect(rows[0]?.entity_id).toBe("ent_kn");
 	});
 
+	it("resolves a linked-away spelling to its holder instead of re-minting it", () => {
+		// The next sync sees `Jui` again. Without this the row someone
+		// deliberately linked away comes back as its own person and starts
+		// accreting edges, so the link has to be redone after every sync forever.
+		insertEntity("ent_principal", "njui@pivotplanit.com", "njui@pivotplanit.com", "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES ('alias_jui', 'ent_principal', 'default', 'Jui', 'jui', 'display_name', 1.0, 'operator: dashboard', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			).run();
+		});
+
+		index([{ identifier: "Jui", edgeType: "authored_by", strength: 1, reason: "user-asserted: From header" }]);
+
+		const rows = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT id FROM entities WHERE agent_id = 'default' AND canonical_name = 'jui'").all() as Array<{
+					id: string;
+				}>,
+		);
+		expect(rows).toHaveLength(0);
+
+		const edges = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						"SELECT target_entity_id FROM entity_dependencies WHERE agent_id = 'default' AND dependency_type = 'authored_by'",
+					)
+					.all() as Array<{ target_entity_id: string }>,
+		);
+		expect(edges.map((row) => row.target_entity_id)).toEqual(["ent_principal"]);
+	});
+
 	it("does not alias a display name that merely repeats the address", () => {
 		expect(index([{ ...fromMatt, displayName: "matt@dock-blocks.com" }]).aliasesWritten).toBe(0);
 		expect(aliases()).toHaveLength(0);

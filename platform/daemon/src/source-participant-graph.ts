@@ -121,6 +121,30 @@ function upsertPerson(
 		return { id: existing.id, created: false, typeConflict: existing.entity_type !== "person" };
 	}
 
+	// A spelling already held as another entity's active alias belongs to that
+	// entity. Without this the next sync re-mints the row someone deliberately
+	// linked away — `Jui` comes back as its own person and starts accreting
+	// edges again, so the link has to be redone after every sync forever.
+	//
+	// Checked after the exact-canonical match, not before: an entity that owns
+	// the name outright is a stronger claim than one that merely answers to it.
+	const aliasHolder = db
+		.prepare(
+			`SELECT e.id, e.entity_type FROM entity_aliases a
+			 JOIN entities e ON e.id = a.entity_id AND e.agent_id = a.agent_id
+			 WHERE a.agent_id = ? AND a.canonical_alias = ? AND a.status = 'active'
+			   AND COALESCE(e.status, 'active') = 'active'
+			 LIMIT 1`,
+		)
+		.get(input.agentId, canonical) as { id: string; entity_type: string } | undefined;
+	if (aliasHolder) {
+		db.prepare("UPDATE entities SET mentions = COALESCE(mentions, 0) + 1, updated_at = ? WHERE id = ?").run(
+			now,
+			aliasHolder.id,
+		);
+		return { id: aliasHolder.id, created: false, typeConflict: aliasHolder.entity_type !== "person" };
+	}
+
 	const id = idFor(input.agentId, "person", canonical);
 	try {
 		db.prepare(
