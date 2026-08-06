@@ -113,6 +113,25 @@ describe("loadMemoryConfig", () => {
 		expect(loadMemoryConfig(disabledDir).search.temporal_prior_enabled).toBe(false);
 	});
 
+	it("hands each load its own nested config rather than the module defaults", () => {
+		// `{ ...DEFAULT_PIPELINE_V2 }` copies only the top level, so every caller
+		// shared one `graph` object with the defaults. A single
+		// `cfg.pipelineV2.graph.enabled = false` — which several suites do — then
+		// rewrote the default for the rest of the process, and later loads reported
+		// a value nobody configured. That is not a test artifact: any runtime
+		// caller adjusting a loaded config would corrupt the next load the same way.
+		const first = loadMemoryConfig(makeTempAgentsDir());
+		const second = loadMemoryConfig(makeTempAgentsDir());
+
+		// Asserted by identity rather than by mutating: the types are readonly, so
+		// the sharing itself is the only thing a well-typed caller can observe —
+		// and the sharing is the defect.
+		expect(first.pipelineV2.graph).not.toBe(DEFAULT_PIPELINE_V2.graph);
+		expect(first.pipelineV2.graph).not.toBe(second.pipelineV2.graph);
+		expect(first.pipelineV2.extraction).not.toBe(DEFAULT_PIPELINE_V2.extraction);
+		expect(second.pipelineV2.graph.enabled).toBe(true);
+	});
+
 	it("enables graph extraction writes by default", () => {
 		const agentsDir = makeTempAgentsDir();
 		const cfg = loadMemoryConfig(agentsDir);

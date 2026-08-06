@@ -462,7 +462,12 @@ function parseCommandConfig(raw: unknown): PipelineV2Config["extraction"]["comma
 export function loadPipelineConfig(yaml: Record<string, unknown>): ResolvedPipelineV2Config {
 	const mem = yaml.memory as Record<string, unknown> | undefined;
 	const raw = mem?.pipelineV2 as Record<string, unknown> | undefined;
-	if (!raw) return { ...DEFAULT_PIPELINE_V2 };
+	// Deep, not spread: a spread copies the top level and hands the caller the
+	// *same* `graph`/`extraction`/`worker` objects the defaults hold, so one
+	// caller writing `cfg.pipelineV2.graph.enabled = false` rewrites the default
+	// for every later load in the process. Measured: it silently disables graph
+	// work in unrelated suites for the rest of a `bun test` run.
+	if (!raw) return structuredClone(DEFAULT_PIPELINE_V2);
 
 	// Read nested sub-objects (may be undefined for old flat configs)
 	const extractionRaw = raw.extraction as Record<string, unknown> | undefined;
@@ -1109,7 +1114,7 @@ function clampWarn(field: string, raw: unknown, min: number, max: number, fallba
 export function loadDreamingConfig(yaml: Record<string, unknown>): DreamingConfig {
 	const mem = yaml.memory as Record<string, unknown> | undefined;
 	const raw = mem?.dreaming as Record<string, unknown> | undefined;
-	if (!raw) return { ...DEFAULT_DREAMING };
+	if (!raw) return structuredClone(DEFAULT_DREAMING);
 	const dd = DEFAULT_DREAMING;
 	return {
 		enabled: typeof raw.enabled === "boolean" ? raw.enabled : dd.enabled,
@@ -1144,8 +1149,8 @@ export function loadMemoryConfig(agentsDir: string): ResolvedMemoryConfig {
 			temporal_prior_weight: 0.15,
 			temporal_prior_half_life_days: 14,
 		},
-		pipelineV2: { ...DEFAULT_PIPELINE_V2 },
-		dreaming: { ...DEFAULT_DREAMING },
+		pipelineV2: structuredClone(DEFAULT_PIPELINE_V2),
+		dreaming: structuredClone(DEFAULT_DREAMING),
 		auth: parseAuthConfig(undefined, agentsDir),
 	};
 
