@@ -762,6 +762,12 @@ describe("auth routes - password dashboard login", () => {
 			expect(claims.authenticated).toBe(true);
 			expect(claims.claims?.role).toBe("admin");
 		} finally {
+			// `reloadAuthState` above wrote the process-global auth config, and
+			// `bun test` shares one process across every file: leaving it in team
+			// mode makes later suites fail with 403 against assertions they never
+			// wrote. The env vars below are restored for the same reason.
+			const state = await import("../routes/state.js");
+			state.resetAuthStateForTests();
 			if (prevUsername === undefined) Reflect.deleteProperty(process.env, "SIGNET_ADMIN_USERNAME");
 			else process.env.SIGNET_ADMIN_USERNAME = prevUsername;
 			if (prevPassword === undefined) Reflect.deleteProperty(process.env, "SIGNET_ADMIN_PASSWORD");

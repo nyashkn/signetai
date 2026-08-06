@@ -530,6 +530,30 @@ export function reloadAuthState(agentsDir: string): void {
 		: new AuthRateLimiter(60_000, 60);
 }
 
+/**
+ * Restore the auth state a fresh process starts with (mode `local`, no secret).
+ *
+ * `authConfig` is a module-global that `reloadAuthState` writes from disk, and
+ * `bun test` runs every file in one process. A suite that switches to token or
+ * team mode therefore leaves every later file authenticating against a config
+ * it never chose, which surfaces as an unexplained 403 in a suite that passes
+ * on its own — the hardest failure class to attribute, because the file that
+ * fails is not the file that broke it.
+ *
+ * Reassigns rather than reading disk, so it cannot depend on the machine's real
+ * `agent.yaml`.
+ */
+export function resetAuthStateForTests(): void {
+	authConfig = parseAuthConfig(undefined, AGENTS_DIR);
+	authSecret = null;
+	authForgetLimiter = new AuthRateLimiter(60_000, 30);
+	authModifyLimiter = new AuthRateLimiter(60_000, 60);
+	authBatchForgetLimiter = new AuthRateLimiter(60_000, 5);
+	authAdminLimiter = new AuthRateLimiter(60_000, 10);
+	authLoginLimiter = new AuthRateLimiter(60_000, 5);
+	authRecallLlmLimiter = new AuthRateLimiter(60_000, 60);
+}
+
 export function setOpenClawHeartbeat(value: { timestamp: string; data: OpenClawHeartbeatData } | null): void {
 	openClawHeartbeat = value;
 }

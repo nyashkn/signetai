@@ -50,8 +50,17 @@ writeFileSync(
 process.env.SIGNET_PATH = tmpDir;
 let closeAccessor: (() => void) | null = null;
 
-afterAll(() => {
+afterAll(async () => {
 	closeAccessor?.();
+	// This suite switches the process-global `authConfig` to team mode to make
+	// unguarded routes visible. `bun test` runs every file in one process, so
+	// leaving it switched made every later file authenticate against a config it
+	// never chose: 13 assertions in `secrets-routes.test.ts` and
+	// `memory-routes-curator.test.ts` fail with 403 in a full run and pass alone,
+	// which reads as a defect in the suite that fails rather than in the one that
+	// broke it.
+	const state = await import("./routes/state.js");
+	state.resetAuthStateForTests();
 	if (prevSignetPath === undefined) {
 		Reflect.deleteProperty(process.env, "SIGNET_PATH");
 	}

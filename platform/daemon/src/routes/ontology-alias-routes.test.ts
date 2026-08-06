@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "../db-accessor";
 import { registerOntologyRoutes } from "./ontology-routes";
+import { reloadAuthState, resetAuthStateForTests } from "./state";
 
 /**
  * The alias route is the only write surface identity has, so its rejections are
@@ -15,6 +16,43 @@ import { registerOntologyRoutes } from "./ontology-routes";
 describe("POST /api/ontology/entities/:id/aliases", () => {
 	let dir = "";
 	let app: Hono;
+	let authDir = "";
+
+	/**
+	 * Reproduce, in-file, the state another suite leaves behind.
+	 *
+	 * `authConfig` is a module-global and `bun test` runs every file in one
+	 * process, so `daemon-auth-guard-colocation.test.ts` switching to team mode
+	 * makes every later file authenticate against a config it never chose. These
+	 * four tests passed alone and returned 403 in the full suite for exactly that
+	 * reason. Poisoning here rather than depending on file order means the guard
+	 * is tested, not the run order: without the `beforeEach` reset below, every
+	 * assertion in this file fails with 403.
+	 */
+	beforeAll(() => {
+		authDir = mkdtempSync(join(tmpdir(), "signet-alias-auth-"));
+		mkdirSync(join(authDir, ".daemon"), { recursive: true });
+		writeFileSync(join(authDir, ".daemon", "auth-secret"), "test-secret-key-32-bytes-min!!");
+		writeFileSync(
+			join(authDir, "agent.yaml"),
+			`auth:
+  mode: team
+  rateLimits:
+    forget:
+      windowMs: 60000
+      max: 30
+    modify:
+      windowMs: 60000
+      max: 60
+`,
+		);
+		reloadAuthState(authDir);
+	});
+
+	afterAll(() => {
+		resetAuthStateForTests();
+		rmSync(authDir, { recursive: true, force: true });
+	});
 
 	function seedEntity(id: string, name: string, entityType = "person"): void {
 		const ts = new Date().toISOString();
@@ -35,6 +73,9 @@ describe("POST /api/ontology/entities/:id/aliases", () => {
 	}
 
 	beforeEach(() => {
+		// The identity routes are what is under test, not the auth mode they
+		// happen to inherit.
+		resetAuthStateForTests();
 		dir = mkdtempSync(join(tmpdir(), "signet-alias-routes-"));
 		closeDbAccessor();
 		initDbAccessor(join(dir, "memories.db"));
