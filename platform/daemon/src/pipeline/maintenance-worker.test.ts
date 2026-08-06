@@ -103,17 +103,23 @@ describe("maintenance-worker", () => {
 		const accessor = asAccessor(db);
 		const tracker = createProviderTracker();
 
+		// `document_ingest`, not `extract`. Every queue-health query now carries
+		// `AND job_type <> 'extract'` — the extraction queue is retired, so its
+		// dead rows are history rather than a live problem. A fixture seeding
+		// `extract` measures an empty set and the recommendation never fires,
+		// which is what these five tests were actually reporting.
+		//
 		// Insert 10 completed + 5 dead jobs -> dead rate = 33%
 		for (let i = 0; i < 10; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, completed_at, created_at, updated_at)
-				 VALUES (?, ?, 'extract', 'completed', 1, 3, ?, ?, ?)`,
+				 VALUES (?, ?, 'document_ingest', 'completed', 1, 3, ?, ?, ?)`,
 			).run(`comp-${i}`, `mem-${i}`, now, now, now);
 		}
 		for (let i = 0; i < 5; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, failed_at, created_at, updated_at)
-				 VALUES (?, ?, 'extract', 'dead', 3, 3, ?, ?, ?)`,
+				 VALUES (?, ?, 'document_ingest', 'dead', 3, 3, ?, ?, ?)`,
 			).run(`dead-${i}`, `mem-dead-${i}`, now, now, now);
 		}
 
@@ -135,12 +141,12 @@ describe("maintenance-worker", () => {
 		for (let i = 0; i < 2; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, failed_at, created_at, updated_at)
-				 VALUES (?, ?, 'extract', 'dead', 3, 3, ?, ?, ?)`,
+				 VALUES (?, ?, 'document_ingest', 'dead', 3, 3, ?, ?, ?)`,
 			).run(`dead-exec-${i}`, `mem-exec-${i}`, now, now, now);
 		}
 		db.prepare(
 			`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, completed_at, created_at, updated_at)
-			 VALUES (?, ?, 'extract', 'completed', 1, 3, ?, ?, ?)`,
+			 VALUES (?, ?, 'document_ingest', 'completed', 1, 3, ?, ?, ?)`,
 		).run("comp-exec-1", "mem-comp-1", now, now, now);
 
 		const handle = startMaintenanceWorker(accessor, BASE_CFG, tracker, null);
@@ -169,12 +175,12 @@ describe("maintenance-worker", () => {
 		for (let i = 0; i < 3; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, failed_at, created_at, updated_at)
-				 VALUES (?, ?, 'extract', 'dead', 3, 3, ?, ?, ?)`,
+				 VALUES (?, ?, 'document_ingest', 'dead', 3, 3, ?, ?, ?)`,
 			).run(`dead-obs-${i}`, `mem-obs-${i}`, now, now, now);
 		}
 		db.prepare(
 			`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, completed_at, created_at, updated_at)
-			 VALUES (?, ?, 'extract', 'completed', 1, 3, ?, ?, ?)`,
+			 VALUES (?, ?, 'document_ingest', 'completed', 1, 3, ?, ?, ?)`,
 		).run("comp-obs", "mem-comp-obs", now, now, now);
 
 		const handle = startMaintenanceWorker(accessor, observeCfg, tracker, null);
@@ -219,7 +225,7 @@ describe("maintenance-worker", () => {
 		const oldLease = new Date(Date.now() - 20 * 60 * 1000).toISOString();
 		db.prepare(
 			`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, leased_at, created_at, updated_at)
-			 VALUES (?, ?, 'extract', 'leased', 1, 3, ?, ?, ?)`,
+			 VALUES (?, ?, 'document_ingest', 'leased', 1, 3, ?, ?, ?)`,
 		).run("stale-lease-1", "mem-stale-1", oldLease, oldLease, now);
 
 		const handle = startMaintenanceWorker(accessor, BASE_CFG, tracker, null);
@@ -277,7 +283,7 @@ describe("maintenance-worker", () => {
 		for (let i = 0; i < 2; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, failed_at, created_at, updated_at)
-				 VALUES (?, ?, 'extract', 'dead', 3, 3, ?, ?, ?)`,
+				 VALUES (?, ?, 'document_ingest', 'dead', 3, 3, ?, ?, ?)`,
 			).run(`dead-noprovider-${i}`, `mem-noprovider-${i}`, now, now, now);
 		}
 

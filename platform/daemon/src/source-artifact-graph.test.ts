@@ -10,6 +10,7 @@ import { txIngestEnvelope } from "./transactions";
 import { runDreamingAgentPass } from "./pipeline/dreaming";
 
 const DREAMING_CONFIG: DreamingConfig = {
+	enabled: true,
 	tokenThreshold: 1,
 	maxInterval: 6 * 60 * 60 * 1_000,
 	maxInputTokens: 32_000,
@@ -295,13 +296,20 @@ describe("source artifact graph structure", () => {
 				async run(input) {
 					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
 					if (!apply) throw new Error("Missing apply_ontology_ops");
-					await apply.execute(
+					// The tool result was discarded, so a rejected operation showed up
+					// only as `failed: 1` on the pass with no reason anywhere. Assert it
+					// here and the next schema change names itself.
+					const applyResult = await apply.execute(
 						"source-owned-call",
 						{
+							agentId: "default",
 							operations: [
 								{
 									operation: "create_entity",
-									payload: { name: "Nightly Drift Detection", entity_type: "workflow" },
+									// `type`, not `entity_type` — the op payload is schema-validated
+									// against a closed vocabulary now, and an unknown key is a
+									// rejection rather than an ignored extra.
+									payload: { name: "Nightly Drift Detection", type: "workflow" },
 									reason: "The source names a durable operational workflow.",
 									evidence: [
 										{
@@ -319,12 +327,21 @@ describe("source artifact graph structure", () => {
 						undefined,
 						{} as never,
 					);
+					const applyText = JSON.stringify(applyResult);
+					if (applyText.includes('\\"ok\\":false')) {
+						throw new Error(`apply_ontology_ops rejected the operation: ${applyText}`);
+					}
 					return { summary: "Applied source-owned Dreaming entity" };
 				},
 			},
 			DREAMING_CONFIG,
 			dir,
 			"default",
+			// `scopes` was added between `agentId` and `mode`. Without it
+			// "incremental" bound to scopes and `mode` arrived undefined, which
+			// surfaces as a NOT NULL failure on dreaming_passes.mode rather than
+			// as the arity mismatch it is.
+			["default"],
 			"incremental",
 		);
 
@@ -347,7 +364,10 @@ describe("source artifact graph structure", () => {
 		purgeSourceOwnedRows({ agentId: "default", sourceId: "obsidian:nightly" });
 		expect(
 			getDbAccessor().withReadDb(
-				(db) => db.prepare("SELECT COUNT(*) AS count FROM entities WHERE name = ?").get("Nightly Drift Detection") as { count: number },
+				(db) =>
+					db.prepare("SELECT COUNT(*) AS count FROM entities WHERE name = ?").get("Nightly Drift Detection") as {
+						count: number;
+					},
 			).count,
 		).toBe(0);
 	});
