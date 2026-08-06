@@ -3442,6 +3442,57 @@ export async function getEntityAliases(agentId: string, entityId: string): Promi
 	return body.items ?? [];
 }
 
+export const ALIAS_KINDS = ["email", "phone", "github_login", "clickup_member", "discord_id", "display_name"] as const;
+
+/**
+ * Record a handle against an entity. Applies immediately — an alias is additive
+ * and reversible, so it follows the apply-first rule rather than the proposal
+ * queue a merge goes through.
+ *
+ * A `409` is the one-handle-one-entity invariant holding, and the daemon names
+ * the current holder in the message, so the error is surfaced verbatim rather
+ * than flattened to "failed".
+ */
+export async function linkEntityAlias(
+	agentId: string,
+	entityId: string,
+	input: { alias: string; aliasKind: string; source?: string },
+): Promise<{ ok: true; item: EntityAliasRecord } | { ok: false; error: string }> {
+	const params = new URLSearchParams({ agent_id: agentId });
+	const res = await fetch(
+		`${API_BASE}/api/ontology/entities/${encodeURIComponent(entityId)}/aliases?${params.toString()}`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				alias: input.alias,
+				alias_kind: input.aliasKind,
+				source: input.source ?? "operator: dashboard",
+			}),
+		},
+	);
+	const body = (await res.json().catch(() => ({}))) as { item?: EntityAliasRecord; error?: string };
+	if (!res.ok || !body.item) return { ok: false, error: body.error ?? `Link failed (${res.status})` };
+	return { ok: true, item: body.item };
+}
+
+export async function archiveEntityAlias(
+	agentId: string,
+	entityId: string,
+	aliasId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+	const params = new URLSearchParams({ agent_id: agentId });
+	const res = await fetch(
+		`${API_BASE}/api/ontology/entities/${encodeURIComponent(entityId)}/aliases/${encodeURIComponent(aliasId)}?${params.toString()}`,
+		{ method: "DELETE" },
+	);
+	if (!res.ok) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		return { ok: false, error: body.error ?? `Unlink failed (${res.status})` };
+	}
+	return { ok: true };
+}
+
 /**
  * `who` accepts an entity id as readily as a name — identity resolution folds
  * every alias in, so the panel passes the id it already has and never has to

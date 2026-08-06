@@ -1,9 +1,12 @@
 <script lang="ts">
 import {
+	ALIAS_KINDS,
 	type EntityAliasRecord,
 	type WhatTouchedResult,
+	archiveEntityAlias,
 	getEntityAliases,
 	getWhatTouched,
+	linkEntityAlias,
 	proposeManualMerge,
 } from "$lib/api";
 import { groupTouchedBySource, touchedTitle } from "./identity-panel-data";
@@ -45,6 +48,38 @@ $effect(() => {
 const groups = $derived(groupTouchedBySource(touched?.items ?? []));
 const otherNames = $derived((touched?.identity.names ?? []).slice(1));
 
+let handleValue = $state("");
+let handleKind = $state<string>("email");
+let linking = $state(false);
+let handleNote = $state<string | null>(null);
+
+async function link(): Promise<void> {
+	const alias = handleValue.trim();
+	if (alias.length === 0) return;
+	linking = true;
+	handleNote = null;
+	const result = await linkEntityAlias(agentId, entityId, { alias, aliasKind: handleKind });
+	linking = false;
+	if (!result.ok) {
+		// A 409 names the entity already holding the handle, and that name is the
+		// operator's next move. Show it rather than "failed".
+		handleNote = result.error;
+		return;
+	}
+	aliases = [...aliases, result.item];
+	handleValue = "";
+}
+
+async function unlink(alias: EntityAliasRecord): Promise<void> {
+	handleNote = null;
+	const result = await archiveEntityAlias(agentId, entityId, alias.id);
+	if (!result.ok) {
+		handleNote = result.error;
+		return;
+	}
+	aliases = aliases.filter((row) => row.id !== alias.id);
+}
+
 let mergeSource = $state("");
 let merging = $state(false);
 let mergeNote = $state<string | null>(null);
@@ -83,10 +118,36 @@ async function merge(): Promise<void> {
 						<span class="handle">{alias.alias}</span>
 						{#if alias.aliasKind}<span class="kind">{alias.aliasKind.replace(/_/g, " ")}</span>{/if}
 						<span class="seen">{alias.source ?? "no source recorded"}</span>
+						<button
+							type="button"
+							class="unlink"
+							title="Stop this handle resolving to this entity"
+							aria-label="Unlink {alias.alias}"
+							onclick={() => void unlink(alias)}
+						>
+							×
+						</button>
 					</li>
 				{/each}
 			</ul>
 		{/if}
+
+		<form
+			class="add-handle"
+			onsubmit={(event) => {
+				event.preventDefault();
+				void link();
+			}}
+		>
+			<input type="text" bind:value={handleValue} placeholder="Add a handle — address, phone, login" disabled={linking} />
+			<select bind:value={handleKind} disabled={linking} aria-label="Handle kind">
+				{#each ALIAS_KINDS as kind (kind)}
+					<option value={kind}>{kind.replace(/_/g, " ")}</option>
+				{/each}
+			</select>
+			<button type="submit" disabled={linking || handleValue.trim().length === 0}>Link</button>
+		</form>
+		{#if handleNote}<p class="merge-note">{handleNote}</p>{/if}
 
 		{#each groups as group (group.sourceKind)}
 			<div class="group">
@@ -213,6 +274,55 @@ async function merge(): Promise<void> {
 		color: #f87171;
 		font-size: 11px;
 	}
+	.add-handle {
+		display: flex;
+		gap: 4px;
+		margin-top: 8px;
+	}
+	.add-handle input {
+		flex: 1;
+		min-width: 0;
+		padding: 3px 7px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		border-radius: 5px;
+		background: rgba(2, 4, 10, 0.6);
+		color: #cbd5f5;
+		font-size: 11px;
+	}
+	.add-handle input::placeholder {
+		color: #475569;
+	}
+	.add-handle select {
+		padding: 3px 5px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		border-radius: 5px;
+		background: rgba(2, 4, 10, 0.6);
+		color: #cbd5f5;
+		font-size: 11px;
+	}
+	.add-handle button {
+		padding: 3px 9px;
+		border: 1px solid rgba(148, 163, 184, 0.2);
+		border-radius: 5px;
+		background: rgba(148, 163, 184, 0.1);
+		color: #cbd5f5;
+		font-size: 11px;
+		cursor: pointer;
+	}
+	.unlink {
+		margin-left: auto;
+		padding: 0 4px;
+		border: none;
+		background: none;
+		color: #64748b;
+		font-size: 13px;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.unlink:hover {
+		color: #f87171;
+	}
+
 	.merge {
 		display: flex;
 		gap: 4px;
