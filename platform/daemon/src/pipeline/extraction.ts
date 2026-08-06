@@ -28,6 +28,23 @@ const MAX_INPUT_CHARS = 12000;
 
 const VALID_TYPES = new Set<string>(MEMORY_TYPES);
 
+export const UNPARSEABLE_OUTPUT_WARNING = "Failed to parse LLM output as JSON";
+
+/**
+ * The model answered, and the answer was not usable.
+ *
+ * Distinct from "the model found nothing": an empty `facts`/`entities` pair
+ * inside valid JSON is a real result about boring input, and must stay cheap.
+ * This is the other case — a truncated object, prose instead of JSON, or an
+ * empty body — where the call was paid for and produced no information at all.
+ */
+export class ExtractionOutputError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ExtractionOutputError";
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Prompt
 // ---------------------------------------------------------------------------
@@ -428,7 +445,7 @@ export function parseRawExtractionOutput(rawOutput: string): ExtractionResult {
 			preview: jsonStr.slice(0, 500),
 			length: rawOutput.length,
 		});
-		return { facts: [], entities: [], warnings: ["Failed to parse LLM output as JSON"] };
+		return { facts: [], entities: [], warnings: [UNPARSEABLE_OUTPUT_WARNING] };
 	}
 
 	if (typeof parsed !== "object" || parsed === null) {
@@ -506,6 +523,18 @@ export async function extractFactsAndEntities(
 	}
 
 	const result = parseRawExtractionOutput(rawOutput);
+
+	// An unusable answer is a failed job, not a successful one with a note.
+	// Returning empty results here marked the memory extracted and the job
+	// complete, so a paid-for call that produced nothing was never retried and
+	// the memory could never be picked up again — the same shape of quiet
+	// data loss the source ingest gate exists to prevent. Throwing hands the
+	// job back to the queue's own retry and dead-letter path.
+	if (result.warnings.includes(UNPARSEABLE_OUTPUT_WARNING)) {
+		throw new ExtractionOutputError(
+			`LLM returned ${rawOutput.trim().length} chars that did not parse as JSON (provider ${provider.name})`,
+		);
+	}
 
 	logger.debug("pipeline", "Extraction complete", {
 		factCount: result.facts.length,

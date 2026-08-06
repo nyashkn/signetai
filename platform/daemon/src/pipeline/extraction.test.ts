@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { extractFactsAndEntities, stripFences } from "./extraction";
+import { ExtractionOutputError, extractFactsAndEntities, parseRawExtractionOutput, stripFences } from "./extraction";
 import { type LlmProvider, RateLimitExceededError } from "./provider";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +55,46 @@ const VALID_RESPONSE = JSON.stringify({
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("extractFactsAndEntities unusable output", () => {
+	function providerReturning(output: string): LlmProvider {
+		return {
+			name: "unusable-probe",
+			async generate() {
+				return output;
+			},
+			async available() {
+				return true;
+			},
+		};
+	}
+
+	// A reasoning model on a small completion budget spends the budget thinking
+	// and returns nothing. That used to resolve as a successful extraction with
+	// zero facts, which marked the memory extracted and the job complete — the
+	// call was billed and the memory could never be picked up again.
+	it("throws when the model returns an empty body", async () => {
+		expect(extractFactsAndEntities(INPUT, providerReturning(""), {})).rejects.toThrow(ExtractionOutputError);
+	});
+
+	it("throws when the model truncates its JSON mid-object", async () => {
+		const truncated = '{"facts": [{"content": "Matt West cut PPC ad spend roughly in half on 2026-07-14 because';
+		expect(extractFactsAndEntities(INPUT, providerReturning(truncated), {})).rejects.toThrow(ExtractionOutputError);
+	});
+
+	it("throws when the model answers in prose instead of JSON", async () => {
+		const prose = "I can help with that! Here are the key facts from the text you provided.";
+		expect(extractFactsAndEntities(INPUT, providerReturning(prose), {})).rejects.toThrow(ExtractionOutputError);
+	});
+
+	// The other half of the contract: valid JSON that found nothing is a real
+	// answer about boring input and must stay cheap, never a retry.
+	it("returns empty results for valid JSON that found nothing", async () => {
+		const result = await extractFactsAndEntities(INPUT, providerReturning('{"facts": [], "entities": []}'), {});
+		expect(result.facts).toEqual([]);
+		expect(result.entities).toEqual([]);
+	});
+});
 
 describe("extractFactsAndEntities", () => {
 	it("passes timeout options through to the provider", async () => {
@@ -221,13 +261,21 @@ ${VALID_RESPONSE}
 		expect(result.warnings.some((w) => w.includes("Invalid type") && w.includes("bogustype"))).toBe(true);
 	});
 
-	it("returns empty with warning on total parse failure", async () => {
-		const provider = mockProvider(["this is not valid json at all"]);
-		const result = await extractFactsAndEntities(INPUT_GENERIC, provider);
+	// The parser still reports a total failure as an empty result plus a warning
+	// — escalation reads it that way and re-runs. It is the caller-facing
+	// `extractFactsAndEntities` that now refuses to pass it off as a result.
+	it("reports total parse failure as a warning at the parser level", () => {
+		const result = parseRawExtractionOutput("this is not valid json at all");
 
 		expect(result.facts).toHaveLength(0);
 		expect(result.entities).toHaveLength(0);
 		expect(result.warnings.some((w) => w.toLowerCase().includes("failed to parse"))).toBe(true);
+	});
+
+	it("throws rather than returning empty on total parse failure", async () => {
+		const provider = mockProvider(["this is not valid json at all"]);
+
+		expect(extractFactsAndEntities(INPUT_GENERIC, provider)).rejects.toThrow(ExtractionOutputError);
 	});
 
 	it("clamps confidence to [0, 1]", async () => {

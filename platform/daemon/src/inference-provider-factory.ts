@@ -42,6 +42,38 @@ function catalogModel(
 	return models.find((candidate) => candidate.id === modelId);
 }
 
+/**
+ * Map routing intent onto a pi-ai ThinkingLevel (forwarded per-call as
+ * `options.reasoning`).
+ *
+ * `model.reasoning` (RoutingReasoningDepth) defaults to "medium" for every
+ * parsed model, so it cannot alone signal "enable thinking" without turning a
+ * costly default on for every routed call. Only explicit signals count.
+ *
+ * The case that used to be silently lost is `enabled: false`. It returned
+ * `undefined`, which means "send no reasoning field" — not "reason less". A
+ * model that thinks by default keeps thinking, and on a small completion budget
+ * it spends the whole budget thinking and returns null content: measured on
+ * `deepseek/deepseek-v4-flash-0731`, 995 of 1024 completion tokens went to
+ * reasoning, `finish_reason: "length"`, no body, and the call was still billed.
+ * "off" now means the least thinking the transport can ask for — measured at 27
+ * reasoning tokens against 682 for the same prompt with no reasoning field.
+ *
+ * It is not a true zero. OpenRouter honours `reasoning: {enabled: false}` with
+ * exactly 0 reasoning tokens, but pi-ai's openrouter thinking format only ever
+ * emits `reasoning: {effort}`, so that payload cannot be expressed from here.
+ * Sending a real disable needs a change in pi-ai or an escape hatch for raw
+ * provider options.
+ */
+export function resolveThinkingLevel(
+	openRouterReasoningEnabled: boolean | undefined,
+	modelDepth: string | undefined,
+): "minimal" | "medium" | "high" | undefined {
+	if (openRouterReasoningEnabled === true) return "medium";
+	if (openRouterReasoningEnabled === false) return "minimal";
+	return modelDepth === "high" ? "high" : undefined;
+}
+
 export async function createRoutingProvider(opts: CreateRoutingProviderOptions): Promise<StreamCapableLlmProvider> {
 	const target = opts.config.targets[opts.targetId];
 	const model = target?.models[opts.modelId];
@@ -86,15 +118,7 @@ export async function createRoutingProvider(opts: CreateRoutingProviderOptions):
 		skipAvailabilityProbe: piModel !== undefined,
 		baseUrl: target.endpoint,
 		apiKey: credential?.apiKey,
-		// Map routing intent to a pi-ai ThinkingLevel (forwarded per-call as
-		// options.reasoning). model.reasoning (RoutingReasoningDepth) defaults to
-		// "medium" for every parsed model, so it cannot alone signal "enable
-		// thinking" without flipping a costly default on for all routed calls.
-		// Treat only explicit non-default signals as intent to emit thinking:
-		// the documented OpenRouter reasoning block, or a deliberately-set
-		// "high" depth. Previously this compared to a nonexistent "deep"
-		// value (TS2367) and never produced a usable level.
-		reasoning: target.openrouter?.reasoning?.enabled ? "medium" : model.reasoning === "high" ? "high" : undefined,
+		reasoning: resolveThinkingLevel(target.openrouter?.reasoning?.enabled, model.reasoning),
 		contextWindow: model.contextWindow,
 		name: `${target.executor}:${model.model}`,
 		defaultTimeoutMs: 60_000,
