@@ -160,9 +160,18 @@ async function runEntityMergeScan(
 			executed.push(result);
 		}
 	} catch (e) {
-		logger.warn("maintenance", "Entity merge scan skipped (non-fatal)", {
-			agentId,
-			error: e instanceof Error ? e.message : String(e),
+		const error = e instanceof Error ? e.message : String(e);
+		logger.warn("maintenance", "Entity merge scan skipped (non-fatal)", { agentId, error });
+		// Non-fatal is not the same as invisible. Pushing nothing made a scan that
+		// threw indistinguishable from a scan that found nothing, so the cycle
+		// reported a clean tick while identity work silently stopped happening —
+		// the same defect this action was written to fix in the generator itself.
+		executed.push({
+			action: "proposeEntityMerges",
+			success: false,
+			affected: 0,
+			message: `entity merge scan failed: ${error}`,
+			details: { agentId },
 		});
 	}
 }

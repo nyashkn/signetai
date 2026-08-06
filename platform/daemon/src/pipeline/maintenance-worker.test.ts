@@ -71,6 +71,14 @@ const BASE_CFG: PipelineV2Config = {
 		...DEFAULT_PIPELINE_V2.structural,
 		enabled: false,
 	},
+	// Stated, not inherited. The duplicate-identity scan is gated on this flag,
+	// and a spread of DEFAULT_PIPELINE_V2 shares its nested objects — so a suite
+	// that ran earlier and switched graph off took this one down with it, and the
+	// symptom was an empty `executed` with nothing logged.
+	graph: {
+		...DEFAULT_PIPELINE_V2.graph,
+		enabled: true,
+	},
 };
 
 const now = new Date().toISOString();
@@ -319,6 +327,32 @@ describe("maintenance-worker", () => {
 			.prepare("SELECT operation, status FROM ontology_proposals WHERE agent_id = 'default'")
 			.all() as Array<{ operation: string; status: string }>;
 		expect(proposals).toEqual([{ operation: "merge_entities", status: "pending" }]);
+		db.close();
+	});
+
+	it("reports a scan that threw instead of reporting nothing at all", async () => {
+		// The scan is best-effort so it cannot abort the cycle — but logging a
+		// warning and pushing nothing made "it threw" and "there was nothing to
+		// find" the same observable result. A cycle that reports a clean tick while
+		// identity work has stopped is how twelve duplicates went unproposed for a
+		// year, and it is what made this suite's full-run failure unattributable.
+		const db = freshDb();
+		const accessor = asAccessor(db);
+		const tracker = createProviderTracker();
+
+		db.prepare(
+			`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+			 VALUES ('ent-x', 'Matt West', 'matt west', 'person', 'default', 4, ?, ?)`,
+		).run(now, now);
+		db.exec("DROP TABLE ontology_proposals");
+
+		const handle = startMaintenanceWorker(accessor, BASE_CFG, tracker, null);
+		handle.stop();
+
+		const result = await handle.tick();
+		const scan = result.executed.find((r) => r.action === "proposeEntityMerges");
+		expect(scan?.success).toBe(false);
+		expect(scan?.message).toContain("ontology_proposals");
 		db.close();
 	});
 
