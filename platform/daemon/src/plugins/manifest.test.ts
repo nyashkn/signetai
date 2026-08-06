@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { signetGraphiqManifest } from "./bundled/graphiq.js";
+import { SIGNET_IDENTITY_PLUGIN_ID, signetIdentityManifest } from "./bundled/identity.js";
 import { SIGNET_SECRETS_PLUGIN_ID, signetSecretsManifest } from "./bundled/secrets.js";
 import { runtimeSupportedInV1, validatePluginManifest } from "./manifest.js";
 import type { PluginManifestV1 } from "./types.js";
@@ -12,6 +13,34 @@ describe("plugin manifest validation", () => {
 
 	test("accepts the verified managed graphiq manifest", () => {
 		expect(validatePluginManifest(signetGraphiqManifest, { corePluginIds: [SIGNET_SECRETS_PLUGIN_ID] })).toEqual([]);
+	});
+
+	test("the identity manifest validates and keeps merges propose-only", () => {
+		expect(
+			validatePluginManifest(signetIdentityManifest, {
+				corePluginIds: [SIGNET_SECRETS_PLUGIN_ID, SIGNET_IDENTITY_PLUGIN_ID],
+			}),
+		).toEqual([]);
+
+		// The write policy is the manifest's whole shape: additive and reversible
+		// acts apply, destructive ones only propose. A bare `identity:merge`
+		// capability would be a direct-apply path for a hard delete.
+		expect(signetIdentityManifest.capabilities).toContain("identity:merge:propose");
+		expect(signetIdentityManifest.capabilities).not.toContain("identity:merge");
+
+		// Every declared surface must ask for a capability the plugin holds, or
+		// the manifest documents an access path that cannot be granted.
+		const granted = new Set<string>(signetIdentityManifest.capabilities);
+		const declared = [
+			...signetIdentityManifest.surfaces.daemonRoutes,
+			...signetIdentityManifest.surfaces.mcpTools,
+			...signetIdentityManifest.surfaces.cliCommands,
+			...signetIdentityManifest.surfaces.dashboardPanels,
+		];
+		expect(declared.flatMap((surface) => surface.requiredCapabilities).filter((cap) => !granted.has(cap))).toEqual([]);
+
+		// Documented capabilities and granted capabilities must be the same set.
+		expect(Object.keys(signetIdentityManifest.docs.capabilities).sort()).toEqual([...granted].sort());
 		expect(runtimeSupportedInV1(signetGraphiqManifest)).toBe(true);
 	});
 

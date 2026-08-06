@@ -3,6 +3,7 @@ import { getGraphiqStatePath } from "@signet/core";
 import { getAgentsDir } from "../graphiq.js";
 import { getLocalSecretProviderHealth } from "../secrets.js";
 import { signetGraphiqManifest } from "./bundled/graphiq.js";
+import { SIGNET_IDENTITY_PLUGIN_ID, signetIdentityManifest } from "./bundled/identity.js";
 import { SIGNET_SECRETS_PLUGIN_ID, signetSecretsManifest } from "./bundled/secrets.js";
 import { PluginHostV1 } from "./host.js";
 import type { PluginHostOptionsV1 } from "./host.js";
@@ -39,6 +40,11 @@ export function createDefaultPluginHost(opts: PluginHostOptionsV1 = {}): PluginH
 		grantedCapabilities: signetSecretsManifest.capabilities,
 		health: getLocalSecretProviderHealth(),
 	});
+	host.discover(signetIdentityManifest, {
+		source: "bundled",
+		enabled: true,
+		grantedCapabilities: signetIdentityManifest.capabilities,
+	});
 	host.discover(signetGraphiqManifest, {
 		source: "bundled",
 		enabled: resolveGraphiqEnabled(),
@@ -58,6 +64,7 @@ export function resetDefaultPluginHostForTests(): void {
 	defaultHost = null;
 }
 
+export { SIGNET_IDENTITY_PLUGIN_ID, signetIdentityManifest } from "./bundled/identity.js";
 export { SIGNET_SECRETS_PLUGIN_ID, signetSecretsManifest } from "./bundled/secrets.js";
 export { SIGNET_GRAPHIQ_PLUGIN_ID, signetGraphiqManifest } from "./bundled/graphiq.js";
 export { getDefaultPluginAuditPath, queryPluginAuditEvents, recordPluginAuditEvent } from "./audit.js";
