@@ -151,7 +151,11 @@ describe("principal identity storage", () => {
 	});
 
 	it("scopes work handles to an organization and leaves the personal one unscoped", () => {
-		declare();
+		// Assert the setup landed before reading it back. A bare `declare();` here
+		// discarded the one signal that says whether the write happened, so a
+		// failure downstream read identically as "the read is broken" and as "the
+		// declaration never ran" — and it was the second.
+		expect(declare()).not.toBeNull();
 		const identity = getPrincipalIdentity("default");
 		const byIdentifier = new Map(identity?.handles.map((handle) => [handle.identifier, handle.organization]));
 		expect(byIdentifier.get("njui@pivotplanit.com")).toBe("pivotplanit");
@@ -236,7 +240,7 @@ describe("principal identity storage", () => {
 		expect(getPrincipalIdentity("default")).toBeNull();
 		expect(listPrincipalIdentifiers("default", "email").size).toBe(0);
 
-		declare();
+		expect(declare()).not.toBeNull();
 		expect([...listPrincipalIdentifiers("default", "email")].sort()).toEqual([
 			"kinyanjui@kuze.ai",
 			"njui@pivotplanit.com",

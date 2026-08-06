@@ -59,23 +59,49 @@ describe("repo skills frontmatter", () => {
 		}
 	});
 
+	/**
+	 * The set of shipped skills, asserted against the directory rather than
+	 * assumed from a list.
+	 *
+	 * A hardcoded roster silently rots: `memory-debug`, `recall`, `remember` and
+	 * `signet` were all removed from `skills/` and the roster still named them,
+	 * so the loop below `continue`d past every one of them while a sibling test
+	 * `readFileSync`'d the same missing path and died with an ENOENT that looked
+	 * like a broken test rather than a stale list. Comparing to disk turns
+	 * adding or removing a skill into one obvious failure here.
+	 */
+	const SHIPPED_SKILLS = ["dreaming", "identity", "onboarding"];
+
+	function readSkill(name: string): string | null {
+		const skillMd = join(skillsRoot, name, "SKILL.md");
+		return existsSync(skillMd) ? readFileSync(skillMd, "utf-8") : null;
+	}
+
+	it.skipIf(!hasSkillsDir)("the shipped skill roster matches what is on disk", () => {
+		const onDisk = readdirSync(skillsRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && existsSync(join(skillsRoot, entry.name, "SKILL.md")))
+			.map((entry) => entry.name)
+			.sort();
+		expect(onDisk).toEqual([...SHIPPED_SKILLS].sort());
+	});
+
 	it.skipIf(!hasSkillsDir)("builtin skills have builtin: true in frontmatter", () => {
-		const expectedBuiltin = ["dreaming", "memory-debug", "onboarding", "recall", "remember", "signet"];
-
-		for (const name of expectedBuiltin) {
-			const skillMd = join(skillsRoot, name, "SKILL.md");
-			if (!existsSync(skillMd)) continue;
-
-			const content = readFileSync(skillMd, "utf-8");
-			expect(/^builtin:\s*true$/m.test(content), `${name} should have builtin: true`).toBe(true);
+		for (const name of SHIPPED_SKILLS) {
+			const content = readSkill(name);
+			expect(content, `${name}/SKILL.md is missing`).not.toBeNull();
+			expect(/^builtin:\s*true$/m.test(content ?? ""), `${name} should have builtin: true`).toBe(true);
 		}
 	});
 
 	it.skipIf(!hasSkillsDir)("memory skills describe the current scoped source-backed model", () => {
-		const debug = readFileSync(join(skillsRoot, "memory-debug", "SKILL.md"), "utf-8");
-		const remember = readFileSync(join(skillsRoot, "remember", "SKILL.md"), "utf-8");
-		const recall = readFileSync(join(skillsRoot, "recall", "SKILL.md"), "utf-8");
-		const signet = readFileSync(join(skillsRoot, "signet", "SKILL.md"), "utf-8");
+		const debug = readSkill("memory-debug");
+		const remember = readSkill("remember");
+		const recall = readSkill("recall");
+		const signet = readSkill("signet");
+		// These four are not currently shipped. The assertions below still describe
+		// the contract they must meet if they come back, and the roster test above
+		// is what notices they are gone.
+		if (!debug || !remember || !recall || !signet) return;
 
 		expect(debug).toContain("Session And Hook State");
 		expect(debug).toContain("signet bypass --list");
