@@ -881,6 +881,15 @@ export const MIGRATIONS: readonly Migration[] = [
 		artifacts: { tables: ["embeddings_staging"] },
 	},
 	{
+		// Renumber to 106 when this branch syncs with upstream: upstream ships its
+		// own 093 (`dreaming-evidence-cursor`) and runs to 105. The apply loop
+		// skips on version alone — `checksum()` is recorded and never compared —
+		// so a database that already ran this migration as 093 would skip
+		// upstream's forever, silently, and never grow the table it creates. The
+		// `schema_migrations` row for 93 has to be deleted on those databases too.
+		// Re-applying under a new number is safe: every statement here is guarded
+		// by `hasTable`/`hasColumn`. It cannot move before the sync — the sequence
+		// invariant above requires versions to be contiguous.
 		version: 93,
 		name: "principal-identity",
 		up: principalIdentity,
