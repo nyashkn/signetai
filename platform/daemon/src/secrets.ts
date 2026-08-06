@@ -206,13 +206,44 @@ let _masterKey: Uint8Array | null = null;
 type SodiumModule = typeof import("libsodium-wrappers").default;
 let sodiumPromise: Promise<SodiumModule> | null = null;
 
+/** Long enough for a cold WASM compile, short enough to be a failure not a hang. */
+const SODIUM_INIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Every secret read and write funnels through here, and `sodium.ready` is a WASM
+ * init promise with no deadline of its own. When it does not settle, a source
+ * sync sits at `syncing` forever with nothing logged — which reads as "the
+ * connector is slow" rather than "the crypto never came up". A bounded await
+ * turns an invisible hang into a named failure.
+ */
 async function getSodium(): Promise<SodiumModule> {
-	sodiumPromise ??= import("libsodium-wrappers").then(async (mod) => {
+	if (sodiumPromise) return sodiumPromise;
+	const pending = (async () => {
+		const mod = await import("libsodium-wrappers");
 		const sodium = mod.default;
-		await sodium.ready;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await Promise.race([
+				sodium.ready,
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(
+						() => reject(new Error(`libsodium did not initialise within ${SODIUM_INIT_TIMEOUT_MS}ms`)),
+						SODIUM_INIT_TIMEOUT_MS,
+					);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
 		return sodium;
+	})();
+	sodiumPromise = pending;
+	// A cached rejection would poison every later call for the life of the
+	// process, so a failed init is forgotten and the next caller retries.
+	pending.catch(() => {
+		if (sodiumPromise === pending) sodiumPromise = null;
 	});
-	return sodiumPromise;
+	return pending;
 }
 
 async function getMasterKey(): Promise<Uint8Array> {

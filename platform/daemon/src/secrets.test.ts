@@ -52,6 +52,30 @@ describe("local secrets provider", () => {
 		}
 	});
 
+	test("a missing name and an empty store fail fast instead of hanging", async () => {
+		// The reported symptom was a source sync sitting at `syncing` for minutes
+		// with 0 failures and nothing logged, because every secret operation awaits
+		// a WASM init that has no deadline. A hang and a slow connector are
+		// indistinguishable from the outside; a rejection is not.
+		const deadline = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 5_000));
+
+		const missing = await Promise.race([
+			getSecret("PIVOT_CLICKUP_API_TOKEN").then(
+				() => "resolved" as const,
+				(err: unknown) => (err instanceof Error ? err.message : String(err)),
+			),
+			deadline,
+		]);
+		expect(missing).toContain("not found");
+
+		// Writing into a store that does not exist yet must actually create it.
+		// It previously created `.secrets/` and never wrote `secrets.enc`.
+		const wrote = await Promise.race([putSecret("FRESH_TOKEN", "value").then(() => "ok" as const), deadline]);
+		expect(wrote).toBe("ok");
+		expect(existsSync(secretsFile())).toBe(true);
+		expect(await getSecret("FRESH_TOKEN")).toBe("value");
+	});
+
 	test("bare names and local:// references resolve through the same local store", async () => {
 		await putSecret("OPENAI_API_KEY", "sk-test-local");
 
