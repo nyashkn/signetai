@@ -11,6 +11,7 @@ import { Hono } from "hono";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { cancelObsoleteJobs, createRateLimiter, pruneTerminalJobs, requeueDeadJobs } from "../repair-actions";
+import { registerPipelineRoutes } from "./pipeline-routes";
 import { registerQueueDiagnosticsRoutes } from "./queue-diagnostics";
 
 function makeAccessor(db: Database): DbAccessor {
@@ -48,7 +49,7 @@ function seedDb(db: Database): void {
 	db.prepare(
 		`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts,
 			created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-	).run("dead-mem-1", memRow.id, "extract", "dead", 3, 3, oldIso, oldIso);
+	).run("dead-mem-1", memRow.id, "document_ingest", "dead", 3, 3, oldIso, oldIso);
 
 	db.prepare(
 		`INSERT INTO summary_jobs (id, session_key, harness, project, transcript, status,
@@ -117,8 +118,43 @@ describe("/api/diagnostics/queue", () => {
 		};
 		expect(body.queues.memory.dead).toBe(1);
 		expect(body.queues.summary.dead).toBe(2);
+		expect(body.queues).not.toHaveProperty("extraction");
 		expect(body.oldestDeadSummaryJob?.id).toBe("dead-sum-1");
 		expect(body.thresholds.summaryDeadWarn).toBe(50);
+	});
+
+	it("wins over the generic diagnostics domain route", async () => {
+		const app = new Hono();
+		registerPipelineRoutes(app);
+		registerQueueDiagnosticsRoutes(app, { accessor: env.accessor, limiter: createRateLimiter() });
+
+		const res = await app.request("/api/diagnostics/queue");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { timestamp?: string; queues?: { memory?: unknown } };
+		expect(body.timestamp).toEqual(expect.any(String));
+		expect(body.queues?.memory).toBeDefined();
+	});
+
+	it("preserves the queue admin guard after the generic route forwards", async () => {
+		const app = new Hono();
+		registerPipelineRoutes(app);
+		registerQueueDiagnosticsRoutes(app, {
+			accessor: env.accessor,
+			limiter: createRateLimiter(),
+			authConfig: { mode: "team" } as NonNullable<Parameters<typeof registerQueueDiagnosticsRoutes>[1]>["authConfig"],
+		});
+
+		expect((await app.request("/api/diagnostics/queue")).status).toBe(403);
+	});
+
+	it("does not shadow the concrete OpenClaw diagnostics route", async () => {
+		const app = new Hono();
+		registerPipelineRoutes(app);
+
+		const res = await app.request("/api/diagnostics/openclaw");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { status?: string };
+		expect(body.status).toBeOneOf(["connected", "stale", "never-seen"]);
 	});
 });
 
@@ -319,6 +355,153 @@ describe("repair action integration via the new dispatch path", () => {
 			expect(body.message).toMatch(/simulated degraded runtime/);
 		} finally {
 			db.close();
+		}
+	});
+});
+
+describe("requeue starvation across queues (#1052)", () => {
+	function seedBacklog(db: Database, memoryDead: number, summaryDead: number): void {
+		const nowIso = new Date().toISOString();
+		const oldIso = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+		for (let i = 0; i < memoryDead; i += 1) {
+			const memRow = db
+				.prepare(
+					`INSERT INTO memories (id, type, content, confidence, tags, created_at, updated_at,
+						updated_by, version, manual_override, is_deleted, embedding_model)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+				)
+				.get(`backlog-mem-${i}`, "fact", `seed ${i}`, 0.9, "[]", nowIso, nowIso, "test", 1, 0, 0, null) as
+				| {
+						id: string;
+				  }
+				| undefined;
+			if (!memRow) throw new Error("seed failed");
+			db.prepare(
+				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts,
+					created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(`backlog-mem-job-${i}`, memRow.id, "document_ingest", "dead", 3, 3, oldIso, oldIso);
+		}
+		for (let i = 0; i < summaryDead; i += 1) {
+			db.prepare(
+				`INSERT INTO summary_jobs (id, session_key, harness, project, transcript, status,
+					attempts, max_attempts, created_at, error)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(`backlog-sum-${i}`, `session-${i}`, "codex", "demo", "transcript", "dead", 3, 3, oldIso, "boom");
+		}
+	}
+
+	async function postRepair(
+		app: Hono,
+		body: Record<string, unknown>,
+	): Promise<{
+		status: number;
+		body: { success: boolean; affected: number; preview?: string[]; totalMatching?: number };
+	}> {
+		const res = await app.request("/api/diagnostics/queue/repair", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		const json = (await res.json()) as {
+			success: boolean;
+			affected: number;
+			preview?: string[];
+			totalMatching?: number;
+		};
+		return { status: res.status, body: json };
+	}
+
+	function countStatus(db: Database, table: "memory_jobs" | "summary_jobs", status: string): number {
+		const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE status = ?`).get(status) as { n: number };
+		return row.n;
+	}
+
+	it("default dry-run reports the sum of both table counts and previews both kinds", async () => {
+		const env = setup();
+		try {
+			seedBacklog(env.db, 100, 1);
+			const { status, body } = await postRepair(env.app, { action: "requeue" });
+			expect(status).toBe(200);
+			// setup() seeds 1 dead memory job + 2 dead summary jobs; the
+			// backlog adds 100 memory + 1 summary → 101 + 3 = 104 total.
+			expect(body.totalMatching).toBe(104);
+			expect(body.preview).toBeDefined();
+			expect(body.preview?.some((id) => id.startsWith("dead-mem-"))).toBe(true);
+			expect(body.preview?.some((id) => id.startsWith("backlog-sum-"))).toBe(true);
+		} finally {
+			env.db.close();
+		}
+	});
+
+	it("default apply touches at least one job in each table and never exceeds maxBatch total", async () => {
+		const env = setup();
+		try {
+			seedBacklog(env.db, 100, 1);
+			const { status, body } = await postRepair(env.app, {
+				action: "requeue",
+				dryRun: false,
+				maxBatch: 50,
+			});
+			expect(status).toBe(200);
+			expect(body.success).toBe(true);
+			expect(body.affected).toBeLessThanOrEqual(50);
+			expect(body.affected).toBeGreaterThanOrEqual(2);
+			// Both queues got at least one slot: memory has 101 dead, summary
+			// has 3 dead, so both are non-empty and share the budget.
+			expect(countStatus(env.db, "memory_jobs", "pending")).toBeGreaterThanOrEqual(1);
+			expect(countStatus(env.db, "summary_jobs", "pending")).toBeGreaterThanOrEqual(1);
+		} finally {
+			env.db.close();
+		}
+	});
+
+	it("--tables memory and --tables summary preserve exclusive behavior", async () => {
+		const env = setup();
+		try {
+			seedBacklog(env.db, 100, 1);
+			const { body: memoryBody } = await postRepair(env.app, {
+				action: "requeue",
+				dryRun: false,
+				maxBatch: 50,
+				tables: ["memory"],
+			});
+			// 101 dead memory jobs (1 setup + 100 backlog) → full 50 budget.
+			expect(memoryBody.affected).toBe(50);
+			expect(countStatus(env.db, "summary_jobs", "pending")).toBe(0);
+
+			const { body: summaryBody } = await postRepair(env.app, {
+				action: "requeue",
+				dryRun: false,
+				maxBatch: 50,
+				tables: ["summary"],
+			});
+			// 3 dead summary jobs (2 setup + 1 backlog) → all requeued.
+			expect(summaryBody.affected).toBe(3);
+			expect(countStatus(env.db, "memory_jobs", "pending")).toBe(50);
+			expect(countStatus(env.db, "summary_jobs", "pending")).toBe(3);
+		} finally {
+			env.db.close();
+		}
+	});
+
+	it("a zero selection budget does not turn a table's matching count into zero", async () => {
+		const env = setup();
+		try {
+			seedBacklog(env.db, 0, 2);
+			// setup() seeds 1 dead memory + 2 dead summary; the backlog adds
+			// 2 more summary → 5 total matches. maxBatch 1 gives the single
+			// slot to memory; summary gets a zero selection budget but its
+			// match count must still be reported in totalMatching.
+			const { status, body } = await postRepair(env.app, {
+				action: "requeue",
+				dryRun: true,
+				maxBatch: 1,
+			});
+			expect(status).toBe(200);
+			expect(body.totalMatching).toBe(5);
+			expect(body.preview?.length ?? 0).toBe(1);
+		} finally {
+			env.db.close();
 		}
 	});
 });

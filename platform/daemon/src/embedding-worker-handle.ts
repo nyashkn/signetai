@@ -16,7 +16,7 @@
  *     serving other requests the entire time, because the grinding happens
  *     in the worker, not here.
  *
- * Mirrors the established worker pattern (see pipeline/extraction-thread-handle.ts):
+ * Mirrors the established worker pattern:
  * embedded-worker-asset fallback for the compiled binary, workerData init,
  * ready handshake with timeout, injectable workerFactory for tests.
  */

@@ -61,7 +61,7 @@ import ora from "ora";
 import { registerBrowseCommand } from "./browse.js";
 import { registerAgentCommands } from "./commands/agent.js";
 import { registerApiKeyCommands } from "./commands/api-key.js";
-import { registerAppCommands } from "./commands/app.js";
+import { registerAppCommands, registerDefaultAction } from "./commands/app.js";
 import { registerConnectorCommands } from "./commands/connector.js";
 import { registerContextCommands } from "./commands/context.js";
 import { registerDaemonCommands } from "./commands/daemon.js";
@@ -120,6 +120,7 @@ import {
 	getReachableDaemonUrls,
 	hasDaemonProcess,
 	isDaemonRunning,
+	isLaunchdDaemonLoaded,
 	sleep,
 	startDaemon,
 	stopDaemon,
@@ -957,6 +958,7 @@ const daemonDeps = {
 	getDaemonStatus,
 	hasDaemonProcess,
 	isDaemonRunning,
+	isLaunchdDaemonLoaded: () => Promise.resolve(isLaunchdDaemonLoaded()),
 	normalizeAgentPath,
 	signetLogo,
 	sleep,
@@ -974,7 +976,14 @@ registerAppCommands(program, {
 			signetLogo,
 		}),
 	installNative: async (options) => {
-		printNativeInstallResult(installNativeBinary(options), options.json);
+		const result = installNativeBinary(options);
+		printNativeInstallResult(result, options.json);
+		if (await isDaemonRunning()) {
+			const rebound = await startDaemon(AGENTS_DIR, result.target);
+			if (!rebound) {
+				console.error("Signet binary installed, but the running daemon could not be switched to it.");
+			}
+		}
 	},
 	launchDashboard: (options) => launchDashboard(options, daemonDeps),
 	migrateSchema: (options) => migrateSchema(options, daemonDeps),
@@ -1139,6 +1148,11 @@ registerHookCommands(program, {
 
 const MIN_AUTO_UPDATE_INTERVAL = 300;
 const MAX_AUTO_UPDATE_INTERVAL = 604800;
+const reconcileDaemonInstallation = async (): Promise<boolean> => {
+	if (!(await isDaemonRunning())) return true;
+	return await startDaemon(AGENTS_DIR);
+};
+
 registerUpdateCommands(program, {
 	AGENTS_DIR,
 	MAX_AUTO_UPDATE_INTERVAL,
@@ -1150,6 +1164,7 @@ registerUpdateCommands(program, {
 	isOpenClawInstalled: () => new OpenClawConnector().isInstalled(),
 	isOhMyPiInstalled: () => new OhMyPiConnector().isInstalled(),
 	isPiInstalled: () => new PiConnector().isInstalled(),
+	reconcileDaemon: reconcileDaemonInstallation,
 	syncBuiltinSkills,
 	syncWorkspaceSourceRepo,
 });
@@ -1178,33 +1193,22 @@ registerSessionCommands(program, {
 
 registerDreamCommands(program, {
 	fetchFromDaemon,
+	fetchDaemonResult,
 });
 
 // ============================================================================
 // Default action when no command specified
 // ============================================================================
 
-// ============================================================================
-// signet browse — CDP browser bridge (Phase 1a)
-// ============================================================================
-
 registerBrowseCommand(program);
 
 // Default action when no command specified
-program.action(async () => {
-	if (process.stdout.isTTY) {
-		console.log(signetBanner({ version: VERSION }));
-	}
-	program.outputHelp();
-	const report = await getStatusReport(AGENTS_DIR, healthDeps);
-	console.log();
-	if (!report.installed) {
-		console.log(chalk.dim("Run `signet setup` to initialize a workspace."));
-	} else if (report.daemon.running) {
-		console.log(chalk.dim(`Daemon running at http://localhost:${DEFAULT_PORT} • ${report.basePath}`));
-	} else {
-		console.log(chalk.dim("Workspace found. Run `signet daemon start` or `signet doctor`."));
-	}
+registerDefaultAction(program, {
+	agentsDir: AGENTS_DIR,
+	defaultPort: DEFAULT_PORT,
+	getStatusReport,
+	statusDeps: healthDeps,
+	signetBanner: () => signetBanner({ version: VERSION }),
 });
 
 if (isDaemonEntrypoint) {

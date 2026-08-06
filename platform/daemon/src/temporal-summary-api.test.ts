@@ -15,7 +15,7 @@ function jsonHeader(): HeadersInit {
 	return { "Content-Type": "application/json" };
 }
 
-function seedNode(id: string, agentId: string, project = "proj-a"): void {
+function seedNode(id: string, agentId: string, project = "proj-a", sessionKey = `${id}-sess`): void {
 	const now = new Date().toISOString();
 	getDbAccessor().withWriteTx((db) => {
 		db.prepare(
@@ -24,7 +24,7 @@ function seedNode(id: string, agentId: string, project = "proj-a"): void {
 				earliest_at, latest_at, session_key, harness,
 				agent_id, source_type, source_ref, meta_json, created_at
 			) VALUES (?, ?, 0, 'session', ?, 10, ?, ?, ?, 'codex', ?, 'summary', ?, NULL, ?)`,
-		).run(id, project, `${agentId} summary`, now, now, `${id}-sess`, agentId, `${id}-sess`, now);
+		).run(id, project, `${agentId} summary`, now, now, sessionKey, agentId, sessionKey, now);
 	});
 }
 
@@ -57,7 +57,7 @@ describe("temporal summary API auth", () => {
 		rmSync(join(dir, "memory", "memories.db-wal"), { force: true });
 		initDbAccessor(join(dir, "memory", "memories.db"));
 		seedNode("node-a", "agent-a");
-		seedNode("node-b", "agent-b");
+		seedNode("node-b", "agent-b", "proj-a", "agent:agent-b:summary");
 	});
 
 	afterEach(() => {
@@ -119,7 +119,7 @@ describe("temporal summary API auth", () => {
 		expect(bySessionJson.summaries?.map((row) => row.id)).toEqual(["node-b"]);
 
 		const fallback = await app.request(
-			"http://localhost/api/sessions/summaries?agent_id=&agentId=agent-a&session_key=&sessionKey=agent:agent-b:summary",
+			"http://localhost/api/sessions/summaries?agent_id=&agentId=agent-a&session_key=&sessionKey=node-a-sess",
 			{ headers: jsonHeader() },
 		);
 		const fallbackJson = (await fallback.json()) as {
@@ -147,6 +147,19 @@ describe("temporal summary API auth", () => {
 		expect(json.node?.id).toBe("node-a");
 	});
 
+	it("does not expand another agent's temporal node", async () => {
+		const res = await app.request("http://localhost/api/sessions/summaries/expand", {
+			method: "POST",
+			headers: jsonHeader(),
+			body: JSON.stringify({
+				id: "node-a",
+				agentId: "agent-b",
+			}),
+		});
+
+		expect(res.status).toBe(404);
+	});
+
 	it("stores compaction summary tags as comma-delimited text", async () => {
 		const res = await app.request("http://localhost/api/hooks/compaction-complete", {
 			method: "POST",
@@ -165,6 +178,52 @@ describe("temporal summary API auth", () => {
 		) as { tags?: string } | undefined;
 
 		expect(row?.tags).toBe("session,summary,codex");
+	});
+
+	it("keeps the compaction memory projection out of episodic Dreaming input (#946)", async () => {
+		const res = await app.request("http://localhost/api/hooks/compaction-complete", {
+			method: "POST",
+			headers: jsonHeader(),
+			body: JSON.stringify({
+				harness: "codex",
+				summary: "session-end episodic classification",
+				agentId: "agent-a",
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const row = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare("SELECT memory_kind FROM memories WHERE type = 'session_summary' ORDER BY created_at DESC LIMIT 1")
+				.get(),
+		) as { memory_kind?: string | null } | undefined;
+
+		expect(row?.memory_kind).toBeNull();
+	});
+
+	it("normalizes compaction content before writing the temporal node", async () => {
+		const res = await app.request("http://localhost/api/hooks/compaction-complete", {
+			method: "POST",
+			headers: jsonHeader(),
+			body: JSON.stringify({
+				harness: "codex",
+				summary: "first line  \r\nsecond line\n\n",
+				agentId: "agent-a",
+			}),
+		});
+
+		expect(res.status).toBe(200);
+
+		const row = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare(
+					"SELECT content FROM session_summaries WHERE source_type = 'compaction' ORDER BY created_at DESC LIMIT 1",
+				)
+				.get(),
+		) as { content?: string } | undefined;
+
+		expect(row?.content).toBe("first line\nsecond line");
 	});
 
 	it("uses explicit project fallback when compaction lands before transcript persistence", async () => {

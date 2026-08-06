@@ -1,9 +1,9 @@
 /**
  * Continuity State — per-session accumulation for checkpoint writes.
  *
- * Tracks prompt counts, search queries, and /remember calls so the
- * checkpoint module can build periodic digests. Separate from
- * session-tracker.ts which handles runtime claim mutex.
+ * Tracks prompt counts and search queries so the checkpoint module can
+ * build periodic digests. Separate from session-tracker.ts which handles
+ * runtime claim mutex.
  */
 
 import { realpathSync } from "node:fs";
@@ -20,7 +20,6 @@ export interface ContinuityState {
 	totalPromptCount: number;
 	lastCheckpointAt: number;
 	pendingQueries: string[];
-	pendingRemembers: string[];
 	pendingPromptSnippets: string[];
 	startedAt: number;
 	structuralSnapshot?: StructuralSnapshot;
@@ -35,7 +34,6 @@ export interface StructuralSnapshot {
 }
 
 const MAX_PENDING_QUERIES = 20;
-const MAX_PENDING_REMEMBERS = 10;
 const MAX_PENDING_SNIPPETS = 10;
 const SNIPPET_MAX_CHARS = 200;
 
@@ -64,7 +62,6 @@ export function initContinuity(sessionKey: string, harness: string, project: str
 		totalPromptCount: 0,
 		lastCheckpointAt: now,
 		pendingQueries: [],
-		pendingRemembers: [],
 		pendingPromptSnippets: [],
 		startedAt: now,
 	});
@@ -105,17 +102,6 @@ export function recordPrompt(
 	}
 }
 
-/** Record a /remember call content. */
-export function recordRemember(sessionKey: string | undefined, content: string): void {
-	if (!sessionKey) return;
-	const s = state.get(sessionKey);
-	if (!s) return;
-	s.pendingRemembers.push(content);
-	if (s.pendingRemembers.length > MAX_PENDING_REMEMBERS) {
-		s.pendingRemembers.shift();
-	}
-}
-
 /** Check whether a checkpoint should be written based on config thresholds. */
 export function shouldCheckpoint(sessionKey: string | undefined, config: PipelineContinuityConfig): boolean {
 	if (!sessionKey || !config.enabled) return false;
@@ -145,7 +131,6 @@ export function consumeState(sessionKey: string | undefined): ContinuityState | 
 	const snapshot: ContinuityState = {
 		...s,
 		pendingQueries: [...s.pendingQueries],
-		pendingRemembers: [...s.pendingRemembers],
 		pendingPromptSnippets: [...s.pendingPromptSnippets],
 	};
 
@@ -153,7 +138,6 @@ export function consumeState(sessionKey: string | undefined): ContinuityState | 
 	s.promptCount = 0;
 	s.lastCheckpointAt = Date.now();
 	s.pendingQueries = [];
-	s.pendingRemembers = [];
 	s.pendingPromptSnippets = [];
 
 	return snapshot;

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import {
 	enqueueTranscriptCaptureJob,
+	getTranscriptCaptureJobStatus,
 	getTranscriptCaptureStatus,
 	runTranscriptCaptureOnce,
 } from "./transcript-capture-worker";
@@ -120,6 +121,28 @@ describe("transcript capture worker", () => {
 			db.prepare("SELECT status, attempts, error FROM transcript_capture_jobs WHERE id = ?").get(id),
 		) as { status: string; attempts: number; error: string | null } | undefined;
 		expect(row).toEqual({ status: "pending", attempts: 0, error: null });
+	});
+
+	it("returns only the requesting agent's capture receipt", () => {
+		const id = enqueueTranscriptCaptureJob(getDbAccessor(), {
+			agentId: "agent-a",
+			harness: "pi",
+			sessionKey: "session-receipt",
+			sessionId: "snapshot-receipt",
+			project: "/repo",
+			transcript: "User: receipt",
+			rawTranscript: "User: receipt",
+			capturedAt: "2026-06-20T10:00:00.000Z",
+			endedAt: "2026-06-20T10:00:00.000Z",
+		});
+
+		expect(id).toBeTruthy();
+		expect(getTranscriptCaptureJobStatus(getDbAccessor(), "agent-a", id ?? "")).toEqual({
+			id,
+			status: "pending",
+			error: null,
+		});
+		expect(getTranscriptCaptureJobStatus(getDbAccessor(), "agent-b", id ?? "")).toBeNull();
 	});
 
 	it("deduplicates stable session snapshots across delivery timestamps", () => {

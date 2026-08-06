@@ -50,19 +50,36 @@ interface DaemonStatus {
 		readonly blockedReason: string | null;
 		readonly hasWorkloadState: boolean;
 	} | null;
-	readonly extractionWorker: {
-		readonly running: boolean;
-		readonly overloaded: boolean;
-		readonly loadPerCpu: number | null;
-		readonly maxLoadPerCpu: number | null;
-		readonly overloadBackoffMs: number | null;
-		readonly overloadSince: string | null;
-		readonly nextTickInMs: number | null;
-	} | null;
 	readonly transcripts: {
 		readonly pending: number;
 		readonly failed: number;
 		readonly dead: number;
+	} | null;
+	readonly health?: {
+		readonly score: number | null;
+		readonly status: string | null;
+	} | null;
+	readonly queue?: {
+		readonly memory: {
+			readonly pending: number;
+			readonly leased: number;
+			readonly completed: number;
+			readonly failed: number;
+			readonly dead: number;
+			readonly oldestAgeSec: number;
+			readonly oldestDeadAgeSec: number;
+			readonly lastError: string | null;
+		} | null;
+		readonly summary: {
+			readonly pending: number;
+			readonly leased: number;
+			readonly completed: number;
+			readonly failed: number;
+			readonly dead: number;
+			readonly oldestAgeSec: number;
+			readonly oldestDeadAgeSec: number;
+			readonly lastError: string | null;
+		} | null;
 	} | null;
 	readonly probe?: {
 		readonly status: "healthy" | "degraded" | "listener-unhealthy" | "process-unhealthy" | "stale-artifact" | "absent";
@@ -287,15 +304,37 @@ export async function showStatus(options: { path?: string; json?: boolean }, dep
 			console.log(`    ${icon} OpenClaw plugin ${report.daemon.openclaw.status}`);
 		}
 	} else {
-		console.log(`  ${chalk.red("○")} Daemon ${chalk.red("stopped")}`);
-		if (report.daemon.probe && report.daemon.probe.status !== "absent") {
-			console.log(chalk.dim(`    ${report.daemon.probe.detail}`));
+		const probe = report.daemon.probe;
+		// The process can be alive while /health is unreachable (event loop
+		// blocked by a wedged worker). Label that "unresponsive", not
+		// "stopped": a restart often re-triggers the same wedge, and the
+		// operator should look at the logs first (#1074).
+		const unresponsive = probe?.status === "listener-unhealthy" || probe?.status === "process-unhealthy";
+		if (unresponsive) {
+			console.log(`  ${chalk.yellow("◐")} Daemon ${chalk.yellow("unresponsive")}`);
+			console.log(chalk.dim(`    ${probe.detail}`));
+			console.log(
+				chalk.dim(
+					"    The daemon process is alive but not answering. Check `signet daemon logs`; a restart may not clear a wedged worker.",
+				),
+			);
+		} else {
+			console.log(`  ${chalk.red("○")} Daemon ${chalk.red("stopped")}`);
+			if (probe && probe.status !== "absent") {
+				console.log(chalk.dim(`    ${probe.detail}`));
+			}
 		}
 	}
 
-	// Issue #901 — pipeline queue block (memory / summary / extraction).
+	// Queue diagnostics include the live memory and summary workers.
 	if (report.daemon.running) {
-		await renderPipelineQueuesBlock(deps);
+		await renderPipelineQueuesBlock(deps, report.daemon.queue ?? undefined);
+		const daemonHealth = report.daemon.health;
+		if (daemonHealth?.status === "unhealthy") {
+			const score = typeof daemonHealth.score === "number" ? ` (score ${daemonHealth.score.toFixed(2)})` : "";
+			console.log(chalk.yellow(`  ⚠ Daemon reports unhealthy composite health${score}`));
+			console.log(chalk.dim("    Core memory processing may be failing; see the queue rows above."));
+		}
 	}
 
 	console.log();
@@ -358,7 +397,6 @@ interface PipelineQueueDisplayReport {
 	readonly queues: {
 		readonly memory: QueueCountsForDisplay;
 		readonly summary: QueueCountsForDisplay;
-		readonly extraction: QueueCountsForDisplay;
 	};
 }
 
@@ -397,23 +435,32 @@ function renderQueueRow(label: string, counts: QueueCountsForDisplay): string {
 	return `    ${chalk.bold(label.padEnd(10))} ${cells.join(" ")}`;
 }
 
-export async function renderPipelineQueuesBlock(deps: { defaultPort: number }): Promise<void> {
-	const base = getDaemonBaseUrl(deps.defaultPort);
-	const report = await fetchPipelineQueueReport(base);
+export async function renderPipelineQueuesBlock(
+	deps: { defaultPort: number },
+	captured?: NonNullable<DaemonStatus["queue"]>,
+): Promise<void> {
+	// Prefer the daemon's own /api/status queue block (always available when
+	// the daemon is up); fall back to the admin-guarded diagnostics endpoint
+	// for the richer age columns.
+	const report = captured
+		? ({
+				queues: {
+					memory: captured.memory,
+					summary: captured.summary,
+				},
+			} as PipelineQueueDisplayReport)
+		: await fetchPipelineQueueReport(getDaemonBaseUrl(deps.defaultPort));
 	if (!report?.queues) return;
-	const { memory, summary, extraction } = report.queues;
-	if (!memory || !summary || !extraction) return;
-	const deadTotal = memory.dead + summary.dead + extraction.dead;
+	const { memory, summary } = report.queues;
+	if (!memory || !summary) return;
+	const deadTotal = memory.dead + summary.dead;
 	const heading = deadTotal > 0 ? chalk.yellow("Pipeline queues (dead jobs present)") : "Pipeline queues";
 	console.log("");
 	console.log(`  ${heading}`);
 	console.log(renderQueueRow("memory", memory));
 	console.log(renderQueueRow("summary", summary));
-	console.log(renderQueueRow("extraction", extraction));
-	if (summary.lastError || extraction.lastError) {
-		const err = summary.lastError ?? extraction.lastError;
-		if (err) console.log(chalk.dim(`    last error: ${String(err).slice(0, 120)}`));
-	}
+	if (memory.lastError) console.log(chalk.dim(`    memory last error: ${String(memory.lastError).slice(0, 120)}`));
+	if (summary.lastError) console.log(chalk.dim(`    summary last error: ${String(summary.lastError).slice(0, 120)}`));
 	console.log(chalk.dim("    (use 'signet repair queue {requeue|cancel|prune} [--apply]' to clean up)"));
 }
 
@@ -424,13 +471,19 @@ export function getExtractionStatusNotice(
 ): { level: "warn" | "error"; title: string; detail: string } | null {
 	const extraction = daemon.extraction;
 	if (extraction && daemon.running && extraction.hasWorkloadState && !extraction.ready) {
+		// The legacy auto-extraction pipeline was deliberately retired in favor
+		// of Dreaming, which owns all semantic writes. Retired states are not a
+		// fault and are not surfaced as a pipeline notice at all.
+		if (!extraction.enabled && extraction.status === "disabled" && extraction.reason) {
+			return null;
+		}
 		const title = !extraction.enabled
 			? "Pipeline disabled"
 			: extraction.paused
 				? "Pipeline paused"
 				: extraction.status === "blocked"
 					? "Extraction blocked"
-					: "Extraction worker stopped";
+					: "Extraction unavailable";
 		return {
 			level: extraction.status === "blocked" ? "error" : "warn",
 			title,
@@ -461,22 +514,6 @@ export function getExtractionStatusNotice(
 		};
 	}
 
-	const extractionWorker = daemon.extractionWorker;
-	if (extractionWorker && daemon.running && extractionWorker.running && extractionWorker.overloaded) {
-		const load = typeof extractionWorker.loadPerCpu === "number" ? extractionWorker.loadPerCpu.toFixed(2) : "unknown";
-		const threshold =
-			typeof extractionWorker.maxLoadPerCpu === "number" ? extractionWorker.maxLoadPerCpu.toFixed(2) : "unknown";
-		const nextTickSecs =
-			typeof extractionWorker.nextTickInMs === "number"
-				? Math.max(0, Math.ceil(extractionWorker.nextTickInMs / 1000))
-				: null;
-		return {
-			level: "warn",
-			title: "Pipeline load-shedding",
-			detail: `load/core ${load} > threshold ${threshold}${nextTickSecs !== null ? ` — next tick in ${nextTickSecs}s` : ""}`,
-		};
-	}
-
 	return null;
 }
 
@@ -492,6 +529,7 @@ export async function showDoctor(
 	if (options.target) {
 		console.log(chalk.red(`Unknown doctor target: ${options.target}`));
 		console.log(chalk.dim("Supported targets: hermes"));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -671,7 +709,7 @@ function addConcurrentInstallationFindings(report: SignetInstallationReport, fin
 			code: "duplicate_signet_installation",
 			message: `Another Signet installation is inactive: ${duplicate.executablePath} (${duplicate.method}). Active: ${report.target.executablePath} (native).`,
 			fix: duplicate.removalCommand
-				? `After verifying the active installation, remove the duplicate manually: ${duplicate.removalCommand}`
+				? `After verifying the active installation, remove only the duplicate launcher (this keeps signet-mcp available): ${duplicate.removalCommand}`
 				: undefined,
 		});
 	}
@@ -691,6 +729,43 @@ function addPhysicalMemoryFinding(report: StatusReport, findings: DoctorFinding[
 		message: `Daemon physical memory is high: ${formatMemory(physical)}${rss}.`,
 		fix: "Run `signet daemon restart` to reclaim it, then report recurring growth with the physical-footprint values from `/health`.",
 	});
+}
+
+function addQueueBacklogFindings(report: StatusReport, findings: DoctorFinding[]): void {
+	if (!report.daemon.running) return;
+	const queue = report.daemon.queue;
+	if (!queue) return;
+
+	const memory = queue.memory;
+	const summary = queue.summary;
+	const memoryDead = memory?.dead ?? 0;
+	const summaryDead = summary?.dead ?? 0;
+	const deadTotal = memoryDead + summaryDead;
+
+	const daemonHealth = report.daemon.health;
+	if (daemonHealth?.status === "unhealthy") {
+		const score = typeof daemonHealth.score === "number" ? ` (score ${daemonHealth.score.toFixed(2)})` : "";
+		findings.push({
+			level: "error",
+			code: "daemon_unhealthy",
+			message: `Daemon reports unhealthy composite health${score}.`,
+			fix: "Inspect the queue rows in `signet status`; dead jobs can be requeued with `signet repair queue requeue --apply`.",
+		});
+	}
+
+	if (deadTotal > 0) {
+		const lastError = memory?.lastError ?? summary?.lastError;
+		const detail = lastError ? ` Last error: ${lastError.slice(0, 160)}` : "";
+		const parts: string[] = [];
+		if (memoryDead > 0) parts.push(`${memoryDead} memory`);
+		if (summaryDead > 0) parts.push(`${summaryDead} summary`);
+		findings.push({
+			level: "error",
+			code: "dead_jobs_backlog",
+			message: `${deadTotal} permanently dead processing job(s) (${parts.join(", ")}).${detail}`,
+			fix: "Run `signet repair queue requeue --apply` to reset dead jobs, or `signet repair queue cancel --apply` to retire them.",
+		});
+	}
 }
 
 function getDoctorFindings(report: StatusReport, installations: SignetInstallationReport): DoctorFinding[] {
@@ -764,6 +839,7 @@ function getDoctorFindings(report: StatusReport, installations: SignetInstallati
 	addOpenClawRuntimeFindings(report, findings);
 	addOpenClawHeartbeatFindings(report, findings);
 	addPhysicalMemoryFinding(report, findings);
+	addQueueBacklogFindings(report, findings);
 
 	if (report.openclawWorkspaceUnprotected) {
 		findings.push({

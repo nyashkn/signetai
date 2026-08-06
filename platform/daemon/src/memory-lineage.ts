@@ -509,6 +509,124 @@ function writeImmutableArtifact(seed: ArtifactSeed): string {
 	return path;
 }
 
+/**
+ * Explicit column values for a single memory_artifacts upsert.
+ * Values are bound as-is; no derivation or defaults are applied.
+ */
+export interface MemoryArtifactUpsertFields {
+	readonly agentId: string;
+	readonly sourcePath: string;
+	readonly sourceSha256: string;
+	readonly sourceKind: string;
+	readonly sessionId: string;
+	readonly sessionKey: string | null;
+	readonly sessionToken: string;
+	readonly project: string | null;
+	readonly harness: string | null;
+	readonly capturedAt: string;
+	readonly startedAt: string | null;
+	readonly endedAt: string | null;
+	readonly manifestPath: string | null;
+	readonly sourceNodeId: string | null;
+	readonly memorySentence: string | null;
+	readonly memorySentenceQuality: string | null;
+	readonly content: string;
+	readonly updatedAt: string;
+	readonly sourceMtimeMs: number | null;
+	readonly sourceId: string | null;
+	readonly sourceRoot: string | null;
+	readonly sourceExternalId: string | null;
+	readonly sourceParentPath: string | null;
+	readonly sourceMetaJson: string | null;
+}
+
+export interface MemoryArtifactUpsertOptions {
+	/**
+	 * When true, the ON CONFLICT update only applies when the conflicting row
+	 * already belongs to the same source_id (`WHERE memory_artifacts.source_id
+	 * = excluded.source_id`). Used by source-snapshot restore, which pairs this
+	 * guard with an up-front path-ownership check. Defaults to false
+	 * (unconditional conflict update).
+	 */
+	readonly conflictGuardSourceId?: boolean;
+}
+
+const MEMORY_ARTIFACT_UPSERT_SQL = `INSERT INTO memory_artifacts (
+		agent_id, source_path, source_sha256, source_kind, session_id,
+		session_key, session_token, project, harness, captured_at,
+		started_at, ended_at, manifest_path, source_node_id,
+		memory_sentence, memory_sentence_quality, content, updated_at,
+		source_mtime_ms, source_id, source_root, source_external_id,
+		source_parent_path, source_meta_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(agent_id, source_path) DO UPDATE SET
+		source_sha256 = excluded.source_sha256,
+		source_kind = excluded.source_kind,
+		session_id = excluded.session_id,
+		session_key = excluded.session_key,
+		session_token = excluded.session_token,
+		project = excluded.project,
+		harness = excluded.harness,
+		captured_at = excluded.captured_at,
+		started_at = excluded.started_at,
+		ended_at = excluded.ended_at,
+		manifest_path = excluded.manifest_path,
+		source_node_id = excluded.source_node_id,
+		memory_sentence = excluded.memory_sentence,
+		memory_sentence_quality = excluded.memory_sentence_quality,
+		content = excluded.content,
+		updated_at = excluded.updated_at,
+		source_mtime_ms = excluded.source_mtime_ms,
+		source_id = excluded.source_id,
+		source_root = excluded.source_root,
+		source_external_id = excluded.source_external_id,
+		source_parent_path = excluded.source_parent_path,
+		source_meta_json = excluded.source_meta_json,
+		is_deleted = 0,
+		deleted_at = NULL`;
+
+/**
+ * Canonical memory_artifacts upsert, run inside an existing write
+ * transaction. This is the single owner of the 24-column INSERT ... ON
+ * CONFLICT statement. Both the frontmatter-derived lineage path and the
+ * source-snapshot restore path delegate here so the SQL is not duplicated.
+ */
+export function upsertMemoryArtifactInTx(
+	db: Database,
+	fields: MemoryArtifactUpsertFields,
+	options: MemoryArtifactUpsertOptions = {},
+): void {
+	const sql = options.conflictGuardSourceId
+		? `${MEMORY_ARTIFACT_UPSERT_SQL}\n\t\tWHERE memory_artifacts.source_id = excluded.source_id`
+		: MEMORY_ARTIFACT_UPSERT_SQL;
+	db.prepare(sql).run(
+		fields.agentId,
+		fields.sourcePath,
+		fields.sourceSha256,
+		fields.sourceKind,
+		fields.sessionId,
+		fields.sessionKey,
+		fields.sessionToken,
+		fields.project,
+		fields.harness,
+		fields.capturedAt,
+		fields.startedAt,
+		fields.endedAt,
+		fields.manifestPath,
+		fields.sourceNodeId,
+		fields.memorySentence,
+		fields.memorySentenceQuality,
+		fields.content,
+		fields.updatedAt,
+		fields.sourceMtimeMs,
+		fields.sourceId,
+		fields.sourceRoot,
+		fields.sourceExternalId,
+		fields.sourceParentPath,
+		fields.sourceMetaJson,
+	);
+}
+
 function upsertArtifactRowInTx(
 	db: Database,
 	path: string,
@@ -545,65 +663,35 @@ function upsertArtifactRowInTx(
 	const sourceSha =
 		typeof frontmatter.content_sha256 === "string" ? frontmatter.content_sha256 : hashNormalizedBody(body);
 	const updatedAt = typeof frontmatter.updated_at === "string" ? frontmatter.updated_at : new Date().toISOString();
-	db.prepare(
-		`INSERT INTO memory_artifacts (
-			agent_id, source_path, source_sha256, source_kind, session_id,
-			session_key, session_token, project, harness, captured_at,
-			started_at, ended_at, manifest_path, source_node_id,
-			memory_sentence, memory_sentence_quality, content, updated_at,
-			source_mtime_ms, source_id, source_root, source_external_id,
-			source_parent_path, source_meta_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(agent_id, source_path) DO UPDATE SET
-			source_sha256 = excluded.source_sha256,
-			source_kind = excluded.source_kind,
-			session_id = excluded.session_id,
-			session_key = excluded.session_key,
-			session_token = excluded.session_token,
-			project = excluded.project,
-			harness = excluded.harness,
-			captured_at = excluded.captured_at,
-			started_at = excluded.started_at,
-			ended_at = excluded.ended_at,
-			manifest_path = excluded.manifest_path,
-			source_node_id = excluded.source_node_id,
-			memory_sentence = excluded.memory_sentence,
-			memory_sentence_quality = excluded.memory_sentence_quality,
-			content = excluded.content,
-			updated_at = excluded.updated_at,
-			source_mtime_ms = excluded.source_mtime_ms,
-			source_id = excluded.source_id,
-			source_root = excluded.source_root,
-			source_external_id = excluded.source_external_id,
-			source_parent_path = excluded.source_parent_path,
-			source_meta_json = excluded.source_meta_json,
-			is_deleted = 0,
-			deleted_at = NULL`,
-	).run(
-		agentId,
-		sourcePath,
-		sourceSha,
-		sourceKind,
-		sessionId,
-		sessionKey,
-		sessionToken,
-		project,
-		harness,
-		capturedAt,
-		startedAt,
-		endedAt,
-		manifestPath,
-		sourceNodeId,
-		memorySentence,
-		quality,
-		body,
-		updatedAt,
-		sourceMtimeMs,
-		sourceId,
-		sourceRoot,
-		sourceExternalId,
-		sourceParentPath,
-		sourceMetaJson,
+	upsertMemoryArtifactInTx(
+		db,
+		{
+			agentId,
+			sourcePath,
+			sourceSha256: sourceSha,
+			sourceKind,
+			sessionId,
+			sessionKey,
+			sessionToken,
+			project,
+			harness,
+			capturedAt,
+			startedAt,
+			endedAt,
+			manifestPath,
+			sourceNodeId,
+			memorySentence,
+			memorySentenceQuality: quality,
+			content: body,
+			updatedAt,
+			sourceMtimeMs,
+			sourceId,
+			sourceRoot,
+			sourceExternalId,
+			sourceParentPath,
+			sourceMetaJson,
+		},
+		{ conflictGuardSourceId: false },
 	);
 }
 
@@ -1345,7 +1433,11 @@ export async function writeCompactionArtifact(params: {
 	readonly provider?: LlmProvider | null;
 }): Promise<{ readonly manifestPath: string; readonly compactionPath: string }> {
 	const manifest = ensureCanonicalManifest(params);
-	const capturedAt = manifestValue(manifest.frontmatter, "captured_at") ?? params.capturedAt;
+	// A compaction is a new immutable event even when it belongs to an existing
+	// session. Its path must use this event's capture time, not the session
+	// manifest's original capture time, or a later compaction would attempt to
+	// overwrite the first one.
+	const capturedAt = params.capturedAt;
 	const sessionToken = deriveSessionToken(params.agentId, params.sessionId);
 	const body = normalizeMarkdownBody(params.summary);
 	const sentence = await resolveMemorySentence(body, params.project, params.harness, "compaction", params.provider);

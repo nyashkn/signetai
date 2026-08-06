@@ -21,13 +21,12 @@ import {
 	listEntityClaims,
 	listEntityGroups,
 	listKnowledgeEntities,
-	pinEntity,
 	resolveNamedEntity,
-	unpinEntity,
 } from "../knowledge-graph";
 import { getKnowledgeHygieneReport } from "../knowledge-graph-hygiene";
 import { trailFrom, whatTouched } from "../knowledge-trail";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
+import { OntologyProposalError, applyOntologyOperation } from "../ontology-proposals";
 import { getTraversalStatus, resolveFocalEntities, traverseKnowledgeGraph } from "../pipeline/graph-traversal";
 import {
 	type PrincipalIdentityDeclaration,
@@ -254,12 +253,18 @@ export function registerKnowledgeRoutes(app: Hono): void {
 		if (denied) return denied;
 
 		const agentId = c.req.query("agent_id") ?? "default";
-		pinEntity(getDbAccessor(), c.req.param("id"), agentId);
-		const entity = getKnowledgeEntityDetail(getDbAccessor(), c.req.param("id"), agentId);
-		if (!entity?.entity.pinnedAt) {
-			return c.json({ error: "Entity not found" }, 404);
+		try {
+			const { result } = applyOntologyOperation(getDbAccessor(), {
+				agentId,
+				actor: c.req.header("x-signet-actor") ?? "operator",
+				operation: "pin_entity",
+				payload: { id: c.req.param("id") },
+			});
+			return c.json({ pinned: true, pinnedAt: result?.pinnedAt });
+		} catch (err) {
+			if (err instanceof OntologyProposalError && err.status === 404) return c.json({ error: "Entity not found" }, 404);
+			throw err;
 		}
-		return c.json({ pinned: true, pinnedAt: entity.entity.pinnedAt });
 	});
 
 	app.delete("/api/knowledge/entities/:id/pin", async (c) => {
@@ -267,7 +272,17 @@ export function registerKnowledgeRoutes(app: Hono): void {
 		if (denied) return denied;
 
 		const agentId = c.req.query("agent_id") ?? "default";
-		unpinEntity(getDbAccessor(), c.req.param("id"), agentId);
+		try {
+			applyOntologyOperation(getDbAccessor(), {
+				agentId,
+				actor: c.req.header("x-signet-actor") ?? "operator",
+				operation: "unpin_entity",
+				payload: { id: c.req.param("id") },
+			});
+		} catch (err) {
+			if (err instanceof OntologyProposalError && err.status === 404) return c.json({ pinned: false });
+			throw err;
+		}
 		return c.json({ pinned: false });
 	});
 
@@ -438,7 +453,7 @@ export function registerKnowledgeRoutes(app: Hono): void {
 		const agentId = c.req.query("agent_id") ?? resolveDaemonAgentId();
 		return c.json(
 			getKnowledgeGraphForConstellation(getDbAccessor(), agentId, {
-				limit: parseNavigationLimit(c.req.query("limit"), 150, 300),
+				limit: parseNavigationLimit(c.req.query("limit"), 150, 1000),
 				maxAspectsPerEntity: parseNavigationLimit(c.req.query("max_aspects_per_entity"), 6, 25),
 				maxAttributesPerAspect: parseNavigationLimit(c.req.query("max_attributes_per_aspect"), 4, 250),
 				dependencyLimit: parseNavigationLimit(c.req.query("dependency_limit"), 500, 2000),
@@ -506,8 +521,8 @@ export function registerKnowledgeRoutes(app: Hono): void {
 
 		const primaryEntityId = focal.entityIds[0];
 
-		return getDbAccessor().withReadDb((db) => {
-			const traversal = traverseKnowledgeGraph(focal.entityIds, db, agentId, {
+		return getDbAccessor().withReadDbAsync(async (db) => {
+			const traversal = await traverseKnowledgeGraph(focal.entityIds, db, agentId, {
 				maxAspectsPerEntity: traversalCfg.maxAspectsPerEntity,
 				maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 				maxDependencyHops: traversalCfg.maxDependencyHops,

@@ -210,12 +210,6 @@ export type PipelineFlag = (typeof PIPELINE_FLAGS)[number];
 
 // -- Pipeline v2 sub-config interfaces --
 
-export interface PipelineEscalationConfig {
-	readonly maxNewEntitiesPerChunk: number;
-	readonly maxNewAttributesPerEntity: number;
-	readonly level2MaxEntities: number;
-}
-
 export interface PipelineCommandConfig {
 	readonly bin: string;
 	readonly args: ReadonlyArray<string>;
@@ -248,8 +242,7 @@ export interface PipelineExtractionConfig {
 		| "codex"
 		| "anthropic"
 		| "openrouter"
-		| "openai-compatible"
-		| "command";
+		| "openai-compatible";
 	readonly fallbackProvider?: "llama-cpp" | "ollama" | "none";
 	readonly allowRemoteProviders?: boolean;
 	readonly model: string;
@@ -258,20 +251,13 @@ export interface PipelineExtractionConfig {
 	readonly timeout: number;
 	readonly minConfidence: number;
 	readonly structuredOutput?: boolean;
-	readonly command?: PipelineCommandConfig;
-	readonly escalation?: PipelineEscalationConfig;
 	readonly rateLimit?: ProviderRateLimitConfig;
 }
 
 export interface PipelineWorkerConfig {
-	readonly pollMs: number;
 	readonly maxRetries: number;
 	readonly leaseTimeoutMs: number;
-	readonly maxLoadPerCpu: number;
-	readonly overloadBackoffMs: number;
 	readonly maxLlmConcurrency: number;
-	/** Run extraction pipeline in a dedicated worker thread (default: false). */
-	readonly threadedExtraction: boolean;
 }
 
 export interface PipelineClaudeCodeConfig {
@@ -283,7 +269,6 @@ export interface PipelineClaudeCodeConfig {
 
 export interface PipelineGraphConfig {
 	readonly enabled: boolean;
-	readonly extractionWritesEnabled?: boolean;
 	readonly boostWeight: number;
 	readonly boostTimeoutMs: number;
 }
@@ -367,16 +352,6 @@ export interface PipelineSubagentsConfig {
 	readonly tailChars: number;
 }
 
-export interface PipelineWriteGateConfig {
-	readonly enabled: boolean;
-	readonly threshold: number;
-	readonly continuityDiscount: number;
-}
-
-export interface PipelineDurabilityConfig {
-	readonly enabled: boolean;
-}
-
 export interface PipelineV2Config {
 	// Master switches (flat)
 	readonly enabled: boolean;
@@ -405,11 +380,8 @@ export interface PipelineV2Config {
 	readonly embeddingTracker: PipelineEmbeddingTrackerConfig;
 	readonly synthesis: PipelineSynthesisConfig;
 	readonly procedural: PipelineProceduralConfig;
-	readonly structural: PipelineStructuralConfig;
 	readonly feedback: PipelineFeedbackConfig;
 	readonly significance?: PipelineSignificanceConfig;
-	readonly writeGate?: PipelineWriteGateConfig;
-	readonly durability?: PipelineDurabilityConfig;
 	readonly modelRegistry: PipelineModelRegistryConfig;
 	readonly hints?: PipelineHintsConfig;
 	readonly reflections: PipelineReflectionsConfig;
@@ -461,25 +433,7 @@ export interface PipelineProceduralConfig {
 	readonly decayRate: number;
 	readonly minImportance: number;
 	readonly importanceOnInstall: number;
-	readonly enrichOnInstall: boolean;
-	readonly enrichMinDescription: number;
 	readonly reconcileIntervalMs: number;
-}
-
-export interface PipelineStructuralConfig {
-	readonly enabled: boolean;
-	readonly classifyBatchSize: number;
-	readonly dependencyBatchSize: number;
-	readonly pollIntervalMs: number;
-	readonly synthesisEnabled: boolean;
-	readonly synthesisIntervalMs: number;
-	readonly synthesisTopEntities: number;
-	readonly synthesisMaxFacts: number;
-	readonly synthesisMaxStallMs: number;
-	readonly supersessionEnabled: boolean;
-	readonly supersessionSweepEnabled: boolean;
-	readonly supersessionSemanticFallback: boolean;
-	readonly supersessionMinConfidence: number;
 }
 
 export interface PipelineFeedbackConfig {
@@ -513,15 +467,21 @@ export interface PipelineReflectionsConfig {
 	readonly model: string;
 	readonly timeout: number;
 	readonly maxTokens: number;
+	/** Daily cron in `M H * * *` form, evaluated in `timezone`. */
 	readonly schedule: string;
+	/** IANA timezone the daily schedule fires in; defaults to the daemon's detected local timezone. */
+	readonly timezone: string;
+	/** How many briefs one scheduled (or default manual) generation writes. */
+	readonly count: number;
 	readonly timeWindowHours: number;
 	readonly maxMemories: number;
 	readonly maxSummaries: number;
 }
 
 export interface DreamingConfig {
-	readonly enabled: boolean;
 	readonly tokenThreshold: number;
+	/** Maximum time that non-empty episodic evidence may wait below the token threshold. */
+	readonly maxInterval: number;
 	readonly timeout: number;
 	readonly maxInputTokens: number;
 	readonly maxOutputTokens: number;

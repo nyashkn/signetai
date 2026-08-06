@@ -26,12 +26,14 @@ describe("check-publish-manifests", () => {
 		expect(workflow).toContain("  workflow_dispatch:\n  push:");
 	});
 
-	test("keeps threaded extraction worker in standalone daemon build", () => {
+	test("does not ship the retired threaded extraction worker", () => {
 		const root = join(import.meta.dir, "..");
 		const daemonBuild = readFileSync(join(root, "platform", "daemon", "build.ts"), "utf-8");
+		const nativeBuild = readFileSync(join(root, "scripts", "build-native-bun.ts"), "utf-8");
 
-		expect(daemonBuild).toContain('entrypoint: "./src/pipeline/extraction-thread.ts"');
-		expect(daemonBuild).toContain('outfile: "./dist/extraction-thread.js"');
+		expect(daemonBuild).not.toContain('entrypoint: "./src/pipeline/extraction-thread.ts"');
+		expect(daemonBuild).not.toContain('outfile: "./dist/extraction-thread.js"');
+		expect(nativeBuild).not.toContain("extraction-thread");
 	});
 
 	test("keeps Docker build COPY sources present in the repository", () => {

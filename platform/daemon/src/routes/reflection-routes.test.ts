@@ -140,6 +140,41 @@ describe("reflection routes", () => {
 		expect(row).toEqual({ agent_id: "agent-a", model: "test-model", memory_ids: JSON.stringify([memoryId]) });
 	});
 
+	it("defaults an omitted generate count to the configured daily brief count", async () => {
+		seedMemory("agent-count", "Brief source material.");
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    reflections:
+      enabled: true
+      count: 2
+      timeWindowHours: 24
+      maxMemories: 10
+      maxSummaries: 10
+      timeout: 1000
+      maxTokens: 200
+      model: test-model
+`,
+		);
+
+		const briefApp = new Hono();
+		registerReflectionRoutes(briefApp, {
+			agentsDir: dir,
+			getDbAccessor: () => dbAccessor,
+			getInferenceProvider: () =>
+				makeProvider(
+					["BRIEF: You shipped the fix and moved on.", "BRIEF: The Venice plates arrived in 02_incoming."].join("\n"),
+				),
+		});
+
+		const res = await briefApp.request("/api/reflections/generate?agentId=agent-count", { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.generated).toBe(2);
+		expect(body.reflections).toHaveLength(2);
+	});
+
 	it("returns all same-day brief items from the today endpoint", async () => {
 		const today = new Date().toISOString().slice(0, 10);
 		seedReflection("older", "agent-today", today, "Older insight", `${today}T08:00:00.000Z`);
@@ -206,12 +241,13 @@ describe("reflection routes", () => {
 
 		const memory = dbAccessor.withReadDb(
 			(db) =>
-				db.prepare("SELECT content, agent_id FROM memories WHERE id = ?").get(body.memoryId) as {
+				db.prepare("SELECT content, agent_id, memory_kind FROM memories WHERE id = ?").get(body.memoryId) as {
 					content: string;
 					agent_id: string;
+					memory_kind: string | null;
 				},
 		);
-		expect(memory).toEqual({ content: "Ship the scoping fix.", agent_id: "agent-b" });
+		expect(memory).toEqual({ content: "Ship the scoping fix.", agent_id: "agent-b", memory_kind: "episodic" });
 	});
 
 	it("does not create duplicate answer memories after the answer is claimed", async () => {

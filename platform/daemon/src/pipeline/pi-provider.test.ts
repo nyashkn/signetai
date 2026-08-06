@@ -1,7 +1,7 @@
-import { describe, expect, test } from "bun:test";
-import { type Api, type Model, getModels } from "@earendil-works/pi-ai";
-import { githubCopilotOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { resolvePiModel } from "./pi-provider";
+import { describe, expect, mock, test } from "bun:test";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { getBuiltinModels as getModels } from "@earendil-works/pi-ai/providers/all";
+import { createPiModelProvider, isPiAgentSessionProvider, resolvePiModel } from "./pi-provider";
 
 describe("pi provider catalog models", () => {
 	test("preserves the Codex responses API and registry metadata", () => {
@@ -20,25 +20,82 @@ describe("pi provider catalog models", () => {
 		expect(resolved.apiKey).toBe("oauth-access");
 	});
 
-	test("preserves Copilot headers and applies credential-dependent model changes", () => {
-		const models = getModels("github-copilot") as Model<Api>[];
-		const modified = githubCopilotOAuthProvider.modifyModels?.(models, {
-			refresh: "refresh",
-			access: "tid=1;proxy-ep=proxy.enterprise.example.com;exp=9999999999",
-			expires: Date.now() + 60_000,
-		});
-		const model = modified?.[0];
+	test("normalizes a pasted OpenAI chat-completions endpoint to Pi's base URL", () => {
+		const model = getModels("opencode-go").find((candidate) => candidate.id === "deepseek-v4-flash");
 		expect(model).toBeDefined();
-		if (!model) throw new Error("Copilot catalog model missing");
 		const resolved = resolvePiModel({
-			executor: "github-copilot",
-			providerFamily: "github-copilot",
-			model: model.id,
-			piModel: model,
-			apiKey: "copilot-access",
+			executor: "openai-compatible",
+			providerFamily: "opencode-go",
+			model: "deepseek-v4-flash",
+			piModel: model as Model<Api>,
+			apiKey: "test-key",
+			baseUrl: "https://opencode.ai/zen/go/v1/chat/completions",
 		});
 
-		expect(resolved.piModel.baseUrl).toBe("https://api.enterprise.example.com");
-		expect(resolved.piModel.headers?.["Copilot-Integration-Id"]).toBe("vscode-chat");
+		expect(resolved.piModel.baseUrl).toBe("https://opencode.ai/zen/go/v1");
+	});
+
+	test("creates an isolated AgentSession with no ambient tools", async () => {
+		const provider = createPiModelProvider({
+			executor: "openai-compatible",
+			model: "test-model",
+			baseUrl: "http://127.0.0.1:1234/v1",
+		});
+		expect(isPiAgentSessionProvider(provider)).toBe(true);
+		const session = await provider.createAgentSession([]);
+		try {
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("accepts a reachable OpenAI-compatible gateway without a models endpoint", async () => {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = mock(() =>
+			Promise.resolve(new Response("not found", { status: 404 })),
+		) as unknown as typeof fetch;
+		try {
+			const provider = createPiModelProvider({
+				executor: "openai-compatible",
+				model: "gateway-model",
+				baseUrl: "https://gateway.example.test/v1",
+				apiKey: "test-key",
+			});
+			await expect(provider.available()).resolves.toBe(true);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("settles a successful silent-overflow response without continuing from an assistant message", async () => {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = mock(() =>
+			Promise.resolve(
+				new Response(
+					[
+						`data: ${JSON.stringify({ choices: [{ delta: { content: "done" } }], usage: { prompt_tokens: 3, completion_tokens: 1 } })}\n\n`,
+						`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+						"data: [DONE]\n\n",
+					].join(""),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+			),
+		) as unknown as typeof fetch;
+
+		const provider = createPiModelProvider({
+			executor: "openai-compatible",
+			model: "silent-overflow-test",
+			baseUrl: "http://127.0.0.1:1234/v1",
+			contextWindow: 2,
+		});
+		await expect(provider.generate("ordinary routed call")).resolves.toBe("done");
+		const session = await provider.createAgentSession([]);
+		try {
+			await expect(session.prompt("finish without tools")).resolves.toBeUndefined();
+		} finally {
+			session.dispose();
+			globalThis.fetch = originalFetch;
+		}
 	});
 });

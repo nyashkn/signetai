@@ -46,7 +46,6 @@ import {
 import { getSourceProvider } from "../source-providers";
 import { exportSourceSnapshot, importSourceSnapshot } from "../source-snapshots";
 import { bridgeSourceThreads } from "../source-thread-extraction";
-import { queueExtractionJob } from "./state";
 
 interface SourceIndexJobInput {
 	readonly source: SignetSourceEntry;
@@ -497,7 +496,8 @@ async function runSourceIndexJob(input: SourceIndexJobInput, job: SourceIndexJob
 			// It throws into the catch below on purpose — a bridge that failed
 			// quietly is how the graph ends up looking full and answering nothing.
 			const bridged = bridgeSourceThreads({ agentId, sourceId: input.source.id, sourceKind: input.source.kind });
-			for (const memoryId of bridged.memoryIds) queueExtractionJob(memoryId);
+			// No enqueue: Dreaming pulls new memories through its evidence cursor
+			// now that the push-based extraction queue is retired.
 
 			if (result.failures.length > 0) {
 				failSourceIndexJob(

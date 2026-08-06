@@ -431,7 +431,8 @@ memory:
 					| { count: number }
 					| undefined,
 		);
-		expect(row?.count).toBe(1);
+		// No chunk_group entity created — chunks are episodic evidence, not graph nodes.
+		expect(row?.count).toBe(0);
 	});
 
 	it("POST /api/memory/remember rejects changed oversized content for an existing idempotency key", async () => {
@@ -486,7 +487,7 @@ memory:
 					.get() as { count: number } | undefined
 			)?.count,
 		}));
-		expect(rows.groups).toBe(1);
+		expect(rows.groups).toBe(0);
 		expect(rows.chunks).toBe(firstJson.ids?.length);
 	});
 
@@ -710,7 +711,7 @@ memory:
 		});
 	});
 
-	it("POST /api/memory/remember persists structured graph data under the requested agent", async () => {
+	it("POST /api/memory/remember retains structured payload as episodic evidence without graph writes (#946)", async () => {
 		const res = await app.request("http://localhost/api/memory/remember", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -742,28 +743,56 @@ memory:
 		const json = (await res.json()) as {
 			id?: string;
 			structured?: boolean;
+			structured_applied?: boolean;
 			entities_linked?: number;
 			hints_written?: number;
 		};
 
 		expect(res.status).toBe(200);
+		// Structured input is retained as evidence, not applied to the graph.
 		expect(json.structured).toBe(true);
-		expect(json.entities_linked).toBeGreaterThan(0);
+		expect(json.structured_applied).toBe(false);
+		expect(json.entities_linked).toBe(0);
 		expect(json.hints_written).toBe(1);
 
-		const row = getDbAccessor().withReadDb(
+		// No entities, aspects, attributes, or mentions written.
+		const graphCounts = getDbAccessor().withReadDb(
 			(db) =>
 				db
 					.prepare(
-						`SELECT ea.content
-						 FROM entities e
-						 JOIN entity_aspects asp ON asp.entity_id = e.id
-						 JOIN entity_attributes ea ON ea.aspect_id = asp.id
-						 WHERE e.agent_id = ? AND e.canonical_name = ?`,
+						`SELECT
+							(SELECT COUNT(*) FROM entities WHERE agent_id = ?) AS entities,
+							(SELECT COUNT(*) FROM entity_aspects) AS aspects,
+							(SELECT COUNT(*) FROM entity_attributes) AS attributes,
+							(SELECT COUNT(*) FROM memory_entity_mentions WHERE memory_id = ?) AS mentions,
+							(SELECT COUNT(*) FROM memory_jobs WHERE memory_id = ? AND job_type = 'extract') AS extract_jobs`,
 					)
-					.get("bench-agent", "nicholai") as { content: string } | undefined,
+					.get("bench-agent", json.id, json.id) as {
+					entities: number;
+					aspects: number;
+					attributes: number;
+					mentions: number;
+					extract_jobs: number;
+				},
 		);
-		expect(row?.content).toBe("Nicholai uses Signet for benchmark memory.");
+		expect(graphCounts.entities).toBe(0);
+		expect(graphCounts.aspects).toBe(0);
+		expect(graphCounts.attributes).toBe(0);
+		expect(graphCounts.mentions).toBe(0);
+		expect(graphCounts.extract_jobs).toBe(0);
+
+		// The evidence is immediately retrievable.
+		const evidence = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT content, memory_kind, is_deleted FROM memories WHERE id = ?").get(json.id) as {
+					content: string;
+					memory_kind: string;
+					is_deleted: number;
+				},
+		);
+		expect(evidence.content).toBe("Nicholai uses Signet for benchmark memory.");
+		expect(evidence.memory_kind).toBe("episodic");
+		expect(evidence.is_deleted).toBe(0);
 
 		const hint = getDbAccessor().withReadDb(
 			(db) =>
@@ -774,7 +803,7 @@ memory:
 		expect(hint?.hint).toBe("What does Nicholai use for benchmark memory?");
 	});
 
-	it("POST /api/memory/remember creates entities from aspect-only structured payloads", async () => {
+	it("POST /api/memory/remember retains aspect-only structured payloads as evidence without creating entities (#946)", async () => {
 		const res = await app.request("http://localhost/api/memory/remember", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -799,35 +828,38 @@ memory:
 				},
 			}),
 		});
-		const json = (await res.json()) as { id?: string; structured?: boolean; entities_linked?: number };
+		const json = (await res.json()) as {
+			id?: string;
+			structured?: boolean;
+			structured_applied?: boolean;
+			entities_linked?: number;
+		};
 
 		expect(res.status).toBe(200);
 		expect(json.structured).toBe(true);
-		expect(json.entities_linked).toBeGreaterThan(0);
+		expect(json.structured_applied).toBe(false);
+		expect(json.entities_linked).toBe(0);
 
-		const row = getDbAccessor().withReadDb(
+		// No entities, aspects, or attributes created from the structured payload.
+		const entityCount = getDbAccessor().withReadDb(
 			(db) =>
-				db
-					.prepare(
-						`SELECT e.entity_type, asp.name AS aspect, ea.content
-						 FROM entities e
-						 JOIN entity_aspects asp ON asp.entity_id = e.id
-						 JOIN entity_attributes ea ON ea.aspect_id = asp.id
-						 WHERE e.agent_id = ? AND e.canonical_name = ?`,
-					)
-					.get("bench-agent", "memorybench user ccb36322") as
-					| { entity_type: string; aspect: string; content: string }
-					| undefined,
+				db.prepare("SELECT COUNT(*) as cnt FROM entities WHERE agent_id = ?").get("bench-agent") as { cnt: number },
 		);
+		expect(entityCount.cnt).toBe(0);
 
-		expect(row).toEqual({
-			entity_type: "person",
-			aspect: "music preferences",
-			content: "MemoryBench User ccb36322 has been using Spotify lately.",
-		});
+		// Evidence is immediately retrievable.
+		const evidence = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT content, memory_kind FROM memories WHERE id = ?").get(json.id) as {
+					content: string;
+					memory_kind: string;
+				},
+		);
+		expect(evidence.content).toBe("The benchmark user has been using Spotify lately.");
+		expect(evidence.memory_kind).toBe("episodic");
 	});
 
-	it("POST /api/memory/remember uses source timestamps to supersede stale structured attributes", async () => {
+	it("POST /api/memory/remember does not supersede structured attributes — no graph writes (#946)", async () => {
 		const basePayload = {
 			agentId: "bench-agent",
 			structured: {
@@ -888,40 +920,26 @@ memory:
 		});
 		expect(newRes.status).toBe(200);
 
-		const rows = getDbAccessor().withReadDb(
+		// No entities or attributes created — no supersession from remember.
+		const attributeCount = getDbAccessor().withReadDb(
+			(db) => db.prepare("SELECT COUNT(*) as cnt FROM entity_attributes").get() as { cnt: number },
+		);
+		expect(attributeCount.cnt).toBe(0);
+
+		// Both memories are immediately retrievable as episodic evidence.
+		const memories = getDbAccessor().withReadDb(
 			(db) =>
 				db
-					.prepare(
-						`SELECT ea.content, ea.status, replacement.content AS replacement
-						 FROM entities e
-						 JOIN entity_aspects asp ON asp.entity_id = e.id
-						 JOIN entity_attributes ea ON ea.aspect_id = asp.id
-						 LEFT JOIN entity_attributes replacement ON replacement.id = ea.superseded_by
-						 WHERE e.agent_id = ? AND e.canonical_name = ?
-						 ORDER BY ea.created_at`,
-					)
-					.all("bench-agent", "memorybench user restaurants") as Array<{
-					content: string;
-					status: string;
-					replacement: string | null;
-				}>,
+					.prepare("SELECT content FROM memories WHERE agent_id = ? AND memory_kind = 'episodic' ORDER BY created_at")
+					.all("bench-agent") as Array<{ content: string }>,
 		);
-
-		expect(rows).toEqual([
-			{
-				content: "MemoryBench User restaurants has tried three Korean restaurants.",
-				status: "superseded",
-				replacement: "MemoryBench User restaurants has now tried four Korean restaurants.",
-			},
-			{
-				content: "MemoryBench User restaurants has now tried four Korean restaurants.",
-				status: "active",
-				replacement: null,
-			},
+		expect(memories.map((m) => m.content)).toEqual([
+			"The benchmark user had tried three Korean restaurants.",
+			"The benchmark user has now tried four Korean restaurants.",
 		]);
 	});
 
-	it("POST /api/memory/remember does not supersede unrelated claims on the same aspect", async () => {
+	it("POST /api/memory/remember retains multiple structured claims as separate evidence rows (#946)", async () => {
 		for (const payload of [
 			{
 				content: "The benchmark user asked for a Parable of the Sower poem.",
@@ -965,23 +983,22 @@ memory:
 			expect(res.status).toBe(200);
 		}
 
-		const rows = getDbAccessor().withReadDb(
+		// No entity_attributes written from remember.
+		const attributeCount = getDbAccessor().withReadDb(
+			(db) => db.prepare("SELECT COUNT(*) as cnt FROM entity_attributes").get() as { cnt: number },
+		);
+		expect(attributeCount.cnt).toBe(0);
+
+		// Both memories are retained as separate episodic evidence rows.
+		const memories = getDbAccessor().withReadDb(
 			(db) =>
 				db
-					.prepare(
-						`SELECT ea.claim_key, ea.status
-						 FROM entities e
-						 JOIN entity_aspects asp ON asp.entity_id = e.id
-						 JOIN entity_attributes ea ON ea.aspect_id = asp.id
-						 WHERE e.agent_id = ? AND e.canonical_name = ?
-						 ORDER BY ea.claim_key`,
-					)
-					.all("bench-agent", "memorybench user events") as Array<{ claim_key: string; status: string }>,
+					.prepare("SELECT content FROM memories WHERE agent_id = ? AND memory_kind = 'episodic' ORDER BY created_at")
+					.all("bench-agent") as Array<{ content: string }>,
 		);
-
-		expect(rows).toEqual([
-			{ claim_key: "asked_for_parable_of_the_sower_poem", status: "active" },
-			{ claim_key: "asked_for_web_search_privacy_papers", status: "active" },
+		expect(memories.map((m) => m.content)).toEqual([
+			"The benchmark user asked for a Parable of the Sower poem.",
+			"The benchmark user asked for web-search privacy papers.",
 		]);
 	});
 
@@ -1000,7 +1017,7 @@ memory:
 		expect(json.error).toBe("createdAt must be a valid ISO timestamp");
 	});
 
-	it("POST /api/memory/remember scopes inline entity linking and client hints to the requested agent", async () => {
+	it("POST /api/memory/remember does not inline-link entities but still writes hints and episodic evidence (#946)", async () => {
 		const now = new Date().toISOString();
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(
@@ -1022,16 +1039,18 @@ memory:
 		const json = (await res.json()) as { id?: string; entities_linked?: number; hints_written?: number };
 
 		expect(res.status).toBe(200);
-		expect(json.entities_linked).toBeGreaterThan(0);
+		// No inline entity linking — entities_linked is always 0.
+		expect(json.entities_linked).toBe(0);
 		expect(json.hints_written).toBe(1);
 
-		const entity = getDbAccessor().withReadDb(
+		// No new mentions written to the pre-existing entity.
+		const mentionCount = getDbAccessor().withReadDb(
 			(db) =>
-				db
-					.prepare("SELECT id FROM entities WHERE canonical_name = ? AND agent_id = ?")
-					.get("nicholai", "inline-agent") as { id: string } | undefined,
+				db.prepare("SELECT COUNT(*) as cnt FROM memory_entity_mentions WHERE memory_id = ?").get(json.id) as {
+					cnt: number;
+				},
 		);
-		expect(entity).toBeDefined();
+		expect(mentionCount.cnt).toBe(0);
 
 		const hint = getDbAccessor().withReadDb(
 			(db) =>
@@ -1058,6 +1077,101 @@ memory:
 
 		expect(res.status).toBe(400);
 		expect(json.error).toBe("reason is required");
+	});
+
+	it("PATCH /api/memory/:id rejects content/type edits on episodic evidence (#946)", async () => {
+		const now = new Date().toISOString();
+		getDbAccessor().withWriteTx((db) => {
+			txIngestEnvelope(db, {
+				id: "mem-episodic",
+				content: "Original episodic evidence",
+				normalizedContent: "original episodic evidence",
+				contentHash: "hash-episodic",
+				who: "test",
+				why: "test",
+				project: "api-test",
+				importance: 0.7,
+				type: "fact",
+				tags: "seed",
+				pinned: 0,
+				isDeleted: 0,
+				extractionStatus: "none",
+				embeddingModel: null,
+				extractionModel: null,
+				updatedBy: "test",
+				memoryKind: "episodic",
+				sourceType: "manual",
+				sourceId: "mem-episodic",
+				createdAt: now,
+			});
+		});
+
+		// Content change rejected.
+		const contentRes = await app.request("http://localhost/api/memory/mem-episodic", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				content: "Tampered evidence",
+				contentHash: "hash-tampered",
+				reason: "attempt rewrite",
+			}),
+		});
+		expect(contentRes.status).toBe(409);
+		const contentJson = (await contentRes.json()) as { status?: string; error?: string };
+		expect(contentJson.status).toBe("episodic_content_immutable");
+
+		// Metadata change allowed.
+		const metaRes = await app.request("http://localhost/api/memory/mem-episodic", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ tags: "re-ranked", reason: "re-rank" }),
+		});
+		expect(metaRes.status).toBe(200);
+		const metaJson = (await metaRes.json()) as { status?: string };
+		expect(metaJson.status).toBe("updated");
+	});
+
+	it("PATCH /api/memory/:id keeps materialized semantic claims on the ontology path", async () => {
+		const now = new Date().toISOString();
+		getDbAccessor().withWriteTx((db) => {
+			txIngestEnvelope(db, {
+				id: "semantic-claim-api",
+				content: "Signet is a memory system.",
+				normalizedContent: "signet is a memory system.",
+				contentHash: "semantic-claim-api-hash",
+				who: "dreaming",
+				why: "test",
+				project: null,
+				importance: 0.9,
+				type: "semantic",
+				tags: "semantic,attribute",
+				pinned: 0,
+				isDeleted: 0,
+				extractionStatus: "completed",
+				embeddingModel: null,
+				extractionModel: null,
+				updatedBy: "dreaming",
+				memoryKind: "derived",
+				sourceType: "dreaming",
+				sourceId: null,
+				createdAt: now,
+			});
+			db.prepare(
+				`INSERT INTO entity_attributes
+				 (id, memory_id, agent_id, kind, content, normalized_content, confidence, importance, status)
+				 VALUES ('semantic-claim-api', 'semantic-claim-api', 'default', 'fact', ?, ?, 0.9, 0.9, 'active')`,
+			).run("Signet is a memory system.", "signet is a memory system.");
+		});
+
+		const response = await app.request("http://localhost/api/memory/semantic-claim-api", {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ content: "Signet is a search engine.", reason: "attempt bypass" }),
+		});
+		expect(response.status).toBe(409);
+		expect((await response.json()) as { status?: string }).toMatchObject({
+			status: "semantic_projection_content_immutable",
+		});
 	});
 
 	it("PATCH /api/memory/:id enforces if_version optimistic concurrency", async () => {

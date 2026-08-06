@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type {
 	AcpxModelSelection,
 	LlmGenerateResult,
@@ -17,7 +18,6 @@ import type {
 } from "@signet/core";
 import {
 	allTargetRefs,
-	compileLegacyRoutingConfig,
 	isLocalInferenceEndpoint,
 	parseRoutingConfig,
 	parseRoutingTargetRef,
@@ -30,6 +30,8 @@ import { isOAuthProvider, resolveOAuthCredential } from "./inference-oauth";
 import { type ResolvedInferenceCredential, createRoutingProvider } from "./inference-provider-factory";
 import { logger } from "./logger";
 import { loadMemoryConfig } from "./memory-config";
+import { createDreamingAcpxMcpConfig } from "./pipeline/acpx-dreaming-mcp";
+import { isPiAgentSessionProvider } from "./pipeline/pi-provider";
 import {
 	type AcpxHooksMode,
 	type LlmProviderStreamEvent,
@@ -64,6 +66,12 @@ export interface InferenceExecutionAttempt {
 export interface InferenceExecutionResult {
 	readonly text: string;
 	readonly usage: LlmUsage | null;
+	readonly decision: RouteDecision;
+	readonly attempts: readonly InferenceExecutionAttempt[];
+}
+
+/** Successful bounded-agent run using one router-selected target. */
+export interface InferenceAgentExecutionResult {
 	readonly decision: RouteDecision;
 	readonly attempts: readonly InferenceExecutionAttempt[];
 }
@@ -284,7 +292,6 @@ export class InferenceRouter {
 		}
 	}
 
-
 	resumeBackgroundInference(): void {
 		this.backgroundAdmissionsOpen = true;
 	}
@@ -356,21 +363,7 @@ export class InferenceRouter {
 			}
 		}
 
-		let legacy: RoutingConfig;
-		try {
-			const memoryCfg = loadMemoryConfig(this.agentsDir);
-			legacy = compileLegacyRoutingConfig({ extraction: memoryCfg.pipelineV2.extraction });
-		} catch (error) {
-			return {
-				ok: false,
-				error: {
-					code: "invalid-config",
-					message: `Failed to resolve legacy inference config: ${formatExecutionError(error)}`,
-				},
-			};
-		}
-
-		const parsed = parseRoutingConfig(raw, legacy);
+		const parsed = parseRoutingConfig(raw);
 		if (!parsed.ok) {
 			this.logConfigError(parsed.error, signature);
 			return parsed;
@@ -419,7 +412,12 @@ export class InferenceRouter {
 	): void {
 		if (signature === this.lastValidationSignature) return;
 		this.lastValidationSignature = signature;
-		logger.error("inference", `Routing config failed to load: ${error.message}`, undefined, error.details as Record<string, unknown> | undefined);
+		logger.error(
+			"inference",
+			`Routing config failed to load: ${error.message}`,
+			undefined,
+			error.details as Record<string, unknown> | undefined,
+		);
 	}
 
 	private resetRuntimeCaches(): void {
@@ -610,12 +608,13 @@ export class InferenceRouter {
 		targetId: string,
 		modelId: string,
 		acpxHooks?: AcpxHooksMode,
+		acpxExtraArgs?: readonly string[],
 	): Promise<StreamCapableLlmProvider> {
 		const cacheKey = `${loaded.signature}:${targetId}/${modelId}:${acpxHooks ?? "configured-hooks"}`;
 		const target = loaded.config.targets[targetId];
 		const account = target?.account ? loaded.config.accounts[target.account] : undefined;
 		const oauthBacked = isOAuthBackedAccount(account);
-		if (!oauthBacked) {
+		if (!oauthBacked && !acpxExtraArgs) {
 			const cached = this.providerCache.get(cacheKey);
 			if (cached) return cached;
 		}
@@ -626,12 +625,13 @@ export class InferenceRouter {
 				targetId,
 				modelId,
 				acpxHooks,
+				acpxExtraArgs,
 				claudeCode: loadMemoryConfig(this.agentsDir).pipelineV2.claudeCode,
 				resolveCredential: (candidateAccount) => this.resolveCredential(candidateAccount),
 			});
 		})();
 
-		if (!oauthBacked) this.providerCache.set(cacheKey, build);
+		if (!oauthBacked && !acpxExtraArgs) this.providerCache.set(cacheKey, build);
 		return build;
 	}
 
@@ -785,6 +785,104 @@ export class InferenceRouter {
 			return await this.executeRouted(request, prompt, { ...opts, signal });
 		} finally {
 			this.finishBackgroundExecution(background?.id);
+		}
+	}
+
+	/**
+	 * Run a daemon-owned bounded tool session through the same routing policy as
+	 * ordinary inference. Only Pi-backed targets can execute in-process tools;
+	 * ACPX gets its equivalent MCP binding rather than a fake text fallback.
+	 */
+	async runAgent(
+		request: RouteRequest,
+		prompt: string,
+		tools: readonly ToolDefinition[],
+		opts?: {
+			readonly timeoutMs?: number;
+			readonly maxTokens?: number;
+			readonly refresh?: boolean;
+			readonly acpxMcp?: {
+				readonly agentId: string;
+				readonly passId: string;
+				readonly daemonUrl: string;
+				readonly authorizationToken?: string;
+			};
+		},
+	): Promise<RouterResult<InferenceAgentExecutionResult>> {
+		const background = this.beginBackgroundExecution(request.operation);
+		if (background === null) {
+			return { ok: false, error: { code: "execution-failed", message: "Background inference is paused." } };
+		}
+		const backgroundExecutionId = background?.id;
+		try {
+			const loaded = await this.loadConfig();
+			if (!loaded.ok) return loaded;
+			const decision = await this.explain(request, opts?.refresh ?? false);
+			if (!decision.ok) return decision;
+			const attempts: InferenceExecutionAttempt[] = [];
+			for (const targetRef of [decision.value.targetRef, ...decision.value.fallbackTargetRefs]) {
+				const parsed = parseRoutingTargetRef(targetRef);
+				if (!parsed.ok) {
+					attempts.push({ targetRef, ok: false, durationMs: 0, error: parsed.error.message });
+					continue;
+				}
+				const startedAt = Date.now();
+				let mcpConfig: ReturnType<typeof createDreamingAcpxMcpConfig> | undefined;
+				try {
+					const target = loaded.value.config.targets[parsed.value.targetId];
+					if (target?.executor === "acpx") {
+						if (!opts?.acpxMcp) {
+							throw new Error("ACPX agent target requires the scoped Signet MCP binding");
+						}
+						mcpConfig = createDreamingAcpxMcpConfig(opts.acpxMcp);
+					}
+					const provider = await this.createProvider(
+						loaded.value,
+						parsed.value.targetId,
+						parsed.value.modelId,
+						undefined,
+						mcpConfig ? ["--mcp-config", mcpConfig.path] : undefined,
+					);
+					if (!isPiAgentSessionProvider(provider)) {
+						const generated = await provider.generate(prompt, {
+							timeoutMs: opts?.timeoutMs,
+							maxTokens: opts?.maxTokens,
+						});
+						if (!generated.trim()) throw new Error("ACPX agent returned no completion");
+						this.clearObservedRuntimeState(loaded.value, targetRef);
+						attempts.push({ targetRef, ok: true, durationMs: Date.now() - startedAt, usage: null });
+						return { ok: true, value: { decision: decision.value, attempts } };
+					}
+					const session = await provider.createAgentSession(tools, { maxTokens: opts?.maxTokens });
+					let timer: ReturnType<typeof setTimeout> | null = null;
+					if ((opts?.timeoutMs ?? provider.agentSessionTimeoutMs) > 0) {
+						timer = setTimeout(() => void session.abort(), opts?.timeoutMs ?? provider.agentSessionTimeoutMs);
+					}
+					try {
+						await session.prompt(prompt);
+						const failure = session.getFailureMessage();
+						if (failure) throw new Error(failure);
+					} finally {
+						if (timer) clearTimeout(timer);
+						session.dispose();
+					}
+					this.clearObservedRuntimeState(loaded.value, targetRef);
+					attempts.push({ targetRef, ok: true, durationMs: Date.now() - startedAt, usage: null });
+					return { ok: true, value: { decision: decision.value, attempts } };
+				} catch (error) {
+					const message = formatExecutionError(error);
+					this.observeExecutionFailure(loaded.value, targetRef, message);
+					attempts.push({ targetRef, ok: false, durationMs: Date.now() - startedAt, error: message });
+				} finally {
+					mcpConfig?.dispose();
+				}
+			}
+			return {
+				ok: false,
+				error: { code: "execution-failed", message: "All routed agent targets failed.", details: { attempts } },
+			};
+		} finally {
+			this.finishBackgroundExecution(backgroundExecutionId);
 		}
 	}
 

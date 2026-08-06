@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrateLegacyRoutingToRegistry, migrateSessionSynthesisRoute } from "./config-migration";
+import {
+	migrateLegacyRoutingToRegistry,
+	migrateRetiredExtractionWriterConfig,
+	migrateSessionSynthesisRoute,
+} from "./config-migration";
+import { loadMemoryConfig } from "./memory-config";
 
 function setupDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "signet-legacy-routing-migration-"));
@@ -307,6 +312,49 @@ inference:
 			expect(after).toContain("legacy-extraction");
 			expect(after).not.toContain("sessionSynthesis");
 			expect(after).not.toContain("legacy-synthesis");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes retired extraction writer config in v7 and is idempotent", () => {
+		const dir = setupDir();
+		try {
+			writeFileSync(
+				join(dir, "agent.yaml"),
+				`configVersion: 6
+memory:
+  pipelineV2:
+    enabled: true
+    writeGate:
+      threshold: 0.45
+    durability:
+      enabled: true
+    writeGateEnabled: true
+    writeGateThreshold: 0.5
+    writeGateContinuityDiscount: 0.2
+    extraction:
+      timeout: 30000
+`,
+			);
+
+			migrateRetiredExtractionWriterConfig(dir);
+			const after = readFileSync(join(dir, "agent.yaml"), "utf-8");
+			expect(after).toMatch(/^configVersion: 7/m);
+			for (const key of [
+				"writeGate:",
+				"durability:",
+				"writeGateEnabled:",
+				"writeGateThreshold:",
+				"writeGateContinuityDiscount:",
+			]) {
+				expect(after).not.toContain(key);
+			}
+			expect(after).toContain("timeout: 30000");
+			expect(() => loadMemoryConfig(dir)).not.toThrow();
+
+			migrateRetiredExtractionWriterConfig(dir);
+			expect(readFileSync(join(dir, "agent.yaml"), "utf-8")).toBe(after);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

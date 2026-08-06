@@ -1741,7 +1741,6 @@ export function registerOntologyCommands(program: Command, deps: OntologyDeps): 
 			if (!(await deps.ensureDaemonForSecrets())) return;
 			const status = asRecord(await apiGet(deps, "/api/status", new URLSearchParams()));
 			const pipe = asRecord(status.pipelineV2);
-			const graph = asRecord(pipe.graph);
 			const autonomous = asRecord(pipe.autonomous);
 			const data = {
 				directOperations:
@@ -1750,9 +1749,8 @@ export function registerOntologyCommands(program: Command, deps: OntologyDeps): 
 					"dreaming and ordinary graph maintenance should apply high-confidence operations with evidence; use pending proposals only for large refactors or explicit review.",
 				pipelineWrites:
 					pipe.enabled === true && pipe.shadowMode !== true && pipe.mutationsFrozen !== true
-						? "Pipeline V2 controlled writes may add memories; graph extraction writes depend on graph config."
-						: "Pipeline V2 direct writes are blocked by disabled, shadow, or frozen mode.",
-				graphExtractionWrites: graph.extractionWritesEnabled,
+						? "Dreaming is the sole automatic semantic writer; pipeline workers retain episodic and maintenance work."
+						: "Automatic semantic writes are blocked by disabled, shadow, or frozen mode.",
 				traversalShapesRecall: asRecord(pipe.traversal).enabled === true,
 				autonomousMaintenance: autonomous.enabled === true && autonomous.frozen !== true,
 				allowUpdateDelete: autonomous.allowUpdateDelete === true,

@@ -15,6 +15,11 @@ import { up as threadHeadsMigration } from "./048-thread-heads";
 import { up as ontologyControlPlaneState } from "./070-ontology-control-plane-state";
 import { up as documentScopeColumns } from "./080-document-scope-columns";
 import { up as memoryLifecycleRepair } from "./083-memory-lifecycle-repair";
+import { up as memoryKind } from "./094-memory-kind";
+import { up as compactionRecallProjections } from "./095-compaction-recall-projections";
+import { up as retireLegacyIngestion } from "./096-retire-legacy-ingestion";
+import { up as dreamingRunbook } from "./100-dreaming-runbook";
+import { up as agentScopedEntityName } from "./105-agent-scoped-entity-name";
 import { MIGRATIONS, hasPendingMigrations, runMigrations } from "./index";
 
 function createFreshDb(): Database {
@@ -235,8 +240,11 @@ describe("migration framework", () => {
 		expect(tableNames).toContain("scheduled_tasks");
 		expect(tableNames).toContain("task_runs");
 
-		// v13 tables
-		expect(tableNames).toContain("ingestion_jobs");
+		// v96 retires the unscoped legacy ingestion ledger.
+		expect(tableNames).not.toContain("ingestion_jobs");
+
+		// v99 keeps Pi Dreaming capability traces local and pass-scoped.
+		expect(tableNames).toContain("dreaming_tool_calls");
 
 		// v14 tables
 		expect(tableNames).toContain("telemetry_events");
@@ -768,6 +776,112 @@ describe("migration framework", () => {
 		const indexes = db.query("PRAGMA index_list(memory_artifacts)").all() as Array<{ name: string }>;
 		expect(indexes.map((row) => row.name)).toContain("idx_memory_artifacts_agent_source");
 		expect(indexes.map((row) => row.name)).toContain("idx_memory_artifacts_agent_source_root");
+	});
+
+	test("migration 105 scopes entity name uniqueness to the agent (#1070)", () => {
+		db = createFreshDb();
+		runMigrations(db);
+
+		const insert = (id: string, name: string, agentId: string): void => {
+			db.query(
+				`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, description, created_at, updated_at)
+				 VALUES (?, ?, ?, 'skill', ?, 'd', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			).run(id, name, name.toLowerCase(), agentId);
+		};
+
+		// A skill under 'default' and an extracted entity under another agent
+		// may now share a name. Pre-fix the global UNIQUE on entities.name
+		// rejected the second insert, which made the skill reconciler retry
+		// forever (#1086).
+		insert("skill:default:dreaming", "dreaming", "default");
+		insert("entity:hermes-agent:dreaming", "dreaming", "hermes-agent");
+
+		// Same agent + same name is still rejected.
+		expect(() => insert("skill:default:dreaming-2", "dreaming", "default")).toThrow(/UNIQUE/i);
+	});
+
+	test("migration 105 rebuilds entities, preserving rows, indexes, and FTS triggers", () => {
+		db = createFreshDb();
+		db.exec(`
+			CREATE TABLE entity_communities (id TEXT PRIMARY KEY);
+			CREATE TABLE entities (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				entity_type TEXT NOT NULL,
+				description TEXT,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				canonical_name TEXT,
+				mentions INTEGER DEFAULT 0,
+				embedding BLOB,
+				agent_id TEXT NOT NULL DEFAULT 'default',
+				pinned INTEGER NOT NULL DEFAULT 0,
+				pinned_at TEXT,
+				last_synthesized_at TEXT,
+				community_id TEXT REFERENCES entity_communities(id),
+				source_id TEXT,
+				source_kind TEXT,
+				source_path TEXT,
+				source_root TEXT,
+				status TEXT NOT NULL DEFAULT 'active',
+				archived_at TEXT,
+				archived_by TEXT,
+				archive_reason TEXT,
+				proposal_id TEXT,
+				proposal_evidence TEXT NOT NULL DEFAULT '[]'
+			);
+			CREATE VIRTUAL TABLE entities_fts USING fts5(
+				name, canonical_name,
+				content='entities', content_rowid='rowid'
+			);
+			INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, description, created_at, updated_at)
+			VALUES ('entity:hermes-agent:dreaming', 'dreaming', 'dreaming', 'system', 'hermes-agent',
+				'owned by harness', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+		`);
+
+		agentScopedEntityName(db);
+
+		// Data survives the rebuild.
+		const row = db.query("SELECT id, name, agent_id FROM entities WHERE id = 'entity:hermes-agent:dreaming'").get() as {
+			id: string;
+			name: string;
+			agent_id: string;
+		};
+		expect(row.agent_id).toBe("hermes-agent");
+		expect(row.name).toBe("dreaming");
+
+		// The constraint is now agent-scoped: a second agent may use the name.
+		db.query(
+			`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, description, created_at, updated_at)
+			 VALUES ('skill:default:dreaming', 'dreaming', 'dreaming', 'skill', 'default',
+				'd', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+		).run();
+
+		// The full index set is restored.
+		const indexes = db.query("PRAGMA index_list(entities)").all() as Array<{ name: string }>;
+		const indexNames = indexes.map((i) => i.name);
+		for (const expected of [
+			"idx_entities_canonical_name",
+			"idx_entities_agent",
+			"idx_entities_pinned",
+			"idx_entities_order",
+			"idx_entities_extracted_mentions",
+			"idx_entities_source",
+			"idx_entities_status",
+			"idx_entities_proposal",
+		]) {
+			expect(indexNames).toContain(expected);
+		}
+
+		// The FTS triggers are restored and the index repopulated.
+		const triggers = db
+			.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'entities_fts_%'")
+			.all() as Array<{ name: string }>;
+		expect(triggers.map((t) => t.name).sort()).toEqual(["entities_fts_ad", "entities_fts_ai", "entities_fts_au"]);
+
+		const ftsCount = db.query("SELECT COUNT(*) AS n FROM entities_fts").get() as { n: number };
+		const entityCount = db.query("SELECT COUNT(*) AS n FROM entities").get() as { n: number };
+		expect(ftsCount.n).toBe(entityCount.n);
 	});
 
 	test("migration 070 adds ontology control-plane status and version state safely", () => {
@@ -1546,5 +1660,159 @@ describe("migration framework", () => {
 				.all("refresh")
 				.map((row) => row.id),
 		).toContain("mem-fts-access");
+	});
+
+	test("migration 094 adds memory_kind and backfills episodic evidence via exclusion", () => {
+		db = createFreshDb();
+		db.exec(`
+			CREATE TABLE memories (
+				id TEXT PRIMARY KEY,
+				content TEXT NOT NULL,
+				source_type TEXT,
+				is_deleted INTEGER DEFAULT 0
+			);
+		`);
+		// Real user/tool/plugin input — various client sourceTypes, all episodic.
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-manual",
+			"manual evidence",
+			"manual",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-chunk",
+			"chunked evidence",
+			"chunk",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-codex",
+			"codex native memory",
+			"codex_native_memory",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-hermes",
+			"hermes plugin log",
+			"hermes-memory",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-custom",
+			"custom tool input",
+			"my-tool-v2",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-null",
+			"pre-pipeline row",
+			null,
+		);
+		// Deleted evidence is still backfilled so kind survives recovery.
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-deleted",
+			"deleted manual",
+			"manual",
+		);
+		db.prepare("UPDATE memories SET is_deleted = 1 WHERE id = ?").run("mem-deleted");
+		// Daemon-derived rows — NOT episodic.
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-extract",
+			"derived fact",
+			"extract",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-aggregate",
+			"synthesized recall",
+			"aggregate-recall",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-session-end",
+			"session summary fact",
+			"session_end",
+		);
+		db.prepare("INSERT INTO memories (id, content, source_type) VALUES (?, ?, ?)").run(
+			"mem-checkpoint",
+			"checkpoint-derived fact",
+			"checkpoint",
+		);
+
+		memoryKind(db as unknown as Parameters<typeof memoryKind>[0]);
+		memoryKind(db as unknown as Parameters<typeof memoryKind>[0]);
+
+		const rows = db
+			.query<{ id: string; memory_kind: string | null }, []>("SELECT id, memory_kind FROM memories ORDER BY id")
+			.all();
+		const byId = new Map(rows.map((r) => [r.id, r.memory_kind]));
+		// Real input classified episodic.
+		expect(byId.get("mem-manual")).toBe("episodic");
+		expect(byId.get("mem-chunk")).toBe("episodic");
+		expect(byId.get("mem-codex")).toBe("episodic");
+		expect(byId.get("mem-hermes")).toBe("episodic");
+		expect(byId.get("mem-custom")).toBe("episodic");
+		expect(byId.get("mem-null")).toBe("episodic");
+		expect(byId.get("mem-deleted")).toBe("episodic");
+		// Daemon-derived left NULL.
+		expect(byId.get("mem-extract")).toBeNull();
+		expect(byId.get("mem-aggregate")).toBeNull();
+		expect(byId.get("mem-session-end")).toBeNull();
+		expect(byId.get("mem-checkpoint")).toBeNull();
+	});
+
+	test("migration 095 reclassifies compaction recall projections as derived", () => {
+		db = createFreshDb();
+		db.exec(`
+			CREATE TABLE memories (
+				id TEXT PRIMARY KEY,
+				type TEXT,
+				memory_kind TEXT
+			);
+		`);
+		db.prepare("INSERT INTO memories (id, type, memory_kind) VALUES (?, ?, ?)").run(
+			"compaction-projection",
+			"session_summary",
+			"episodic",
+		);
+		db.prepare("INSERT INTO memories (id, type, memory_kind) VALUES (?, ?, ?)").run(
+			"user-evidence",
+			"fact",
+			"episodic",
+		);
+
+		compactionRecallProjections(db as unknown as Parameters<typeof compactionRecallProjections>[0]);
+
+		const rows = db
+			.query<{ id: string; memory_kind: string | null }, []>("SELECT id, memory_kind FROM memories ORDER BY id")
+			.all();
+		const byId = new Map(rows.map((row) => [row.id, row.memory_kind]));
+		expect(byId.get("compaction-projection")).toBeNull();
+		expect(byId.get("user-evidence")).toBe("episodic");
+	});
+
+	test("migration 096 drops only the retired ingestion ledger", () => {
+		db = createFreshDb();
+		db.exec(`
+			CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT, memory_kind TEXT);
+			CREATE TABLE ingestion_jobs (id TEXT PRIMARY KEY, file_hash TEXT);
+			INSERT INTO memories (id, content, memory_kind) VALUES ('legacy-ingestion', 'preserved recall row', NULL);
+			INSERT INTO ingestion_jobs (id, file_hash) VALUES ('ingestion-job', 'old-hash');
+		`);
+
+		retireLegacyIngestion(db as unknown as Parameters<typeof retireLegacyIngestion>[0]);
+		retireLegacyIngestion(db as unknown as Parameters<typeof retireLegacyIngestion>[0]);
+
+		expect(
+			db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_jobs'").get(),
+		).toBeNull();
+		expect(db.prepare("SELECT content, memory_kind FROM memories WHERE id = 'legacy-ingestion'").get()).toEqual({
+			content: "preserved recall row",
+			memory_kind: null,
+		});
+	});
+
+	test("migration 100 adds Dreaming runbook columns to an existing pass table idempotently", () => {
+		db = createFreshDb();
+		db.exec("CREATE TABLE dreaming_passes (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL)");
+		dreamingRunbook(db as unknown as Parameters<typeof dreamingRunbook>[0]);
+		dreamingRunbook(db as unknown as Parameters<typeof dreamingRunbook>[0]);
+		const columns = db.query("PRAGMA table_info(dreaming_passes)").all() as Array<{ name: string }>;
+		expect(columns.map((column) => column.name)).toEqual(
+			expect.arrayContaining(["evidence_window_json", "runbook_json"]),
+		);
 	});
 });

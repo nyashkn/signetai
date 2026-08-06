@@ -31,6 +31,12 @@ export interface IndexingProgress {
   total: number
 }
 
+/** Optional provider-owned barrier after the whole benchmark ingest phase. */
+export interface FinalizeIngestOptions {
+  runId: string
+  dataSourceRunId: string
+}
+
 export type IndexingProgressCallback = (progress: IndexingProgress) => void
 
 export interface Provider {
@@ -39,6 +45,8 @@ export interface Provider {
   concurrency?: ConcurrencyConfig
   initialize(config: ProviderConfig): Promise<void>
   ingest(sessions: UnifiedSession[], options: IngestOptions): Promise<IngestResult>
+  /** Run a bounded provider-owned derivation only after all source sessions exist. */
+  finalizeIngest?(options: FinalizeIngestOptions): Promise<void>
   awaitIndexing(
     result: IngestResult,
     containerTag: string,
@@ -55,4 +63,5 @@ export type ProviderName =
   | "filesystem"
   | "rag"
   | "signet"
+  | "signet-dreaming"
   | "signet-supermemory-parity"

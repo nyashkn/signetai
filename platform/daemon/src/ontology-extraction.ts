@@ -1,5 +1,6 @@
 import type { EpistemicAssertion, LlmProvider, OntologyProposal } from "@signet/core";
-import type { DbAccessor, ReadDb } from "./db-accessor";
+import type { DbAccessor } from "./db-accessor";
+import { type EpisodicSourceRecord, readEpisodicSource } from "./episodic-sources";
 import { type CreateEpistemicAssertionInput, createEpistemicAssertionsInTx } from "./ontology-assertions";
 import { type CreateOntologyProposalInput, createOntologyProposalsInTx } from "./ontology-proposals";
 import { extractBalancedJsonObject, stripFences, tryParseJson } from "./pipeline/extraction";
@@ -35,19 +36,10 @@ type AssertionDraft = {
 	readonly claim_attribute_id?: string | null;
 };
 
-type SourceRecord = {
-	readonly kind: "transcript" | "artifact";
-	readonly id: string;
-	readonly content: string;
-	readonly sourceKind: string;
-	readonly sourceId: string;
-	readonly sourcePath: string | null;
-	readonly project: string | null;
-	readonly harness: string | null;
-};
+type SourceRecord = EpisodicSourceRecord;
 
 export interface OntologyExtractionSourceInfo {
-	readonly kind: "transcript" | "artifact";
+	readonly kind: EpisodicSourceRecord["kind"];
 	readonly id: string;
 	readonly sourceKind: string;
 	readonly sourceId: string;
@@ -648,105 +640,12 @@ function sourceInfo(source: SourceRecord): OntologyExtractionSourceInfo {
 	};
 }
 
-function sourceIdCandidates(value: string): string[] {
-	const trimmed = value.trim();
-	const stripped = trimmed.replace(/^transcript:/, "").replace(/^session:/, "");
-	return [...new Set([trimmed, stripped, `transcript:${stripped}`, `session:${stripped}`].filter(Boolean))];
-}
-
-function readTranscriptSource(db: ReadDb, agentId: string, id: string): SourceRecord | null {
-	const ids = sourceIdCandidates(id);
-	const placeholders = ids.map(() => "?").join(", ");
-	const row = db
-		.prepare(
-			`SELECT session_key, content, harness, project
-			 FROM session_transcripts
-			 WHERE agent_id = ? AND session_key IN (${placeholders})
-			 ORDER BY created_at DESC
-			 LIMIT 1`,
-		)
-		.get(agentId, ...ids) as
-		| {
-				readonly session_key: string;
-				readonly content: string;
-				readonly harness: string | null;
-				readonly project: string | null;
-		  }
-		| undefined;
-	if (!row) return null;
-	return {
-		kind: "transcript",
-		id: row.session_key,
-		content: row.content,
-		sourceKind: "transcript",
-		sourceId: row.session_key,
-		sourcePath: null,
-		project: row.project,
-		harness: row.harness,
-	};
-}
-
-function readArtifactSource(db: ReadDb, agentId: string, id: string): SourceRecord | null {
-	const ids = sourceIdCandidates(id);
-	const placeholders = ids.map(() => "?").join(", ");
-	const row = db
-		.prepare(
-			`SELECT source_path, source_kind, source_node_id, session_id, session_key, session_token,
-			        project, harness, content
-			 FROM memory_artifacts
-			 WHERE agent_id = ?
-			   AND COALESCE(is_deleted, 0) = 0
-			   AND (
-			     source_path = ?
-			     OR source_node_id IN (${placeholders})
-			     OR session_id IN (${placeholders})
-			     OR session_key IN (${placeholders})
-			     OR session_token IN (${placeholders})
-			   )
-			 ORDER BY captured_at DESC
-			 LIMIT 1`,
-		)
-		.get(agentId, id, ...ids, ...ids, ...ids, ...ids) as
-		| {
-				readonly source_path: string;
-				readonly source_kind: string;
-				readonly source_node_id: string | null;
-				readonly session_id: string;
-				readonly session_key: string | null;
-				readonly session_token: string;
-				readonly project: string | null;
-				readonly harness: string | null;
-				readonly content: string;
-		  }
-		| undefined;
-	if (!row) return null;
-	return {
-		kind: "artifact",
-		id: row.source_path,
-		content: row.content,
-		sourceKind: row.source_kind,
-		sourceId: row.source_node_id ?? row.session_key ?? row.session_id ?? row.session_token,
-		sourcePath: row.source_path,
-		project: row.project,
-		harness: row.harness,
-	};
-}
-
 function readSource(accessor: DbAccessor, params: Pick<ExtractOntologyParams, "agentId" | "from">): SourceRecord {
 	const from = params.from.trim();
 	if (from.length === 0) throw new OntologyExtractionError("from is required", 400);
-	return accessor.withReadDb((db) => {
-		if (from.startsWith("transcript:") || from.startsWith("session:")) {
-			const transcript = readTranscriptSource(db, params.agentId, from);
-			if (transcript) return transcript;
-		}
-		const artifactId = from.replace(/^(artifact|source):/, "");
-		const artifact = readArtifactSource(db, params.agentId, artifactId);
-		if (artifact) return artifact;
-		const transcript = readTranscriptSource(db, params.agentId, from);
-		if (transcript) return transcript;
-		throw new OntologyExtractionError("Extraction source not found", 404);
-	});
+	const source = accessor.withReadDb((db) => readEpisodicSource(db, { agentId: params.agentId, from }));
+	if (source) return source;
+	throw new OntologyExtractionError("Extraction source not found", 404);
 }
 
 export async function extractOntologyProposals(

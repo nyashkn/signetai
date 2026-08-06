@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { isDurableBoundary, normalizeBoundaryReason } from "./boundary-reason";
-import { enqueueSummaryJob, insertSummaryFacts, tracksSessionSummaryArtifact } from "./summary-worker";
+import { enqueueSummaryJob, tracksSessionSummaryArtifact } from "./summary-worker";
 import type { SummaryJobRow } from "./summary-worker";
 
 function makeAccessor(db: Database): DbAccessor {
@@ -227,38 +227,4 @@ describe("issue #896: boundary reason idempotency", () => {
 		// and skip. This is the idempotency guarantee.
 	});
 
-	it("insertSummaryFacts with durable boundary inserts facts", () => {
-		const facts = [{ content: "User prefers dark mode", importance: 0.4, tags: "preference", type: "preference" }];
-		const job = makeJobRow({
-			boundary_reason: "session_closed",
-			trigger: "session_end",
-		});
-
-		const saved = insertSummaryFacts(accessor, job, facts);
-		expect(saved).toBe(1);
-
-		const rows = db.prepare("SELECT content FROM memories WHERE source_type = 'session_end'").all() as Array<{
-			content: string;
-		}>;
-		expect(rows.length).toBe(1);
-		expect(rows[0].content).toContain("dark mode");
-	});
-
-	it("insertSummaryFacts with identical content is deduplicated", () => {
-		const facts = [{ content: "User prefers dark mode", importance: 0.4, tags: "preference", type: "preference" }];
-		const job = makeJobRow({
-			boundary_reason: "session_closed",
-			trigger: "session_end",
-		});
-
-		// Insert once
-		insertSummaryFacts(accessor, job, facts);
-		// Insert again — should be deduplicated by content_hash
-		insertSummaryFacts(accessor, job, facts);
-
-		const rows = db.prepare("SELECT COUNT(*) as cnt FROM memories WHERE source_type = 'session_end'").get() as {
-			cnt: number;
-		};
-		expect(rows.cnt).toBe(1);
-	});
 });

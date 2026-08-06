@@ -7,16 +7,10 @@
  */
 
 import type { WriteDb } from "./db-accessor";
-import {
-	syncVecDeleteBySourceExceptHash,
-	syncVecDeleteBySourceId,
-	syncVecInsert,
-	tableExists,
-	vectorToBlob,
-} from "./db-helpers";
+import { syncVecDeleteBySourceExceptHash, syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
+import { markDerivedMemoriesStaleForSourceInTx } from "./derived-memory-provenance";
 import { isActiveEmbeddingConfig, resolveActiveEmbeddingConfig } from "./embedding-index-state";
 import type { EmbeddingConfig } from "./memory-config";
-import { cancelExtractionJobsForForgottenMemory } from "./pipeline/extraction-queue";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,6 +33,10 @@ export interface IngestEnvelope {
 	embeddingModel?: string | null;
 	extractionModel?: string | null;
 	updatedBy?: string;
+	/** Evidence vs derived kind. remember writes set 'episodic'. */
+	memoryKind?: string | null;
+	/** Canonical structured payload JSON preserved verbatim as evidence. */
+	evidenceMeta?: string | null;
 	sourceType: string;
 	sourceId: string | null;
 	sourcePath?: string | null;
@@ -48,21 +46,6 @@ export interface IngestEnvelope {
 	agentId?: string;
 	visibility?: "global" | "private" | "archived";
 	createdAt: string;
-}
-
-export type DecisionAction = "update" | "delete" | "merge";
-
-export interface SemanticDecision {
-	action: DecisionAction;
-	memoryId: string;
-	/** New content for update/merge actions */
-	content?: string;
-	/** ID of the memory to merge into (for merge actions) */
-	mergeTargetId?: string;
-	importance?: number;
-	tags?: string | null;
-	updatedBy: string;
-	updatedAt: string;
 }
 
 export interface AccessUpdate {
@@ -108,6 +91,8 @@ export type ModifyMemoryTxStatus =
 	| "deleted"
 	| "version_conflict"
 	| "duplicate_content_hash"
+	| "episodic_content_immutable"
+	| "semantic_projection_content_immutable"
 	| "no_changes";
 
 export interface ModifyMemoryTxResult {
@@ -209,6 +194,7 @@ interface MutableMemoryRow {
 	project: string | null;
 	scope: string | null;
 	visibility: string | null;
+	memory_kind: string | null;
 }
 
 export function insertHistoryEvent(
@@ -249,12 +235,18 @@ export function insertHistoryEvent(
 	);
 }
 
-function deleteAggregateMemorySourceLinks(db: WriteDb, memoryId: string): void {
-	if (!tableExists(db, "aggregate_memory_sources")) return;
-	db.prepare(
-		`DELETE FROM aggregate_memory_sources
-		 WHERE aggregate_memory_id = ? OR source_memory_id = ?`,
-	).run(memoryId, memoryId);
+function invalidateDerivedMemoriesForMemoryInTx(
+	db: WriteDb,
+	memoryId: string,
+	agentId: string,
+	changedAt: string,
+): void {
+	markDerivedMemoriesStaleForSourceInTx(db, {
+		sourceKind: "memory",
+		sourceId: memoryId,
+		agentId,
+		staleAt: changedAt,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -272,8 +264,9 @@ export function txIngestEnvelope(db: WriteDb, mem: IngestEnvelope): string {
 		 (id, content, normalized_content, content_hash, who, why, project,
 		  importance, type, tags, pinned, is_deleted, extraction_status,
 		  embedding_model, extraction_model, created_at, updated_at, updated_by,
-		  source_type, source_id, source_path, runtime_path, idempotency_key, scope, agent_id, visibility)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  source_type, source_id, source_path, runtime_path, idempotency_key, scope, agent_id, visibility,
+		  memory_kind, evidence_meta)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		mem.id,
 		mem.content,
@@ -301,6 +294,8 @@ export function txIngestEnvelope(db: WriteDb, mem: IngestEnvelope): string {
 		mem.scope ?? null,
 		mem.agentId ?? "default",
 		mem.visibility ?? "global",
+		mem.memoryKind ?? null,
+		mem.evidenceMeta ?? null,
 	);
 
 	// FTS sync handled by memories_ai AFTER INSERT trigger (migration 001)
@@ -316,7 +311,7 @@ export function txModifyMemory(db: WriteDb, input: ModifyMemoryTxInput): ModifyM
 	const existing = db
 		.prepare(
 			`SELECT id, content, type, tags, importance, pinned, version, is_deleted,
-			        agent_id, project, scope, visibility
+			        agent_id, project, scope, visibility, memory_kind
 			 FROM memories
 			 WHERE id = ?`,
 		)
@@ -335,6 +330,46 @@ export function txModifyMemory(db: WriteDb, input: ModifyMemoryTxInput): ModifyM
 	if (input.ifVersion !== undefined && Number.isFinite(input.ifVersion) && existing.version !== input.ifVersion) {
 		return {
 			status: "version_conflict",
+			memoryId: input.memoryId,
+			currentVersion: existing.version,
+		};
+	}
+
+	// Episodic evidence and compaction recall projections are immutable content.
+	// The latter is intentionally outside Dreaming input, but mirrors immutable
+	// temporal evidence for ordinary recall. Metadata remains editable so
+	// curators can re-rank or re-label without altering what was recorded.
+	const isImmutableEvidence = existing.memory_kind === "episodic" || existing.type === "session_summary";
+	if (
+		isImmutableEvidence &&
+		((input.patch.content !== undefined && input.patch.content !== existing.content) ||
+			(input.patch.type !== undefined && input.patch.type !== existing.type))
+	) {
+		return {
+			status: "episodic_content_immutable",
+			memoryId: input.memoryId,
+			currentVersion: existing.version,
+		};
+	}
+
+	// Attribute projections are retrievable views of ontology state. Letting the
+	// generic memory route rewrite their content would silently split the same
+	// semantic claim between `memories` and `entity_attributes`. All claim
+	// content changes therefore stay on the daemon-owned ontology apply path.
+	const isAttributeProjection =
+		existing.memory_kind === "derived" &&
+		// Attribute projections deliberately share the attribute id, so this is a
+		// primary-key lookup rather than a scan across the graph.
+		db
+			.prepare("SELECT 1 FROM entity_attributes WHERE id = ? AND memory_id = ? AND agent_id = ?")
+			.get(existing.id, existing.id, existing.agent_id) !== undefined;
+	if (
+		isAttributeProjection &&
+		((input.patch.content !== undefined && input.patch.content !== existing.content) ||
+			(input.patch.type !== undefined && input.patch.type !== existing.type))
+	) {
+		return {
+			status: "semantic_projection_content_immutable",
 			memoryId: input.memoryId,
 			currentVersion: existing.version,
 		};
@@ -456,6 +491,7 @@ export function txModifyMemory(db: WriteDb, input: ModifyMemoryTxInput): ModifyM
 	db.prepare(`UPDATE memories SET ${updates.join(", ")} WHERE id = ?`).run(...args);
 
 	if (contentChanged) {
+		invalidateDerivedMemoriesForMemoryInTx(db, input.memoryId, existing.agent_id ?? "default", input.changedAt);
 		const newHash = input.patch.contentHash ?? null;
 		if (newHash) {
 			syncVecDeleteBySourceExceptHash(db, "memory", input.memoryId, newHash);
@@ -526,7 +562,7 @@ export function txModifyMemory(db: WriteDb, input: ModifyMemoryTxInput): ModifyM
 export function txForgetMemory(db: WriteDb, input: ForgetMemoryTxInput): ForgetMemoryTxResult {
 	const existing = db
 		.prepare(
-			`SELECT id, content, pinned, version, is_deleted
+			`SELECT id, content, pinned, version, is_deleted, agent_id
 			 FROM memories
 			 WHERE id = ?`,
 		)
@@ -537,6 +573,7 @@ export function txForgetMemory(db: WriteDb, input: ForgetMemoryTxInput): ForgetM
 				pinned: number;
 				version: number;
 				is_deleted: number;
+				agent_id: string | null;
 		  }
 		| undefined;
 
@@ -582,8 +619,23 @@ export function txForgetMemory(db: WriteDb, input: ForgetMemoryTxInput): ForgetM
 		     version = version + 1
 		 WHERE id = ?`,
 	).run(input.changedAt, input.changedAt, input.changedBy, input.memoryId);
-	cancelExtractionJobsForForgottenMemory(db, input.memoryId, input.changedAt);
-	deleteAggregateMemorySourceLinks(db, input.memoryId);
+	// Forgetting withdraws the source from the episodic cursor. Any unfinished
+	// historical extraction job must become terminal with it; no worker may
+	// revive a deleted source after the Dreaming cutover.
+	db.prepare(
+		`UPDATE memory_jobs
+		 SET status = 'dead', result = ?, error = ?, failed_at = ?, updated_at = ?
+		 WHERE memory_id = ?
+		   AND job_type = 'extract'
+		   AND status IN ('pending', 'leased')`,
+	).run(
+		JSON.stringify({ cancelled: "memory_forgotten" }),
+		"Source memory forgotten",
+		input.changedAt,
+		input.changedAt,
+		input.memoryId,
+	);
+	invalidateDerivedMemoriesForMemoryInTx(db, input.memoryId, existing.agent_id ?? "default", input.changedAt);
 
 	insertHistoryEvent(db, {
 		memoryId: input.memoryId,
@@ -702,6 +754,7 @@ export function txSupersedeMemory(db: WriteDb, input: SupersedeMemoryTxInput): S
 		     version = version + 1
 		 WHERE id = ?`,
 	).run(input.supersededBy, input.changedAt, input.reason, input.changedAt, input.changedBy, input.memoryId);
+	invalidateDerivedMemoriesForMemoryInTx(db, input.memoryId, existing.agent_id ?? "default", input.changedAt);
 
 	insertHistoryEvent(db, {
 		memoryId: input.memoryId,
@@ -823,158 +876,6 @@ export function txRecoverMemory(db: WriteDb, input: RecoverMemoryTxInput): Recov
 		currentVersion: existing.version,
 		newVersion: existing.version + 1,
 	};
-}
-
-/**
- * Apply a semantic decision (update, delete, or merge) atomically.
- * Uses soft-delete for all destructive operations — no hard row removal.
- */
-export function txApplyDecision(db: WriteDb, decision: SemanticDecision): void {
-	switch (decision.action) {
-		case "delete": {
-			const existing = db
-				.prepare(
-					`SELECT id, content, pinned, version, is_deleted
-					 FROM memories WHERE id = ?`,
-				)
-				.get(decision.memoryId) as
-				| {
-						id: string;
-						content: string;
-						pinned: number;
-						version: number;
-						is_deleted: number;
-				  }
-				| undefined;
-
-			if (!existing || existing.is_deleted === 1) break;
-			// Pipeline never force-deletes pinned memories (spec 27.2)
-			if (existing.pinned === 1) break;
-
-			db.prepare(
-				`UPDATE memories
-				 SET is_deleted = 1, deleted_at = ?, updated_at = ?,
-				     updated_by = ?, version = version + 1
-				 WHERE id = ?`,
-			).run(decision.updatedAt, decision.updatedAt, decision.updatedBy, decision.memoryId);
-			deleteAggregateMemorySourceLinks(db, decision.memoryId);
-
-			insertHistoryEvent(db, {
-				memoryId: decision.memoryId,
-				event: "deleted",
-				oldContent: existing.content,
-				newContent: null,
-				changedBy: decision.updatedBy,
-				reason: "pipeline-semantic-decision",
-				metadata: JSON.stringify({
-					actorType: "pipeline",
-					action: "delete",
-				}),
-				createdAt: decision.updatedAt,
-			});
-			break;
-		}
-		case "update": {
-			const parts: string[] = ["updated_at = ?", "updated_by = ?"];
-			const args: unknown[] = [decision.updatedAt, decision.updatedBy];
-
-			if (decision.content !== undefined) {
-				parts.push("content = ?");
-				args.push(decision.content);
-			}
-			if (decision.importance !== undefined) {
-				parts.push("importance = ?");
-				args.push(decision.importance);
-			}
-			if (decision.tags !== undefined) {
-				parts.push("tags = ?");
-				args.push(decision.tags);
-			}
-
-			parts.push("version = version + 1");
-			args.push(decision.memoryId);
-			db.prepare(`UPDATE memories SET ${parts.join(", ")} WHERE id = ?`).run(...args);
-
-			insertHistoryEvent(db, {
-				memoryId: decision.memoryId,
-				event: "updated",
-				oldContent: null,
-				newContent: decision.content ?? null,
-				changedBy: decision.updatedBy,
-				reason: "pipeline-semantic-decision",
-				metadata: JSON.stringify({
-					actorType: "pipeline",
-					action: "update",
-				}),
-				createdAt: decision.updatedAt,
-			});
-			break;
-		}
-		case "merge": {
-			if (decision.mergeTargetId === undefined || decision.content === undefined) {
-				break;
-			}
-
-			const source = db
-				.prepare(
-					`SELECT id, content, pinned, is_deleted
-					 FROM memories WHERE id = ?`,
-				)
-				.get(decision.memoryId) as { id: string; content: string; pinned: number; is_deleted: number } | undefined;
-
-			if (!source || source.is_deleted === 1) break;
-			// Pipeline never force-deletes pinned memories (spec 27.2)
-			if (source.pinned === 1) break;
-
-			// Update target with merged content
-			db.prepare(
-				`UPDATE memories
-				 SET content = ?, updated_at = ?, updated_by = ?,
-				     version = version + 1
-				 WHERE id = ?`,
-			).run(decision.content, decision.updatedAt, decision.updatedBy, decision.mergeTargetId);
-
-			insertHistoryEvent(db, {
-				memoryId: decision.mergeTargetId,
-				event: "merged",
-				oldContent: null,
-				newContent: decision.content,
-				changedBy: decision.updatedBy,
-				reason: "pipeline-semantic-decision",
-				metadata: JSON.stringify({
-					actorType: "pipeline",
-					action: "merge",
-					sourceMemoryId: decision.memoryId,
-				}),
-				createdAt: decision.updatedAt,
-			});
-
-			// Soft-delete source memory
-			db.prepare(
-				`UPDATE memories
-				 SET is_deleted = 1, deleted_at = ?, updated_at = ?,
-				     updated_by = ?, version = version + 1
-				 WHERE id = ?`,
-			).run(decision.updatedAt, decision.updatedAt, decision.updatedBy, decision.memoryId);
-			deleteAggregateMemorySourceLinks(db, decision.memoryId);
-
-			insertHistoryEvent(db, {
-				memoryId: decision.memoryId,
-				event: "deleted",
-				oldContent: source.content,
-				newContent: null,
-				changedBy: decision.updatedBy,
-				reason: "pipeline-merge-source-retired",
-				metadata: JSON.stringify({
-					actorType: "pipeline",
-					action: "merge",
-					mergeTargetId: decision.mergeTargetId,
-				}),
-				createdAt: decision.updatedAt,
-			});
-			break;
-		}
-	}
 }
 
 /**

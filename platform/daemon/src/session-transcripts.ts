@@ -422,6 +422,7 @@ export function upsertSessionTranscript(
 	harness: string,
 	project: string | null,
 	agentId: string,
+	capturedAt?: string,
 ): void {
 	if (sessionKey.trim().length === 0 || transcript.trim().length === 0) return;
 
@@ -432,7 +433,9 @@ export function upsertSessionTranscript(
 				.get();
 			if (!row) return;
 
-			const now = new Date().toISOString();
+			// Imported sessions retain their original event time. Live harnesses do
+			// not pass one and keep the existing wall-clock behavior.
+			const now = capturedAt ?? new Date().toISOString();
 			const cols = db.prepare("PRAGMA table_info(session_transcripts)").all() as ReadonlyArray<Record<string, unknown>>;
 			const hasUpdated = cols.some((col) => col.name === "updated_at");
 			if (hasUpdated) {

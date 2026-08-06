@@ -12,13 +12,20 @@
 import {
 	type Api,
 	type Context,
+	InMemoryCredentialStore,
 	type Model,
 	type OpenAICompletionsCompat,
 	type ThinkingLevel,
 	type Usage,
-	completeSimple,
-	streamSimple,
 } from "@earendil-works/pi-ai";
+import {
+	DefaultResourceLoader,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+	type ToolDefinition,
+	createAgentSession,
+} from "@earendil-works/pi-coding-agent";
 import type { LlmGenerateResult, LlmProvider, LlmUsage } from "@signet/core";
 import { logger } from "../logger";
 import type {
@@ -76,6 +83,43 @@ export interface PiModelProviderConfig {
 	readonly name?: string;
 }
 
+/**
+ * A deliberately isolated Pi AgentSession for daemon-owned agentic work.
+ *
+ * The daemon supplies every tool, including the single audited write seam.
+ * No project context, extensions, skills, or persisted Pi session is exposed
+ * to this background process.
+ */
+export interface PiAgentSession {
+	prompt(text: string): Promise<void>;
+	abort(): Promise<void>;
+	dispose(): void;
+	getActiveToolNames(): readonly string[];
+	getFailureMessage(): string | undefined;
+}
+
+export interface PiAgentSessionProvider {
+	readonly isPiAgentSessionProvider: true;
+	readonly agentSessionTimeoutMs: number;
+	createAgentSession(
+		tools: readonly ToolDefinition[],
+		options?: { readonly maxTokens?: number },
+	): Promise<PiAgentSession>;
+}
+
+export function isPiAgentSessionProvider(
+	provider: unknown,
+): provider is StreamCapableLlmProvider & PiAgentSessionProvider {
+	return (
+		typeof provider === "object" &&
+		provider !== null &&
+		"isPiAgentSessionProvider" in provider &&
+		provider.isPiAgentSessionProvider === true &&
+		"createAgentSession" in provider &&
+		typeof provider.createAgentSession === "function"
+	);
+}
+
 interface ResolvedModel {
 	readonly piModel: Model<Api>;
 	readonly apiKey: string | undefined;
@@ -88,6 +132,12 @@ function isLocalBaseUrl(url: string): boolean {
 
 function withVersionPath(baseUrl: string): string {
 	const trimmed = baseUrl.trim().replace(/\/+$/, "");
+	// Routing targets conventionally store an OpenAI *base* URL, while users
+	// commonly paste the concrete chat-completions endpoint. Pi appends the
+	// operation path itself, so normalize that concrete form instead of issuing
+	// `/chat/completions/chat/completions`.
+	if (trimmed.endsWith("/v1/chat/completions")) return trimmed.slice(0, -"/chat/completions".length);
+	if (trimmed.endsWith("/v1/responses")) return trimmed.slice(0, -"/responses".length);
 	if (trimmed.endsWith("/v1")) return trimmed;
 	return `${trimmed}/v1`;
 }
@@ -97,9 +147,11 @@ export function resolvePiModel(config: PiModelProviderConfig): ResolvedModel {
 	const timeoutMs = config.defaultTimeoutMs ?? 60_000;
 	void timeoutMs;
 	if (config.piModel) {
+		const baseUrl =
+			config.baseUrl && config.piModel.api === "openai-completions" ? withVersionPath(config.baseUrl) : config.baseUrl;
 		const piModel: Model<Api> = {
 			...config.piModel,
-			...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+			...(baseUrl ? { baseUrl } : {}),
 			...(config.contextWindow ? { contextWindow: config.contextWindow } : {}),
 			...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
 		};
@@ -261,11 +313,26 @@ function callerAbort(
 	};
 }
 
-export function createPiModelProvider(config: PiModelProviderConfig): StreamCapableLlmProvider {
+export function createPiModelProvider(
+	config: PiModelProviderConfig,
+): StreamCapableLlmProvider & PiAgentSessionProvider {
 	const { piModel, apiKey, label } = resolvePiModel(config);
 	const name = config.name ?? label;
 	const defaultTimeoutMs = config.defaultTimeoutMs ?? 60_000;
 	const reasoning = config.reasoning;
+	const modelRuntime = ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+	}).then((runtime) => {
+		runtime.registerProvider(piModel.provider, {
+			name: piModel.provider,
+			baseUrl: piModel.baseUrl,
+			api: piModel.api,
+			apiKey: apiKey ?? KEYLESS_API_KEY,
+			models: [{ ...piModel }],
+		});
+		return runtime;
+	});
 
 	function buildContext(prompt: string): Context {
 		return {
@@ -302,7 +369,7 @@ export function createPiModelProvider(config: PiModelProviderConfig): StreamCapa
 		const abort = callerAbort(opts, defaultTimeoutMs);
 		const t0 = Date.now();
 		try {
-			const msg = await completeSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
+			const msg = await (await modelRuntime).completeSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
 			const durationMs = Date.now() - t0;
 			if (msg.stopReason === "error" || msg.stopReason === "aborted") {
 				throw toError(name, msg);
@@ -344,7 +411,10 @@ export function createPiModelProvider(config: PiModelProviderConfig): StreamCapa
 					headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
 					signal: AbortSignal.timeout(8_000),
 				});
-				return res.ok || res.status === 401;
+				// OpenAI-compatible gateways commonly omit /models even though their
+				// chat-completions API is healthy. A 404 proves this host is reachable;
+				// let the routed call report any real completion-path failure.
+				return res.ok || res.status === 401 || res.status === 404;
 			} catch {
 				return false;
 			}
@@ -359,7 +429,7 @@ export function createPiModelProvider(config: PiModelProviderConfig): StreamCapa
 			let fullText = "";
 			let finalUsage: LlmUsage | null = null;
 
-			const piStream = streamSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
+			const piStream = (await modelRuntime).streamSimple(piModel, buildContext(prompt), buildOptions(opts, abort));
 
 			const stream = new ReadableStream<LlmProviderStreamEvent>({
 				async start(controller) {
@@ -403,5 +473,53 @@ export function createPiModelProvider(config: PiModelProviderConfig): StreamCapa
 		},
 	};
 
-	return streamCapable;
+	return {
+		...streamCapable,
+		isPiAgentSessionProvider: true,
+		agentSessionTimeoutMs: defaultTimeoutMs,
+		async createAgentSession(tools: readonly ToolDefinition[], options: { readonly maxTokens?: number } = {}) {
+			// Isolated from the user's Pi credentials and models.json. The same
+			// daemon-owned runtime services ordinary calls and this AgentSession.
+			const isolatedRuntime = await modelRuntime;
+			const settingsManager = SettingsManager.inMemory();
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: process.cwd(),
+				agentDir: process.cwd(),
+				settingsManager,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				systemPrompt: "You are a bounded Signet maintenance agent. You may use only the supplied daemon tools.",
+			});
+			await resourceLoader.reload();
+			const { session } = await createAgentSession({
+				model: options.maxTokens ? { ...piModel, maxTokens: options.maxTokens } : piModel,
+				modelRuntime: isolatedRuntime,
+				sessionManager: SessionManager.inMemory(),
+				settingsManager,
+				resourceLoader,
+				tools: tools.map((tool) => tool.name),
+				customTools: [...tools],
+			});
+			return {
+				prompt: (text) => session.prompt(text),
+				abort: () => session.abort(),
+				dispose: () => session.dispose(),
+				getActiveToolNames: () => session.getActiveToolNames(),
+				getFailureMessage: () => {
+					for (const message of [...session.messages].reverse()) {
+						if (
+							message.role === "assistant" &&
+							(message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length")
+						) {
+							return message.errorMessage ?? `Pi agent ${message.stopReason}`;
+						}
+					}
+					return undefined;
+				},
+			};
+		},
+	};
 }

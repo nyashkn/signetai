@@ -118,9 +118,10 @@ daemon queues a dreaming job. The threshold is configurable in
 memory:
   dreaming:
     enabled: true
-    tokenThreshold: 100000    # trigger after ~100k tokens of summaries
+    tokenThreshold: 100000    # trigger after ~100k tokens of episodic evidence
+    maxInterval: 21600000     # never leave a non-empty low-volume backlog for more than 6h
     maxInputTokens: 128000    # context budget per pass
-    backfillOnFirstRun: true  # run compaction on first dreaming pass
+    backfillOnFirstRun: true  # integrate available episodic evidence on first pass
 ```
 
 This means:
@@ -297,8 +298,6 @@ A CLI command triggers it explicitly:
 signet dream trigger --compact    # run compaction now
 signet dream status               # show dreaming state
 signet dream trigger              # force a dreaming pass now
-signet dream promote --from all    # preview source-backed attribute promotion
-signet dream promote --from all --apply
 ```
 
 
@@ -423,29 +422,19 @@ The mechanical consolidation engine is complete:
   `supersede_attribute`, `create_attribute`, `delete_attribute`. Atomic
   application in a single write transaction. Pinned entities and
   constraint attributes protected (reported as `skipped`).
-- **Token-budget trigger.** Summary worker accumulates transcript
-  token counts into `dreaming_state`. Background worker polls every
-  5 minutes and fires when threshold is crossed.
-- **Compact and incremental modes.** First pass auto-runs in compact
-  mode when `backfillOnFirstRun: true`. Manual trigger via API/CLI.
+- **Token-budget trigger.** The shared episodic source selector measures
+  unreasoned evidence. Background worker polls every 5 minutes and fires
+  when threshold is crossed.
+- **Compact and incremental modes.** First pass auto-runs incrementally over
+  the complete available episodic window when `backfillOnFirstRun: true`.
+  Compact maintenance is an explicit API/CLI action.
 - **Config surface.** `agent.yaml` > `memory.dreaming` with threshold,
   budget, backfill, and timeout settings. Provider and model are
   inherited from the synthesis provider (no separate dreaming-specific
   provider config -- avoids duplication and supports all synthesis
   backends including `claude-code`, `codex`, `opencode`, etc.).
 - **API.** `GET /api/dream/status`, `POST /api/dream/trigger`.
-- **Source-backed promotion.** `POST /api/dream/promote` reads saved
-  memories, memory artifacts, and transcripts as evidence and emits direct
-  `set_claim_value` operations. Default mechanical natural-language promotion
-  is limited to confidence-bearing memory rows; memory artifacts and
-  transcripts can provide structured operation JSON for preview, but raw source
-  JSON cannot self-attest confidence for direct apply. Plain prose in artifacts
-  or transcripts requires provider extraction or the proposal review path. The
-  route previews by default and applies only when requested; it does not use
-  Pipeline V2 extraction and does not create pending proposals as the default
-  path.
-- **CLI.** `signet dream status`, `signet dream trigger [--compact]`,
-  `signet dream promote [--from <source>] [--apply]`.
+- **CLI.** `signet dream status`, `signet dream trigger [--compact]`.
 - **DB migration 055.** `dreaming_state` (per-agent PK) and
   `dreaming_passes` (audit log with applied/skipped/failed counts).
 - **Graph safety.** LIMIT caps on entity graph queries (2000 entities,

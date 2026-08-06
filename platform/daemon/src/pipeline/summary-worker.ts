@@ -2,27 +2,21 @@
  * Session summary worker: the "librarian".
  *
  * Polls summary_jobs for pending transcripts, calls the configured
- * LLM to produce a cohesive session summary + atomic facts, writes
- * the summary as a dated markdown file, and inserts facts into the
- * memories table.
+ * LLM to produce a cohesive session summary and stores it as immutable
+ * episodic lineage for continuity, temporal recall, and Dreaming.
  *
  * Runs fully async — session-end hooks queue jobs and return
  * immediately, so users never wait for LLM inference.
  */
 
 import type { Database } from "bun:sqlite";
-import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LlmProvider } from "@signet/core";
 import { resolveDefaultBasePath } from "@signet/core";
-import { normalizeAndHashContent } from "../content-normalization";
 import type { DbAccessor, WriteDb } from "../db-accessor";
 import { countChanges } from "../db-helpers";
 import { getInferenceProvider } from "../llm";
 import { logger } from "../logger";
-import { inferType, isDuplicate } from "../memory-classification";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import {
 	IMMUTABLE_ARTIFACT_ERROR_PREFIX,
@@ -33,15 +27,10 @@ import {
 import { recordPathFeedback } from "../path-feedback";
 import { isNoiseSession } from "../session-noise";
 import { upsertSessionTranscript } from "../session-transcripts";
+import { isSystemPressureHigh } from "../system-pressure";
 import { upsertThreadHead } from "../thread-heads";
 import { isDurableBoundary, normalizeBoundaryReason } from "./boundary-reason";
-import { addDreamingTokens } from "./dreaming";
-import { enqueueExtractionJobInTx } from "./extraction-queue";
-import {
-	RateLimitExceededError,
-	SemaphoreTimeoutError,
-	awaitSubprocessWithDeadline,
-} from "./provider";
+import { RateLimitExceededError } from "./provider";
 import { type SignificanceConfig, assessSignificance } from "./significance-gate";
 import { countTokens } from "./tokenizer";
 
@@ -59,12 +48,8 @@ export interface SummaryWorkerOptions {
 	readonly isSynthesisAvailable?: () => Promise<boolean>;
 }
 
-export function canProcessSummaryJobs(
-	commandExtractionMode: boolean,
-	synthesisAvailable: boolean,
-	paused = false,
-): boolean {
-	return !paused && (commandExtractionMode || synthesisAvailable);
+export function canProcessSummaryJobs(synthesisAvailable: boolean, paused = false): boolean {
+	return !paused && synthesisAvailable;
 }
 
 const RECOVER_BATCH = 100;
@@ -93,26 +78,12 @@ export interface SummaryJobRow {
 	readonly created_at: string;
 }
 
-type SummaryFactJob = Pick<SummaryJobRow, "harness" | "project" | "session_key" | "agent_id"> & {
-	readonly session_id?: string | null;
-	readonly id?: string | null;
-};
-
 interface LlmSummaryResult {
 	readonly summary: string;
-	readonly facts: ReadonlyArray<{
-		readonly content: string;
-		readonly importance?: number;
-		readonly tags?: string;
-		readonly type?: string;
-	}>;
 	readonly leaves?: ReadonlyArray<string>;
 }
 
 export const SUMMARY_WORKER_UPDATED_BY = "summary-worker";
-const COMMAND_STAGE_RUNNING_RESULT = "command-stage-running";
-const COMMAND_STAGE_COMPLETED_RESULT = "command-stage-complete";
-type CommandStageStatus = "none" | "running" | "complete";
 
 export function resolveSummaryHeadingDate(job: Pick<SummaryJobRow, "ended_at" | "captured_at" | "created_at">): string {
 	const basis = job.ended_at ?? job.captured_at ?? job.created_at;
@@ -130,25 +101,6 @@ export function resolveFailedSummaryJobStatus(
 	maxAttempts: number,
 ): "dead" | "pending" {
 	return terminal || attempts >= maxAttempts ? "dead" : "pending";
-}
-
-function hasActiveContentHash(db: WriteDb, contentHash: string, agentId: string): boolean {
-	const row = db
-		.prepare(
-			`SELECT id FROM memories
-			 WHERE content_hash = ?
-			   AND COALESCE(NULLIF(agent_id, ''), 'default') = ?
-			   AND scope IS NULL
-			   AND is_deleted = 0
-			 LIMIT 1`,
-		)
-		.get(contentHash, agentId);
-	return typeof row === "object" && row !== null;
-}
-
-function isContentHashUniqueError(err: unknown): boolean {
-	if (!(err instanceof Error)) return false;
-	return err.message.includes("idx_memories_content_hash_unique") || err.message.includes("memories.content_hash");
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +150,7 @@ Use judgment. Focus on what actually mattered.
 
 Return ONLY a JSON object (no markdown fences, no other text):
 {
-  "summary": "# ${date} Session Notes\\n\\n## Topic Name\\n\\nFree-form session note...",
-  "facts": [{"content": "...", "importance": 0.3, "tags": "tag1,tag2", "type": "fact"}]
+  "summary": "# ${date} Session Notes\\n\\n## Topic Name\\n\\nFree-form session note..."
 }
 
 Summary:
@@ -208,14 +159,6 @@ Summary:
 - Cover what was worked on, key decisions, unresolved threads, and anything likely to matter later
 - Prefer concrete names, files, systems, or people when they matter
 - Write in past tense, third person
-
-Facts:
-- Each fact must be self-contained and understandable without this conversation
-- Include the specific subject (package name, file path, tool, component) in every fact
-- Keep only durable knowledge, preferences, rules, or decisions
-- Types: fact, preference, decision, learning, rule, issue
-- Importance: 0.3 (routine) to 0.5 (significant)
-- Max 15 facts
 
 Conversation:
 ${transcript}`;
@@ -228,8 +171,7 @@ Use judgment. Focus on what mattered in this segment.
 
 Return ONLY a JSON object (no markdown fences, no other text):
 {
-  "summary": "Free-form summary of this segment...",
-  "facts": [{"content": "...", "importance": 0.3, "tags": "tag1,tag2", "type": "fact"}]
+  "summary": "Free-form summary of this segment..."
 }
 
 Summary:
@@ -237,34 +179,16 @@ Summary:
 - Capture decisions, important context, and unresolved threads
 - Write in past tense, third person
 
-Facts:
-- Each fact must be self-contained and understandable without this conversation
-- Include the specific subject (package name, file path, tool, component) in every fact
-- Keep only durable knowledge worth carrying forward
-- Types: fact, preference, decision, learning, rule, issue
-- Importance: 0.3 (routine) to 0.5 (significant)
-- Max 10 facts per chunk
-
 Conversation segment:
 ${chunk}`;
 }
 
-function buildCombinePrompt(
-	summaries: readonly string[],
-	allFacts: ReadonlyArray<LlmSummaryResult["facts"][number]>,
-	date: string,
-): string {
-	const factsPreview = allFacts
-		.slice(0, 30)
-		.map((f) => `- ${f.content}`)
-		.join("\n");
-
-	return `You are combining ${summaries.length} segment summaries from one cleaned coding-session transcript on ${date}. Produce one coherent session note and one deduplicated durable fact list.
+function buildCombinePrompt(summaries: readonly string[], date: string): string {
+	return `You are combining ${summaries.length} segment summaries from one cleaned coding-session transcript on ${date}. Produce one coherent session note.
 
 Return ONLY a JSON object (no markdown fences, no other text):
 {
-  "summary": "# ${date} Session Notes\\n\\n## Topic Name\\n\\nFree-form session note...",
-  "facts": [{"content": "...", "importance": 0.3, "tags": "tag1,tag2", "type": "fact"}]
+  "summary": "# ${date} Session Notes\\n\\n## Topic Name\\n\\nFree-form session note..."
 }
 
 Summary:
@@ -274,17 +198,8 @@ Summary:
 - Keep the note coherent, concrete, and useful for future continuity
 - Write in past tense, third person
 
-Facts:
-- Deduplicate facts that say the same thing in different words
-- Keep the most specific version of each fact
-- Max 15 facts total
-- Importance: 0.3 (routine) to 0.5 (significant)
-
 Segment summaries:
-${summaries.map((s, i) => `--- Segment ${i + 1} ---\n${s}`).join("\n\n")}
-
-Extracted facts from all segments:
-${factsPreview}`;
+${summaries.map((s, i) => `--- Segment ${i + 1} ---\n${s}`).join("\n\n")}`;
 }
 
 // Split transcript into chunks on turn boundaries (User:/Assistant: lines).
@@ -347,15 +262,7 @@ function parseLlmResponse(raw: string): LlmSummaryResult | null {
 	try {
 		const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
 		if (typeof parsed.summary !== "string") return null;
-		if (!Array.isArray(parsed.facts)) return null;
-
-		return {
-			summary: parsed.summary,
-			facts: parsed.facts.filter(
-				(f: unknown): f is LlmSummaryResult["facts"][number] =>
-					typeof f === "object" && f !== null && typeof (f as Record<string, unknown>).content === "string",
-			),
-		};
+		return { summary: parsed.summary };
 	} catch {
 		return null;
 	}
@@ -378,7 +285,7 @@ function passesSignificanceGate(accessor: DbAccessor, job: SummaryJobRow, memory
 
 	if (assessment.significant) return true;
 
-	logger.info("summary-worker", "Session below significance threshold — skipping extraction", {
+	logger.info("summary-worker", "Session below significance threshold — skipping summary", {
 		sessionKey: job.session_key,
 		project: job.project,
 		scores: assessment.scores,
@@ -387,187 +294,12 @@ function passesSignificanceGate(accessor: DbAccessor, job: SummaryJobRow, memory
 	return false;
 }
 
-export function shouldRunSignificanceGateForJob(commandMode: boolean, commandStageStatus: CommandStageStatus): boolean {
-	return !commandMode || commandStageStatus === "none";
-}
-
-function substituteCommandTokens(input: string, replacements: Record<string, string>): string {
-	let output = input;
-	for (const [token, value] of Object.entries(replacements)) {
-		output = output.split(token).join(value);
-	}
-	return output;
-}
-
-const emptyByteStream = (): ReadableStream<Uint8Array> =>
-	new ReadableStream<Uint8Array>({
-		start(controller) {
-			controller.close();
-		},
-	});
-
-function terminateSummaryCommand(child: ReturnType<typeof nodeSpawn>, signal: NodeJS.Signals): void {
-	const pid = child.pid;
-	if (process.platform !== "win32" && typeof pid === "number") {
-		try {
-			process.kill(-pid, signal);
-			return;
-		} catch {
-			// Fall through to direct child signaling when the group is already gone.
-		}
-	}
-	try {
-		child.kill(signal);
-	} catch {
-		// Child is already gone.
-	}
-}
-
-export async function runSummaryCommandProvider(
-	job: SummaryJobRow,
-	cfg: ResolvedMemoryConfig,
-	signal?: AbortSignal,
-): Promise<void> {
-	const command = cfg.pipelineV2.extraction.command;
-	if (!command) {
-		throw new Error("pipelineV2.extraction.command is required when extraction.provider is 'command'");
-	}
-
-	const tempDir = mkdtempSync(join(tmpdir(), "signet-summary-command-"));
-	const transcriptPath = join(tempDir, "transcript.txt");
-	writeFileSync(transcriptPath, job.transcript, "utf-8");
-
-	const tokenReplacements: Record<string, string> = {
-		$TRANSCRIPT: transcriptPath,
-		$TRANSCRIPT_PATH: transcriptPath,
-		$SESSION_KEY: job.session_key ?? "",
-		$PROJECT: job.project ?? "",
-		$AGENT_ID: job.agent_id,
-		$SIGNET_PATH: AGENTS_DIR,
-	};
-	const locationReplacements: Record<string, string> = {
-		$AGENT_ID: job.agent_id,
-		$SIGNET_PATH: AGENTS_DIR,
-	};
-	const bin = substituteCommandTokens(command.bin, locationReplacements).trim();
-	if (bin.length === 0) {
-		throw new Error("pipelineV2.extraction.command.bin resolved to an empty value");
-	}
-	const args = command.args.map((arg) => substituteCommandTokens(arg, tokenReplacements));
-	const timeoutMs = Math.max(5000, Math.min(300000, cfg.pipelineV2.extraction.timeout));
-	const cwd = command.cwd ? substituteCommandTokens(command.cwd, locationReplacements).trim() : undefined;
-	const envFromConfig: Record<string, string> = {};
-	if (command.env) {
-		for (const [key, value] of Object.entries(command.env)) {
-			envFromConfig[key] = substituteCommandTokens(value, tokenReplacements);
-		}
-	}
-
-	try {
-		const child = nodeSpawn(bin, args, {
-			cwd: cwd && cwd.length > 0 ? cwd : undefined,
-			env: {
-				...process.env,
-				...envFromConfig,
-				SIGNET_PATH: AGENTS_DIR,
-			},
-			stdio: ["ignore", "ignore", "ignore"],
-			windowsHide: true,
-			detached: process.platform !== "win32",
-		});
-		const exited = new Promise<number>((resolve, reject) => {
-			child.on("error", reject);
-			child.on("close", (code) => resolve(code ?? 1));
-		});
-		try {
-			await awaitSubprocessWithDeadline(
-				{
-					stdout: emptyByteStream(),
-					stderr: emptyByteStream(),
-					exited,
-					processGroupId: process.platform !== "win32" ? child.pid : undefined,
-					kill(signalName?: string) {
-						terminateSummaryCommand(child, signalName === "SIGKILL" ? "SIGKILL" : "SIGTERM");
-					},
-				},
-				timeoutMs,
-				"summary command",
-				timeoutMs,
-				async (proc) => {
-					const exitCode = await proc.exited;
-					if (exitCode !== 0) {
-						throw new Error(`summary command exited with code ${exitCode}`);
-					}
-				},
-				signal,
-			);
-		} catch (error) {
-			if (error instanceof SemaphoreTimeoutError) {
-				throw new Error(`summary command timed out after ${timeoutMs}ms`);
-			}
-			throw error;
-		}
-	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
-	}
-}
-
-export function getCommandStageStatus(accessor: DbAccessor, jobId: string): CommandStageStatus {
-	return accessor.withReadDb((db) => {
-		const row = db.prepare("SELECT result FROM summary_jobs WHERE id = ?").get(jobId) as
-			| { result: string | null }
-			| undefined;
-		if (row?.result === COMMAND_STAGE_COMPLETED_RESULT) {
-			return "complete";
-		}
-		if (row?.result === COMMAND_STAGE_RUNNING_RESULT) {
-			return "running";
-		}
-		return "none";
-	});
-}
-
-export function hasCommandStageCompleted(accessor: DbAccessor, jobId: string): boolean {
-	return getCommandStageStatus(accessor, jobId) === "complete";
-}
-
-export function markCommandStageRunning(accessor: DbAccessor, jobId: string): void {
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE summary_jobs
-			 SET result = ?
-			 WHERE id = ? AND status = 'processing' AND (result IS NULL OR result = '')`,
-		).run(COMMAND_STAGE_RUNNING_RESULT, jobId);
-	});
-}
-
-export function clearCommandStageRunning(accessor: DbAccessor, jobId: string): void {
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE summary_jobs
-			 SET result = NULL
-			 WHERE id = ? AND status = 'processing' AND result = ?`,
-		).run(jobId, COMMAND_STAGE_RUNNING_RESULT);
-	});
-}
-
-export function markCommandStageCompleted(accessor: DbAccessor, jobId: string): void {
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE summary_jobs
-			 SET result = ?
-			 WHERE id = ? AND status = 'processing' AND (result = ? OR result IS NULL OR result = '')`,
-		).run(COMMAND_STAGE_COMPLETED_RESULT, jobId, COMMAND_STAGE_RUNNING_RESULT);
-	});
-}
-
 /**
  * Write the session summary artifact, tolerating an immutable-artifact
  * conflict when a prior attempt already committed it (the daemon crashed
  * between core commit and the final 'completed' status update). Core work
- * already succeeded in that case, and fact insertion is content-hash
- * idempotent, so the job should still complete instead of being classified
- * terminal -> dead. Any other error propagates.
+ * already succeeded in that case, so the job should still complete instead
+ * of being classified terminal -> dead. Any other error propagates.
  */
 export async function persistSessionSummaryArtifact(
 	job: SummaryJobRow,
@@ -664,53 +396,11 @@ async function processJob(
 	memoryCfg: ResolvedMemoryConfig,
 	signal?: AbortSignal,
 ): Promise<void> {
-	const commandMode = memoryCfg.pipelineV2.enabled && memoryCfg.pipelineV2.extraction.provider === "command";
-	const commandStageStatus: CommandStageStatus = commandMode ? getCommandStageStatus(accessor, job.id) : "none";
-
-	if (
-		shouldRunSignificanceGateForJob(commandMode, commandStageStatus) &&
-		!passesSignificanceGate(accessor, job, memoryCfg)
-	) {
-		markSummaryArtifactSkipped(job);
-		return;
-	}
-
-	if (commandMode) {
-		if (commandStageStatus === "none") {
-			markCommandStageRunning(accessor, job.id);
-			try {
-				await runSummaryCommandProvider(job, memoryCfg, signal);
-			} catch (error) {
-				clearCommandStageRunning(accessor, job.id);
-				throw error;
-			}
-			markCommandStageCompleted(accessor, job.id);
-		} else if (commandStageStatus === "complete") {
-			logger.info("summary-worker", "Command extraction already completed for this job attempt chain; skipping rerun", {
-				jobId: job.id,
-				attempt: job.attempts,
-				sessionKey: job.session_key,
-				project: job.project,
-			});
-		} else {
-			logger.warn(
-				"summary-worker",
-				"Command stage checkpoint indicates in-flight prior attempt; skipping rerun to avoid duplicate side effects",
-				{
-					jobId: job.id,
-					attempt: job.attempts,
-					sessionKey: job.session_key,
-					project: job.project,
-				},
-			);
-		}
-	}
-
 	if (!provider) {
-		if (!commandMode) throw new Error("summary worker requires a sessionSynthesis inference provider");
-		if (job.session_key) {
-			upsertSessionTranscript(job.session_key, job.transcript, job.harness, job.project, job.agent_id);
-		}
+		throw new Error("summary worker requires a sessionSynthesis inference provider");
+	}
+
+	if (!passesSignificanceGate(accessor, job, memoryCfg)) {
 		markSummaryArtifactSkipped(job);
 		return;
 	}
@@ -729,16 +419,13 @@ async function processJob(
 
 	if (!result) throw new Error("Failed to parse LLM summary response");
 
-	// Boundary-reason gating: only durable boundaries (session_closed,
-	// new_session) produce durable summary artifacts and extracted facts.
-	// Non-durable boundaries (compaction, checkpoint) still produce the LLM
-	// summary for DAG/continuity but skip durable fact extraction to prevent
-	// duplicate facts from overlapping transcript ranges.
+	// Dreaming owns all semantic writes (#913 hard cutover). Summary facts are
+	// never written to the memories table; Dreaming derives semantic state from
+	// episodic evidence. The LLM summary is still computed for DAG continuity.
 	const boundaryReason = normalizeBoundaryReason(job.boundary_reason);
 	const durable = isDurableBoundary(boundaryReason);
 
 	if (
-		!commandMode &&
 		durable &&
 		job.trigger === "session_end" &&
 		!isNoiseSession({
@@ -751,46 +438,10 @@ async function processJob(
 		await persistSessionSummaryArtifact(job, result.summary, provider);
 	}
 
-	if (commandMode) {
-		logger.info("summary-worker", "Command extraction mode: skipping summary markdown + fact insertion", {
-			sessionKey: job.session_key,
-			project: job.project,
-		});
-		markSummaryArtifactSkipped(job);
-	} else if (!durable) {
-		// Non-durable boundary (compaction/checkpoint): skip durable fact
-		// extraction to prevent duplicate facts from overlapping ranges.
-		// The LLM summary was still computed for DAG continuity above.
-		logger.info("summary-worker", "Skipping durable fact extraction for non-durable boundary", {
-			sessionKey: job.session_key,
-			project: job.project,
-			boundaryReason,
-			trigger: job.trigger,
-		});
-		markSummaryArtifactSkipped(job);
-	} else {
-		const saved = insertSummaryFacts(accessor, job, result.facts);
-		logger.info("summary-worker", "Inserted session facts", {
-			total: result.facts.length,
-			saved,
-			deduplicated: result.facts.length - saved,
-			factsPreview: result.facts.slice(0, 10).map((fact) => fact.content),
-		});
-	}
-
 	try {
 		writeSummaryToDAG(accessor, job, result, job.agent_id);
 	} catch (e) {
 		logger.warn("summary-worker", "Failed to write session summary to DAG (non-fatal)", {
-			error: e instanceof Error ? e.message : String(e),
-		});
-	}
-
-	try {
-		const tokens = countTokens(job.transcript);
-		addDreamingTokens(accessor, job.agent_id, tokens);
-	} catch (e) {
-		logger.warn("summary-worker", "Failed to accumulate dreaming tokens (non-fatal)", {
 			error: e instanceof Error ? e.message : String(e),
 		});
 	}
@@ -866,7 +517,6 @@ async function processChunked(
 
 	// Map: summarize each chunk sequentially to avoid RAM spikes
 	const chunkSummaries: string[] = [];
-	const allFacts: LlmSummaryResult["facts"][number][] = [];
 
 	for (let i = 0; i < chunks.length; i++) {
 		const prompt = buildChunkPrompt(chunks[i], i, chunks.length, date);
@@ -875,7 +525,6 @@ async function processChunked(
 
 		if (partial) {
 			chunkSummaries.push(partial.summary);
-			allFacts.push(...partial.facts);
 		} else {
 			logger.warn("summary-worker", "Chunk summarization failed, skipping", {
 				chunk: i + 1,
@@ -892,13 +541,12 @@ async function processChunked(
 	if (chunkSummaries.length === 1) {
 		return {
 			summary: `# ${date} Session Notes\n\n${chunkSummaries[0]}`,
-			facts: allFacts,
 			leaves: chunkSummaries,
 		};
 	}
 
 	// Reduce: combine chunk summaries into unified result
-	const combinePrompt = buildCombinePrompt(chunkSummaries, allFacts, date);
+	const combinePrompt = buildCombinePrompt(chunkSummaries, date);
 	const combineRaw = await provider.generate(combinePrompt, opts);
 	const combined = parseLlmResponse(combineRaw);
 
@@ -907,9 +555,8 @@ async function processChunked(
 	// Combine failed — join all summaries as degraded fallback
 	logger.warn("summary-worker", "Combine step failed, joining chunks as fallback", {
 		chunks: chunkSummaries.length,
-		facts: allFacts.length,
 	});
-	return { summary: chunkSummaries.join("\n\n---\n\n"), facts: allFacts, leaves: chunkSummaries };
+	return { summary: chunkSummaries.join("\n\n---\n\n"), leaves: chunkSummaries };
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,77 +868,6 @@ export async function scoreContinuity(
 	});
 }
 
-export function insertSummaryFacts(
-	accessor: DbAccessor,
-	job: SummaryFactJob,
-	facts: ReadonlyArray<LlmSummaryResult["facts"][number]>,
-): number {
-	if (
-		isNoiseSession({
-			project: job.project,
-			sessionKey: job.session_key,
-			sessionId: job.session_id ?? job.id ?? null,
-			harness: job.harness,
-		})
-	) {
-		return 0;
-	}
-	const now = new Date().toISOString();
-	const agentId = typeof job.agent_id === "string" && job.agent_id.length > 0 ? job.agent_id : "default";
-
-	return accessor.withWriteTx((db) => {
-		let count = 0;
-		const stmt = db.prepare(
-			// content_hash is required for the embedding tracker to pick up
-			// summary facts — the tracker skips rows with NULL content_hash.
-			// Without it, facts are invisible to vector search until a manual
-			// backfill is run, and the backfill itself cycles for duplicate content.
-			`INSERT INTO memories
-			 (id, content, content_hash, type, importance, source_id, source_type, who, tags,
-			  project, agent_id, created_at, updated_at, updated_by)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		);
-
-		for (const item of facts) {
-			if (!item.content || typeof item.content !== "string") continue;
-
-			const importance = Math.min(item.importance ?? 0.3, 0.5);
-			const { contentHash } = normalizeAndHashContent(item.content);
-
-			if (hasActiveContentHash(db, contentHash, agentId)) continue;
-			if (isDuplicate(db as unknown as Database, item.content, agentId)) continue;
-
-			const id = crypto.randomUUID();
-			const type = item.type || inferType(item.content);
-
-			try {
-				stmt.run(
-					id,
-					item.content,
-					contentHash,
-					type,
-					importance,
-					job.session_key || null,
-					"session_end",
-					job.harness,
-					item.tags || null,
-					job.project || null,
-					agentId,
-					now,
-					now,
-					SUMMARY_WORKER_UPDATED_BY,
-				);
-			} catch (err) {
-				if (isContentHashUniqueError(err)) continue;
-				throw err;
-			}
-			enqueueExtractionJobInTx(db, id);
-			count++;
-		}
-		return count;
-	});
-}
-
 // ---------------------------------------------------------------------------
 // DAG write helper
 // ---------------------------------------------------------------------------
@@ -1455,8 +1031,7 @@ function writeSummaryToDAG(accessor: DbAccessor, job: SummaryJobRow, result: Llm
 // Worker loop
 // ---------------------------------------------------------------------------
 
-/** Resolve from synthesis config — distinct from extraction so users can
- *  decouple the summary provider/model/timeout from the extraction pipeline. */
+/** Resolve from synthesis config — distinct from the Dreaming inference workload. */
 export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER_BATCH): SummaryRecoveryBatch {
 	const deadRows: SummaryJobRow[] = [];
 	const result = accessor.withWriteTx((db) => {
@@ -1497,7 +1072,7 @@ export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER
 		let updated = 0;
 		for (const row of rows) {
 			const status = row.attempts >= row.max_attempts ? "dead" : "pending";
-			updated += countChanges(update.run(status, COMMAND_STAGE_RUNNING_RESULT, row.id));
+			updated += countChanges(update.run(status, null, row.id));
 			if (status === "dead") deadRows.push(row);
 		}
 
@@ -1628,10 +1203,14 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 
 	async function tick(): Promise<void> {
 		if (stopped) return;
+		if (isSystemPressureHigh()) {
+			scheduleTick(POLL_INTERVAL_MS);
+			return;
+		}
 
 		// Re-check config each tick — respect runtime config changes
 		const cfg = loadMemoryConfig(AGENTS_DIR);
-		if ((!cfg.pipelineV2.enabled && !cfg.dreaming.enabled) || cfg.pipelineV2.shadowMode) {
+		if (!cfg.pipelineV2.enabled || cfg.pipelineV2.shadowMode) {
 			scheduleTick(POLL_INTERVAL_MS);
 			return;
 		}
@@ -1643,11 +1222,7 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 			const isSynthesisAvailable = options.isSynthesisAvailable ?? (async () => false);
 			const isWorkloadAvailable = async (): Promise<boolean> => {
 				const latest = loadMemoryConfig(AGENTS_DIR);
-				return canProcessSummaryJobs(
-					latest.pipelineV2.enabled && latest.pipelineV2.extraction.provider === "command",
-					await isSynthesisAvailable(),
-					latest.pipelineV2.paused,
-				);
+				return canProcessSummaryJobs(await isSynthesisAvailable(), latest.pipelineV2.paused);
 			};
 			const job = await leaseSummaryJobWhenAvailable(accessor, isWorkloadAvailable);
 
@@ -1660,15 +1235,14 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 			leasedJob = job;
 			activeAbort = new AbortController();
 			const memoryCfg = loadMemoryConfig(AGENTS_DIR);
-			const commandMode = memoryCfg.pipelineV2.enabled && memoryCfg.pipelineV2.extraction.provider === "command";
 			let synthesisAvailable = false;
 			try {
 				synthesisAvailable = await isSynthesisAvailable();
 			} catch (error) {
-				if (!commandMode) restoreUnprocessedSummaryLease(accessor, job);
+				restoreUnprocessedSummaryLease(accessor, job);
 				throw error;
 			}
-			if (!commandMode && !synthesisAvailable) {
+			if (!synthesisAvailable) {
 				restoreUnprocessedSummaryLease(accessor, job);
 				scheduleTick(POLL_INTERVAL_MS);
 				return;
@@ -1682,13 +1256,8 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 				project: job.project,
 			});
 
-			// Command-only extraction must not resolve or call session synthesis.
 			if (synthesisAvailable && !cachedProvider) {
-				try {
-					cachedProvider = getInferenceProvider("sessionSynthesis");
-				} catch (error) {
-					if (!commandMode) throw error;
-				}
+				cachedProvider = getInferenceProvider("sessionSynthesis");
 			}
 			await processJob(accessor, synthesisAvailable ? cachedProvider : null, job, memoryCfg, activeAbort.signal);
 
@@ -1708,10 +1277,7 @@ export function startSummaryWorker(accessor: DbAccessor, options: SummaryWorkerO
 		} catch (e) {
 			const terminal = isTerminalSummaryJobError(e instanceof Error ? e : String(e));
 			const errorMessage = e instanceof Error ? e.message : String(e);
-			if (
-				leasedJob &&
-				(stopped && /aborted|cancelled|canceled/i.test(errorMessage))
-			) {
+			if (leasedJob && stopped && /aborted|cancelled|canceled/i.test(errorMessage)) {
 				restoreUnprocessedSummaryLease(accessor, leasedJob);
 				return;
 			}

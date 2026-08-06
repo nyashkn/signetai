@@ -249,6 +249,7 @@ describe("createMcpServer", () => {
 		expect(names).toContain("knowledge_list_claims");
 		expect(names).toContain("knowledge_list_attributes");
 		expect(names).toContain("knowledge_hygiene_report");
+		expect(names).toContain("apply_ontology_ops");
 		expect(names).toContain("entity_list");
 		expect(names).toContain("entity_get");
 		expect(names).toContain("entity_aspects");
@@ -284,7 +285,7 @@ describe("createMcpServer", () => {
 		for (const alias of GRAPHIQ_COMPAT_ALIASES) {
 			expect(names).toContain(alias);
 		}
-		expect(names.length).toBe(63);
+		expect(names.length).toBe(64);
 	});
 
 	describe("identity write tools", () => {
@@ -397,7 +398,13 @@ describe("createMcpServer", () => {
 			expect(names).not.toContain("merge_entities");
 			expect(names).not.toContain("identity_merge");
 			expect(names).not.toContain("ontology_apply");
-			expect(names.filter((name) => name.includes("apply"))).toEqual([]);
+			// `apply_ontology_ops` is the one tool that applies rather than proposes,
+			// and it is deliberately not an identity surface: it is the Dreaming
+			// agent's audited batch, which carries evidence and provenance per
+			// operation. Nothing else may reach an apply endpoint, so the filter
+			// names the exception instead of asserting an empty list — an assertion
+			// that would now hide any *new* apply tool behind a stale expectation.
+			expect(names.filter((name) => name.includes("apply"))).toEqual(["apply_ontology_ops"]);
 		});
 	});
 
@@ -618,6 +625,33 @@ describe("createMcpServer", () => {
 		expect(cap.url).toBe("http://localhost:3850/api/knowledge/hygiene?limit=3&memory_limit=4&agent_id=default");
 		expect(result.isError).toBeUndefined();
 		expect(result.content[0]?.text).toContain("The");
+	});
+
+	it("routes cited Dreaming operations through the daemon apply seam", async () => {
+		const cap: { url?: string; body?: string } = {};
+		mockFetch(200, { ok: true, items: [] }, cap);
+
+		const result = await callTool(server, "apply_ontology_ops", {
+			agent_id: "agent-a",
+			operations: [
+				{
+					operation: "create_entity",
+					payload: { name: "Aster" },
+					evidence: [
+						{
+							source_ref: "summary:s-1",
+							source_kind: "summary",
+							source_id: "s-1",
+							quote: "Aster is a project.",
+						},
+					],
+				},
+			],
+		});
+
+		expect(cap.url).toBe("http://localhost:3850/api/dream/operations");
+		expect(JSON.parse(cap.body ?? "{}")).toMatchObject({ agent_id: "agent-a", operations: [{ operation: "create_entity" }] });
+		expect(result.isError).toBeUndefined();
 	});
 
 	describe("memory_search", () => {

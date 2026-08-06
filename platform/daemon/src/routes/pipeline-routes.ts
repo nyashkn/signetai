@@ -6,17 +6,23 @@ import { resolveAgentId, resolveDaemonAgentId } from "../agent-id.js";
 import { requirePermission, requireRateLimit } from "../auth";
 import { getDbAccessor } from "../db-accessor.js";
 import { type QueueCounts, getQueueDiagnosticsSnapshot } from "../diagnostics-queue.js";
-import { DreamPromotionError, promoteDreamingEvidence } from "../dream-promotion.js";
-import { getInferenceProviderOrNull, getLlmProvider } from "../llm.js";
+import { getLlmProvider } from "../llm.js";
 import { loadMemoryConfig } from "../memory-config.js";
 import {
+	getDreamingAttention,
+	getDreamingEpisodicTokenBacklog,
+	getDreamingEvidenceExclusions,
 	getDreamingPasses,
+	getDreamingQualityReport,
 	getDreamingState,
+	getDreamingToolCalls,
 	getDreamingWorker,
 	getPipelineWorkerStatus,
-	nudgeExtractionWorker,
+	requestDreamingEvidenceRequeue,
 } from "../pipeline";
 import { getFeedbackTelemetry } from "../pipeline/aspect-feedback.js";
+import { getDreamingCapability, getDreamingCapabilityManifest } from "../pipeline/dreaming-capabilities.js";
+import { applyDreamingOperations } from "../pipeline/dreaming-operations.js";
 import { AlreadyRunningError } from "../pipeline/dreaming-worker.js";
 import { getTraversalStatus } from "../pipeline/graph-traversal.js";
 import {
@@ -26,7 +32,7 @@ import {
 	refreshRegistry,
 } from "../pipeline/model-registry.js";
 import { getResourceSnapshot } from "../resource-monitor.js";
-import { activeSessionCount, getBypassedSessionKeys } from "../session-tracker.js";
+import { activeSessionCount, getBypassedSessionKeys, getSessionTrackerStats } from "../session-tracker.js";
 import { getTranscriptCaptureStatus } from "../transcript-capture-worker.js";
 import { getTranscriptHealthReport } from "../transcript-health.js";
 import {
@@ -61,7 +67,6 @@ import { STATUS_CACHE_TTL, cachedEmbeddingStatus, resolveScopedAgentId, statusCa
 interface PipelineQueueBlock {
 	readonly memory: QueueCounts;
 	readonly summary: QueueCounts;
-	readonly extraction: QueueCounts;
 	readonly oldestDeadSummaryJob: ReturnType<typeof getQueueDiagnosticsSnapshot>["oldestDeadSummaryJob"];
 }
 
@@ -84,7 +89,6 @@ function pipelineQueueBlock(): PipelineQueueBlock {
 			return {
 				memory: snapshot.memory,
 				summary: snapshot.summary,
-				extraction: snapshot.extraction,
 				oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 			};
 		});
@@ -92,7 +96,6 @@ function pipelineQueueBlock(): PipelineQueueBlock {
 		return {
 			memory: { ...EMPTY_QUEUE_COUNTS_SHAPE },
 			summary: { ...EMPTY_QUEUE_COUNTS_SHAPE },
-			extraction: { ...EMPTY_QUEUE_COUNTS_SHAPE },
 			oldestDeadSummaryJob: null,
 		};
 	}
@@ -131,16 +134,30 @@ function readBoolean(record: Readonly<Record<string, unknown>>, key: string): bo
 	return undefined;
 }
 
+function readArray(record: Readonly<Record<string, unknown>>, key: string): readonly unknown[] | undefined {
+	const value = record[key];
+	return Array.isArray(value) ? value : undefined;
+}
+
+function requestedDreamAgentId(c: Context, body: Readonly<Record<string, unknown>> = {}): string | undefined {
+	return (
+		readString(body, "agentId") ??
+		readString(body, "agent_id") ??
+		c.req.query("agentId") ??
+		c.req.query("agent_id") ??
+		c.req.header("x-signet-agent-id")
+	);
+}
+
 export function resolveDreamRequestAgentId(c: Context, body: Readonly<Record<string, unknown>> = {}): string {
-	return resolveAgentId({
-		agentId:
-			readString(body, "agentId") ??
-			readString(body, "agent_id") ??
-			c.req.query("agentId") ??
-			c.req.query("agent_id") ??
-			c.req.header("x-signet-agent-id") ??
-			resolveDaemonAgentId(),
-	});
+	return resolveAgentId({ agentId: requestedDreamAgentId(c, body) ?? resolveDaemonAgentId() });
+}
+
+function resolveScopedDreamAgent(
+	c: Context,
+	body: Readonly<Record<string, unknown>> = {},
+): { readonly agentId: string; readonly error?: string } {
+	return resolveScopedAgentId(c, requestedDreamAgentId(c, body), resolveDaemonAgentId());
 }
 
 async function togglePipelinePause(c: Context, paused: boolean): Promise<Response> {
@@ -203,12 +220,9 @@ export function registerPipelineRoutes(app: Hono): void {
 
 	app.get("/api/status", (c) => {
 		const config = loadMemoryConfig(AGENTS_DIR);
-		const workerStatus = getPipelineWorkerStatus();
-		const extractionWorker = workerStatus.extraction;
 		const extractionWorkload = getExtractionWorkloadState({
-			enabled: config.pipelineV2.enabled,
+			enabled: false,
 			paused: config.pipelineV2.paused,
-			workerRunning: extractionWorker.running,
 		});
 		const configuredLogFile = readEnvTrimmed("SIGNET_LOG_FILE");
 		const configuredLogDir = readEnvTrimmed("SIGNET_LOG_DIR") ?? LOG_DIR;
@@ -276,15 +290,6 @@ export function registerPipelineRoutes(app: Hono): void {
 			resources: getResourceSnapshot(),
 			pipelineV2: config.pipelineV2,
 			pipeline: {
-				extraction: {
-					running: extractionWorker.running,
-					overloaded: extractionWorker.stats?.overloaded ?? false,
-					loadPerCpu: extractionWorker.stats?.loadPerCpu ?? null,
-					maxLoadPerCpu: extractionWorker.stats?.maxLoadPerCpu ?? null,
-					overloadBackoffMs: extractionWorker.stats?.overloadBackoffMs ?? null,
-					overloadSince: extractionWorker.stats?.overloadSince ?? null,
-					nextTickInMs: extractionWorker.stats?.nextTickInMs ?? null,
-				},
 				queue: pipelineQueueBlock(),
 			},
 			providerResolution: { ...providerRuntimeResolution, extraction: extractionWorkload },
@@ -294,6 +299,7 @@ export function registerPipelineRoutes(app: Hono): void {
 			},
 			activeSessions: activeSessionCount(),
 			bypassedSessions: getBypassedSessionKeys().size,
+			sessions: { lifecycle: getSessionTrackerStats() },
 			...(transcriptCapture ? { transcripts: { capture: transcriptCapture } } : {}),
 			agentCreatedAt,
 			...(health ? { health } : {}),
@@ -360,8 +366,13 @@ export function registerPipelineRoutes(app: Hono): void {
 		return c.json(report);
 	});
 
-	app.get("/api/diagnostics/:domain", (c) => {
+	app.get("/api/diagnostics/:domain", async (c, next) => {
 		const domain = c.req.param("domain");
+		// These concrete routes are registered after this generic diagnostics
+		// domain route. Let each return its own response rather than a cached
+		// aggregate subobject. Any new single-segment diagnostics route must
+		// either be registered before this route or be added here.
+		if (domain === "queue" || domain === "openclaw") return next();
 		const report = getCachedDiagnosticsReport();
 
 		const domainData = report[domain as keyof typeof report];
@@ -468,9 +479,8 @@ export function registerPipelineRoutes(app: Hono): void {
 			providerResolution: {
 				...providerRuntimeResolution,
 				extraction: getExtractionWorkloadState({
-					enabled: pipelineV2.enabled,
+					enabled: false,
 					paused: pipelineV2.paused,
-					workerRunning: workers.extraction.running,
 				}),
 			},
 			queues: dbData.queues,
@@ -488,9 +498,6 @@ export function registerPipelineRoutes(app: Hono): void {
 
 	app.use("/api/pipeline/pause", pipelineAdminGuard);
 	app.use("/api/pipeline/resume", pipelineAdminGuard);
-	app.use("/api/pipeline/nudge", async (c, next) => {
-		return requirePermission("admin", authConfig)(c, next);
-	});
 
 	app.post("/api/pipeline/pause", (c) => {
 		return togglePipelinePause(c, true);
@@ -498,13 +505,6 @@ export function registerPipelineRoutes(app: Hono): void {
 
 	app.post("/api/pipeline/resume", (c) => {
 		return togglePipelinePause(c, false);
-	});
-
-	app.post("/api/pipeline/nudge", (c) => {
-		if (!nudgeExtractionWorker()) {
-			return c.json({ error: "Extraction worker not running" }, 503);
-		}
-		return c.json({ nudged: true });
 	});
 
 	app.get("/api/pipeline/models", (c) => {
@@ -543,28 +543,50 @@ export function registerPipelineRoutes(app: Hono): void {
 		});
 	});
 
-	app.use("/api/dream/promote", pipelineAdminGuard);
+	// External Dreaming agents get only the cited apply seam with a scoped
+	// agent credential. Administrative status, trigger, and requeue controls
+	// remain admin-only.
+	app.use("/api/dream/operations", async (c, next) => {
+		return requirePermission("modify", authConfig)(c, next);
+	});
+	app.use("/api/dream/tools/*", async (c, next) => {
+		return requirePermission("modify", authConfig)(c, next);
+	});
+	app.use("/api/dream/tools", async (c, next) => {
+		return requirePermission("modify", authConfig)(c, next);
+	});
 	app.use("/api/dream/*", async (c, next) => {
+		if (
+			c.req.path === "/api/dream/operations" ||
+			c.req.path === "/api/dream/tools" ||
+			c.req.path.startsWith("/api/dream/tools/")
+		)
+			return next();
 		return requirePermission("admin", authConfig)(c, next);
 	});
 
 	app.get("/api/dream/status", (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const accessor = getDbAccessor();
-		const agentId = resolveDreamRequestAgentId(c);
+		const scopedAgent = resolveScopedDreamAgent(c);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
 
 		const state = getDreamingState(accessor, agentId);
+		const episodicTokensPending = getDreamingEpisodicTokenBacklog(accessor, agentId);
 		const passes = getDreamingPasses(accessor, agentId, 10);
+		const exclusions = getDreamingEvidenceExclusions(accessor, agentId);
+		const attention = getDreamingAttention(accessor, agentId);
 		const worker = getDreamingWorker();
 
 		return c.json({
-			enabled: cfg.dreaming.enabled,
 			worker: {
 				running: worker !== null,
 				active: worker?.activeAgentId === agentId,
 				activeAgentId: worker?.activeAgentId ?? null,
 			},
 			state,
+			episodicTokensPending,
 			config: {
 				tokenThreshold: cfg.dreaming.tokenThreshold,
 				backfillOnFirstRun: cfg.dreaming.backfillOnFirstRun,
@@ -573,36 +595,112 @@ export function registerPipelineRoutes(app: Hono): void {
 				timeout: cfg.dreaming.timeout,
 			},
 			passes,
+			attention,
+			exclusions,
 		});
 	});
 
-	app.post("/api/dream/promote", async (c) => {
+	/**
+	 * Review the exact capability calls a Pi Dreaming agent made during one
+	 * scoped pass. The trace is local, agent-scoped, and never written to logs.
+	 */
+	app.get("/api/dream/passes/:passId/tools", (c) => {
+		const scopedAgent = resolveScopedDreamAgent(c);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const passId = c.req.param("passId").trim();
+		if (!passId) return c.json({ error: "Missing Dreaming pass id" }, 400);
+		return c.json({
+			agentId: scopedAgent.agentId,
+			passId,
+			items: getDreamingToolCalls(getDbAccessor(), scopedAgent.agentId, passId),
+		});
+	});
+
+	/** Deterministic semantic-quality measurements for the scoped Dreaming graph. */
+	app.get("/api/dream/quality", (c) => {
+		const scopedAgent = resolveScopedDreamAgent(c);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		return c.json(getDreamingQualityReport(getDbAccessor(), scopedAgent.agentId));
+	});
+
+	app.post("/api/dream/exclusions/requeue", async (c) => {
 		const raw: unknown = await c.req.json().catch(() => null);
 		if (raw === null) return c.json({ error: "Malformed JSON body" }, 400);
 		const body = asRecord(raw);
-		const agentId = resolveDreamRequestAgentId(c, body);
-		const from = readString(body, "from");
-		if (!from) return c.json({ error: "from is required" }, 400);
-		const useProvider = readBoolean(body, "use_provider") ?? false;
-		try {
-			return c.json(
-				await promoteDreamingEvidence(getDbAccessor(), {
-					agentId,
-					from,
-					apply: readBoolean(body, "apply") ?? false,
-					actor: readString(body, "actor") ?? c.req.header("x-signet-actor") ?? "dreaming-promote",
-					limit: readNumber(body, "limit"),
-					useProvider,
-					provider: useProvider ? getInferenceProviderOrNull("memoryExtraction") : null,
-					providerTimeoutMs: readNumber(body, "provider_timeout_ms"),
-					providerMaxTokens: readNumber(body, "provider_max_tokens"),
-				}),
-			);
-		} catch (err) {
-			if (err instanceof DreamPromotionError) return c.json({ error: err.message }, err.status);
-			const message = err instanceof Error ? err.message : String(err);
-			return c.json({ error: message }, 500);
+		const sourceKind = readString(body, "sourceKind");
+		if (
+			sourceKind !== "memory" &&
+			sourceKind !== "artifact" &&
+			sourceKind !== "transcript" &&
+			sourceKind !== "summary"
+		) {
+			return c.json({ error: "Invalid episodic source kind" }, 400);
 		}
+		const sourceId = readString(body, "sourceId");
+		if (!sourceId) return c.json({ error: "Missing episodic source id" }, 400);
+		const scopedAgent = resolveScopedDreamAgent(c, body);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
+		const requeued = requestDreamingEvidenceRequeue(getDbAccessor(), agentId, sourceKind, sourceId);
+		if (!requeued) return c.json({ error: "Dreaming evidence exclusion not found" }, 404);
+		return c.json({ requeued: true, agentId, sourceKind, sourceId });
+	});
+
+	/**
+	 * Daemon apply seam for external Dreaming agents. Unlike generic ontology
+	 * operations, every write must carry a canonical episodic source reference
+	 * and an exact quote; the daemon resolves it in the caller's agent scope.
+	 */
+	app.post("/api/dream/operations", async (c) => {
+		const raw: unknown = await c.req.json().catch(() => null);
+		if (raw === null) return c.json({ error: "Malformed JSON body" }, 400);
+		const body = asRecord(raw);
+		const operations = readArray(body, "operations");
+		if (!operations || operations.length === 0) return c.json({ error: "operations are required" }, 400);
+		const scopedAgent = resolveScopedDreamAgent(c, body);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
+		const actor = readString(body, "actor") ?? c.req.header("x-signet-actor") ?? "dreaming-agent";
+		const result = applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId,
+			actor,
+			operations: operations.map((rawOperation) => {
+				const operation = asRecord(rawOperation);
+				return {
+					operation: readString(operation, "operation") ?? "",
+					payload: asRecord(operation.payload),
+					reason: readString(operation, "reason") ?? readString(operation, "rationale"),
+					evidence: readArray(operation, "evidence"),
+					confidence: readNumber(operation, "confidence"),
+					risk: readString(operation, "risk") ?? null,
+				};
+			}),
+		});
+		return c.json({ ...result, agentId }, result.ok ? 200 : 400);
+	});
+
+	// Pi invokes this registry in-process; MCP and CLI use this transport
+	// binding. The capability id and input schema are never copied here.
+	app.get("/api/dream/tools", (c) => c.json({ items: getDreamingCapabilityManifest() }));
+	app.post("/api/dream/tools/:capability", async (c) => {
+		const raw: unknown = await c.req.json().catch(() => null);
+		if (raw === null) return c.json({ error: "Malformed JSON body" }, 400);
+		const body = asRecord(raw);
+		const scopedAgent = resolveScopedDreamAgent(c, body);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const capability = getDreamingCapability(
+			{
+				accessor: getDbAccessor(),
+				agentId: scopedAgent.agentId,
+				actor: readString(body, "actor") ?? c.req.header("x-signet-actor") ?? "dreaming-client",
+				passId: readString(body, "passId") ?? undefined,
+			},
+			c.req.param("capability"),
+		);
+		if (!capability) return c.json({ error: "Unknown Dreaming capability" }, 404);
+		const result = await capability.invoke(body.input);
+		return c.json({ ...result, agentId: scopedAgent.agentId }, result.ok ? 200 : 400);
 	});
 
 	app.post("/api/dream/trigger", async (c) => {
@@ -624,7 +722,9 @@ export function registerPipelineRoutes(app: Hono): void {
 				mode = "compact";
 			}
 		}
-		const agentId = resolveDreamRequestAgentId(c, body);
+		const scopedAgent = resolveScopedDreamAgent(c, body);
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
 
 		let passId: string;
 		try {

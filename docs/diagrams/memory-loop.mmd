@@ -80,7 +80,6 @@ flowchart TD
     %% Workers write to DB
     EW -->|"txIngestEnvelope\n+ insertMemoryEmbedding"| T1
     EW -->|"syncVecInsert"| T2
-    EW -->|"txPersistEntities"| T3
     EW -->|"recordDecisionHistory"| T5
     SW -->|"INSERT memories\nsource_type=session_end"| T1
     DW -->|"txIngestEnvelope\ntype=document_chunk"| T1

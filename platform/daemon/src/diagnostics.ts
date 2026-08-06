@@ -34,16 +34,13 @@ export interface QueueHealth extends HealthScore {
 	readonly deadRate: number;
 	/** Legacy aggregate count of stale leased rows. Kept for back-compat. */
 	readonly leaseAnomalies: number;
-	/** Per-queue counts (memory / summary / extraction). Issue #901. */
+	/** Per-queue counts (memory / summary). */
 	readonly memory: QueueCounts;
 	readonly summary: QueueCounts;
-	readonly extraction: QueueCounts;
 	/** Oldest dead summary job for the diagnostics surface. */
 	readonly oldestDeadSummaryJob: OldestDeadJob | null;
-	/** Oldest dead memory job (job_type != extraction). */
+	/** Oldest dead memory job. */
 	readonly oldestDeadMemoryJob: OldestDeadJob | null;
-	/** Oldest dead extraction job (memory_jobs WHERE job_type='extraction'). */
-	readonly oldestDeadExtractionJob: OldestDeadJob | null;
 }
 
 export interface StorageHealth extends HealthScore {
@@ -97,7 +94,6 @@ export interface UpdateHealth extends HealthScore {
 }
 
 export interface GraphHealth extends HealthScore {
-	readonly extractionWritesEnabled: boolean | null;
 	readonly entityCount: number;
 	readonly edgeCount: number;
 	readonly communityCount: number;
@@ -135,7 +131,6 @@ export interface DiagnosticsReport {
 
 export interface DiagnosticsOptions {
 	readonly graphEnabled?: boolean;
-	readonly graphExtractionWritesEnabled?: boolean;
 	readonly traversalPrimary?: boolean;
 }
 
@@ -232,7 +227,7 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 	const pendingRow = db
 		.prepare(
 			`SELECT COUNT(*) AS cnt, MIN(created_at) AS oldest
-			 FROM memory_jobs WHERE status = 'pending'`,
+			 FROM memory_jobs WHERE status = 'pending' AND job_type <> 'extract'`,
 		)
 		.get() as { cnt: number; oldest: string | null } | undefined;
 
@@ -247,7 +242,7 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 				SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead,
 				SUM(CASE WHEN status IN ('completed','dead') THEN 1 ELSE 0 END) AS total
 			 FROM memory_jobs
-			 WHERE updated_at >= ?`,
+			 WHERE updated_at >= ? AND job_type <> 'extract'`,
 		)
 		.get(windowStart) as { dead: number; total: number } | undefined;
 
@@ -260,7 +255,7 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 	const anomalyRow = db
 		.prepare(
 			`SELECT COUNT(*) AS cnt FROM memory_jobs
-			 WHERE status = 'leased'
+			 WHERE status = 'leased' AND job_type <> 'extract'
 			   AND created_at < ?`,
 		)
 		.get(tenMinAgo) as { cnt: number } | undefined;
@@ -270,15 +265,13 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 	// Issue #901 — per-queue breakdown and oldest-dead lookup. The
 	// expansion is cached because status and maintenance surfaces can call
 	// diagnostics repeatedly within a short interval.
-	const { memory, summary, extraction, oldestDeadSummaryJob, oldestDeadMemoryJob, oldestDeadExtractionJob } =
-		getQueueDiagnosticsSnapshot(db);
+	const { memory, summary, oldestDeadSummaryJob, oldestDeadMemoryJob } = getQueueDiagnosticsSnapshot(db);
 
 	// Composite score mixes legacy penalty math with the new
 	// threshold-based per-queue penalties (worst of all queues).
 	const memoryScore = scoreCountsWithThresholds(memory, "memory", DEFAULT_QUEUE_THRESHOLDS);
 	const summaryScore = scoreCountsWithThresholds(summary, "summary", DEFAULT_QUEUE_THRESHOLDS);
-	const extractionScore = scoreCountsWithThresholds(extraction, "extraction", DEFAULT_QUEUE_THRESHOLDS);
-	const queueScore = worstQueueScore([memoryScore, summaryScore, extractionScore]);
+	const queueScore = worstQueueScore([memoryScore, summaryScore]);
 
 	let score = 1.0;
 	if (depth > QUEUE_MAX_DEPTH) score -= 0.3;
@@ -300,10 +293,8 @@ export function getQueueHealth(db: ReadDb): QueueHealth {
 		leaseAnomalies,
 		memory,
 		summary,
-		extraction,
 		oldestDeadSummaryJob,
 		oldestDeadMemoryJob,
-		oldestDeadExtractionJob,
 	};
 }
 
@@ -615,9 +606,8 @@ const BASE_WEIGHTS = {
 
 export function getGraphHealth(
 	db: ReadDb,
-	options?: Pick<DiagnosticsOptions, "graphEnabled" | "graphExtractionWritesEnabled" | "traversalPrimary">,
+	options?: Pick<DiagnosticsOptions, "graphEnabled" | "traversalPrimary">,
 ): GraphHealth {
-	const extractionWritesEnabled = options?.graphExtractionWritesEnabled ?? null;
 	try {
 		const entityRow = db.prepare("SELECT COUNT(*) AS n FROM entities").get() as { n: number } | undefined;
 		const edgeRow = db.prepare("SELECT COUNT(*) AS n FROM entity_dependencies").get() as { n: number } | undefined;
@@ -658,7 +648,6 @@ export function getGraphHealth(
 		return {
 			score,
 			status: zeroEdgeTraversal ? "degraded" : scoreStatus(score),
-			extractionWritesEnabled,
 			entityCount,
 			edgeCount,
 			communityCount,
@@ -670,7 +659,6 @@ export function getGraphHealth(
 		return {
 			score: 1,
 			status: "healthy",
-			extractionWritesEnabled,
 			entityCount: 0,
 			edgeCount: 0,
 			communityCount: 0,
@@ -697,7 +685,6 @@ export function getDiagnostics(
 	const update = getUpdateHealth(updateState);
 	const graph = getGraphHealth(db, {
 		graphEnabled: options?.graphEnabled,
-		graphExtractionWritesEnabled: options?.graphExtractionWritesEnabled,
 		traversalPrimary: options?.traversalPrimary,
 	});
 

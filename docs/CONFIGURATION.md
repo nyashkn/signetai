@@ -216,6 +216,7 @@ Vector embedding configuration for semantic memory search.
 | `base_url` | string | `"http://localhost:11434"` | Ollama API base URL |
 | `api_key` | string | — | API key or `$secret:NAME` reference |
 | `promptSubmitTimeoutMs` | number | `1000` | Explicit recall embedding timeout retained for compatibility, range 1000-300000 ms |
+| `warmNative` | boolean | `true` | Kill-switch for the native ONNX embedding path. Set `false` to never warm or route to native — useful on Intel Macs where the native ONNX runtime can wedge (see #1073). Callers fall through to the llama.cpp/ollama fallback chain. Env override: `SIGNET_EMBEDDING_WARM_NATIVE=0`. |
 
 Increase the embedding timeout when local embedding models are slow to
 cold-load. For example, Ollama with `mxbai-embed-large` may need `10000` ms
@@ -592,6 +593,14 @@ Named routing policies that agents and workloads reference.
 | `maxLatencyMs` | number | Hard latency ceiling used by routing |
 | `costCeiling` | string | Hard cost ceiling used by routing |
 
+Policies are optional: when targets exist but no `policies` (and no
+`defaultPolicy`) are configured, the router synthesizes an implicit
+`default` policy (`mode: automatic`, `defaultTargets`/`fallbackTargets` over
+all configured target refs) so every generation path keeps working. `signet
+route list` shows it like any other policy. Add an explicit policy to pin
+routing deterministically; `signet route doctor` warns when agent.yaml relies
+on the synthesized policy.
+
 ### inference.taskClasses
 
 Task-family hints for automatic routing.
@@ -654,7 +663,7 @@ enabled for `default`, `memoryExtraction`, `widgetGeneration`, or `repair`, thos
 shared inference control plane. Legacy extraction and synthesis fields are treated as load-time compatibility input, not separate runtime providers.
 
 The config uses a nested structure with grouped sub-objects. Legacy flat
-keys (e.g. `extractionModel`, `workerPollMs`) are still supported for
+keys (e.g. `extractionModel`, `leaseTimeoutMs`) are still supported for
 backward compatibility, but nested keys take precedence when both are
 present.
 
@@ -778,41 +787,10 @@ There are two command paths with different contracts. Top-level
 prompt is sent on stdin, exposed as `SIGNET_PROMPT`, and the model response is
 read from stdout.
 
-Legacy `memory.pipelineV2.extraction.provider: command` keeps the old
-side-effecting extractor contract. The summary worker executes
-`memory.pipelineV2.extraction.command`, writes the transcript to a temporary
-file, substitutes that path into args/env, and expects the command to write
-memories to Signet state directly. Stdout and stderr are ignored except for
-process failure.
-
-Available legacy extraction command tokens:
-
-- `$TRANSCRIPT` (alias `$TRANSCRIPT_PATH`) — temp transcript file path
-- `$SESSION_KEY` — session key (or empty string)
-- `$PROJECT` — project path (or empty string)
-- `$AGENT_ID` — agent id for the queued job
-- `$SIGNET_PATH` — active Signet workspace path
-
-For safety, user-derived tokens (`$SESSION_KEY`, `$PROJECT`, `$TRANSCRIPT`) are
-intended for args/env substitution. Keep `bin` and `cwd` fixed, or use only
-trusted `$SIGNET_PATH` / `$AGENT_ID` there.
-
-Example:
-
-```yaml
-memory:
-  pipelineV2:
-    extraction:
-      provider: command
-      command:
-        bin: node
-        args:
-          - ./scripts/custom-extractor.mjs
-          - --transcript
-          - $TRANSCRIPT
-          - --session
-          - $SESSION_KEY
-```
+`memory.pipelineV2.extraction.provider: command` is retired. It is rejected at
+config load time; use the canonical `inference.workloads.memoryExtraction`
+target consumed by Dreaming instead. The retired path let a subprocess write
+memory state outside the daemon-owned audited apply path.
 
 
 ### Session synthesis (`synthesis`)
@@ -903,17 +881,16 @@ control.
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `pollMs` | `2000` | 100-60000 ms | How often the worker polls for pending jobs |
 | `maxRetries` | `3` | 1-10 | Max retry attempts before a job goes to dead-letter |
 | `leaseTimeoutMs` | `300000` | 10000-600000 ms | Time before an uncompleted job lease expires |
-| `maxLoadPerCpu` | `0.8` | 0.1-8.0 | Load-per-CPU threshold above which extraction polling is deferred |
-| `overloadBackoffMs` | `30000` | 1000-300000 ms | Delay between poll attempts while host load stays above threshold |
 | `maxLlmConcurrency` | `2` | 1-16 | Shared cap for live LLM calls across extraction, synthesis, reranking, inference streaming, and daemon route provider calls such as skills, ontology consolidation, and diagnostics greetings. `SIGNET_MAX_LLM_CONCURRENCY` overrides YAML when set, matching the TypeScript daemon behavior for wired provider paths. |
 
 A job that exceeds `maxRetries` moves to dead-letter status and is
 eventually purged by the retention worker.
-Legacy flat keys `workerMaxLoadPerCpu` and `workerOverloadBackoffMs` are
-still accepted for backward compatibility.
+The standalone extraction worker was retired under the Dreaming cutover
+(#946); its former `pollMs`, `maxLoadPerCpu`, `overloadBackoffMs`, and
+`threadedExtraction` knobs are no longer read from configuration (legacy
+YAML values are ignored).
 
 
 ### Knowledge Graph (`graph`)
@@ -924,32 +901,8 @@ from extracted facts and uses them to boost search relevance.
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `enabled` | `true` | — | Enable knowledge graph building and querying |
-| `extractionWritesEnabled` | `true` | — | Persist entities and links produced by background extraction. Set `false` to keep graph traversal/read paths enabled without letting the async extractor author graph structure. Graph persistence failures are non-fatal to extraction jobs. |
 | `boostWeight` | `0.15` | 0.0-1.0 | Weight applied to graph-neighbor score boost |
 | `boostTimeoutMs` | `500` | 50-5000 ms | Timeout for graph lookup during search |
-
-
-### Structural Analysis (`structural`)
-
-Structural workers classify extracted facts into entity aspects, extract
-direct entity dependencies from facts, and synthesize cross-entity
-dependency edges from the existing graph.
-
-| Field | Default | Range | Description |
-|-------|---------|-------|-------------|
-| `enabled` | `true` | — | Enable structural classification and dependency workers |
-| `classifyBatchSize` | `8` | 1-20 | Max facts per entity classification call |
-| `dependencyBatchSize` | `5` | 1-10 | Max stale entities or dependency jobs per worker tick |
-| `pollIntervalMs` | `10000` | 2000-120000 ms | Structural job polling interval |
-| `synthesisEnabled` | `true` | — | Enable cross-entity dependency synthesis |
-| `synthesisIntervalMs` | `60000` | 10000-600000 ms | Dependency synthesis polling interval |
-| `synthesisTopEntities` | `20` | 5-100 | Candidate entities considered per synthesis call |
-| `synthesisMaxFacts` | `10` | 3-50 | Facts included for the focal entity |
-| `synthesisMaxStallMs` | `1800000` | 0-86400000 ms | Pause dependency synthesis when extraction has made no successful progress for this long; set `0` to disable the circuit breaker |
-
-The aliases `dependencySynthesis.maxStallMs` and
-`dependencySynthesis.synthesisMaxStallMs` are accepted for
-`structural.synthesisMaxStallMs`.
 
 
 ### Hints (`hints`)

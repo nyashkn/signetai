@@ -461,11 +461,53 @@ describe("auth guard co-location", () => {
 	});
 
 	describe("dream routes need guards", () => {
-		it("POST /api/dream/promote returns 403 without auth", async () => {
+		it("dream status, quality, pass traces, trigger, evidence requeue, capability registry, and agent operations return 403 without auth", async () => {
 			const app = await makeApp();
 			const { registerPipelineRoutes } = await import("./routes/pipeline-routes");
 			registerPipelineRoutes(app);
-			expect(await status(app, "POST", "/api/dream/promote")).toBe(403);
+			expect(await status(app, "GET", "/api/dream/status")).toBe(403);
+			expect(await status(app, "GET", "/api/dream/quality")).toBe(403);
+			expect(await status(app, "POST", "/api/dream/trigger")).toBe(403);
+			expect(await status(app, "POST", "/api/dream/exclusions/requeue")).toBe(403);
+			expect(await status(app, "GET", "/api/dream/passes/pass-1/tools")).toBe(403);
+			expect(await status(app, "POST", "/api/dream/operations")).toBe(403);
+			expect(await status(app, "GET", "/api/dream/tools")).toBe(403);
+			expect(await status(app, "POST", "/api/dream/tools/search_entities")).toBe(403);
+		});
+
+		it("binds agent-scoped Dreaming writes to the credential agent", async () => {
+			const app = await makeApp();
+			const state = await import("./routes/state.js");
+			const { createAuthMiddleware, createToken } = await import("./auth");
+			const { registerPipelineRoutes } = await import("./routes/pipeline-routes");
+			const secret = state.authSecret;
+			if (!secret) throw new Error("expected auth secret for team-mode Dreaming test");
+			app.use("*", createAuthMiddleware(state.authConfig, secret));
+			registerPipelineRoutes(app);
+			const token = createToken(secret, { sub: "dreaming-agent-a", role: "agent", scope: { agent: "agent-a" } }, 60);
+			const res = await app.request("/api/dream/operations", {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ agentId: "agent-b", operations: [{ operation: "create_entity", payload: {} }] }),
+			});
+			expect(res.status).toBe(403);
+			const toolRes = await app.request("/api/dream/tools/search_entities", {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ agentId: "agent-b", input: { query: "Atlas" } }),
+			});
+			expect(toolRes.status).toBe(403);
+			const manifestRes = await app.request("/api/dream/tools", {
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			expect(manifestRes.status).toBe(200);
+			const scopedToolRes = await app.request("/api/dream/tools/search_entities", {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ input: { query: "Atlas" } }),
+			});
+			expect(scopedToolRes.status).toBe(200);
+			expect(await scopedToolRes.json()).toMatchObject({ tool: "search_entities", ok: true, agentId: "agent-a" });
 		});
 	});
 

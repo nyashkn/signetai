@@ -7,11 +7,30 @@
 
 import chalk from "chalk";
 import type { Command } from "commander";
-import { parseCsvFlag, parseDurationFlag, runRepairQueue } from "../features/repair-queue.js";
+import { parseCsvFlag, parseDurationFlag, parseTablesFlag, runRepairQueue } from "../features/repair-queue.js";
 
 export interface RepairQueueDeps {
+	readonly apiCall: (
+		method: string,
+		path: string,
+		body?: unknown,
+	) => Promise<{ readonly ok: boolean; readonly data: unknown }>;
 	readonly baseUrl: string;
-	readonly fetchJson: (path: string, init?: RequestInit) => Promise<Response>;
+}
+
+/**
+ * Parse the `--tables` enum list, routing an invalid value to a Commander
+ * error (stderr + help + exit 1) instead of silently degrading into the
+ * both-queue default (issue #1050).
+ */
+function parseTablesOption(value: unknown, program: Command): ("memory" | "summary")[] | undefined {
+	try {
+		return parseTablesFlag(typeof value === "string" ? value : undefined);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		program.error(`error: ${message}`);
+		return undefined;
+	}
 }
 
 export function registerRepairQueueCommands(program: Command, deps: RepairQueueDeps): void {
@@ -32,14 +51,13 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 		.option("--apply", "mutate; without this the command only previews")
 		.action(async (opts: Record<string, unknown>) => {
 			const dryRun = opts.apply !== true;
-			await runRepairQueue(
+			const tables = parseTablesOption(opts.tables, program);
+			const result = await runRepairQueue(
 				{
 					action: "requeue",
 					dryRun,
 					ids: parseCsvFlag(typeof opts.ids === "string" ? opts.ids : undefined),
-					tables: parseCsvFlag(typeof opts.tables === "string" ? opts.tables : undefined).filter(
-						(t): t is "memory" | "summary" => t === "memory" || t === "summary",
-					),
+					tables,
 					olderThanMs: parseDurationFlag(typeof opts.olderThan === "string" ? opts.olderThan : undefined),
 					errorPattern: typeof opts.errorPattern === "string" ? opts.errorPattern : undefined,
 					maxBatch: typeof opts.maxBatch === "string" ? Number(opts.maxBatch) : undefined,
@@ -51,6 +69,9 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 					chalk,
 				},
 			);
+			if (!result.success) {
+				process.exitCode = 1;
+			}
 		});
 
 	queue
@@ -63,14 +84,13 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 		.option("--apply", "mutate; without this the command only previews")
 		.action(async (opts: Record<string, unknown>) => {
 			const dryRun = opts.apply !== true;
-			await runRepairQueue(
+			const tables = parseTablesOption(opts.tables, program);
+			const result = await runRepairQueue(
 				{
 					action: "cancel",
 					dryRun,
 					ids: parseCsvFlag(typeof opts.ids === "string" ? opts.ids : undefined),
-					tables: parseCsvFlag(typeof opts.tables === "string" ? opts.tables : undefined).filter(
-						(t): t is "memory" | "summary" => t === "memory" || t === "summary",
-					),
+					tables,
 					olderThanMs: parseDurationFlag(typeof opts.olderThan === "string" ? opts.olderThan : undefined),
 					errorPattern: typeof opts.errorPattern === "string" ? opts.errorPattern : undefined,
 				},
@@ -81,6 +101,9 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 					chalk,
 				},
 			);
+			if (!result.success) {
+				process.exitCode = 1;
+			}
 		});
 
 	queue
@@ -93,14 +116,13 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 		.option("--apply", "mutate; without this the command only previews")
 		.action(async (opts: Record<string, unknown>) => {
 			const dryRun = opts.apply !== true;
-			await runRepairQueue(
+			const tables = parseTablesOption(opts.tables, program);
+			const result = await runRepairQueue(
 				{
 					action: "prune",
 					dryRun,
 					ids: parseCsvFlag(typeof opts.ids === "string" ? opts.ids : undefined),
-					tables: parseCsvFlag(typeof opts.tables === "string" ? opts.tables : undefined).filter(
-						(t): t is "memory" | "summary" => t === "memory" || t === "summary",
-					),
+					tables,
 					retentionMs: parseDurationFlag(typeof opts.olderThan === "string" ? opts.olderThan : undefined),
 					maxBatch: typeof opts.maxBatch === "string" ? Number(opts.maxBatch) : undefined,
 				},
@@ -111,5 +133,8 @@ export function registerRepairQueueCommands(program: Command, deps: RepairQueueD
 					chalk,
 				},
 			);
+			if (!result.success) {
+				process.exitCode = 1;
+			}
 		});
 }

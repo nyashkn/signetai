@@ -1,118 +1,56 @@
 Vision
 ======
 
-This document describes what Signet is, what it is not, and where it is
-heading.
+This document describes what Signet is, what it isn't, and where it's going. This is written for two audiences. People evaluating Signet today, and people who want to know what we are actually building toward. 
 
 Project overview and developer docs: [`README.md`](README.md)
+Near-term priorities: [`ROADMAP.md`](ROADMAP.md)
 Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ---
 
-Signet is a source-native continuity layer for AI agents. It preserves
-the raw artifacts of a person's work — transcripts, notes, documents,
-decisions, source clippings, code, runs — as ground truth, and builds a
-semantic layer on top with provenance chains back to those artifacts.
-Memory, identity, skills, and authority travel with the user across
-machines, models, and harnesses instead of being trapped inside any one
-of them.
+## What Signet is today
 
-The product is portability and durability, not intelligence. Models get
-smarter on their own. What they cannot do for themselves is carry a
-person's context forward without flattening it: a context-compacted
-session that drops a durable preference, a research note whose source
-date is lost, a delegated action whose rationale cannot be recovered.
-Signet sells the boring infrastructure that makes that possible.
+Signet is a local-first memory and context layer built for AI agents. It preserves the raw artifacts of a person's work, transcripts, notes, documents, decisions, source clippings, all as ground truth. Then builds a semantic layer on top of that with provenance chains back to those artifacts.
 
-## The shape
+Memory, system-prompts, skills, and secrets travel with the user across machines, models, and harnesses, instead of being trapped inside any one of them. 
+
+The product is not intelligence, it's portability and durability. LLMs continue to get smarter on their own, but what they cannot do for themselves is carry a person's context forward without flattening it. A context compacted session that drops a durable preference, a research note whose source date is lost, or a delegated action whose rationale cannot be recovered. Signet is the boring infrastructure that makes that possible. 
 
 Three layers. Everything else is maintenance.
 
-- **Artifacts** are ground truth. Transcripts, source notes, saved
-  memories, imported documents. Immutable, episodic, source-backed.
-- **Semantics** are cheap shortcuts derived from artifacts, with
-  provenance chains back to the artifact that justifies them. Old
-  claims get superseded. The semantic layer is constantly being
-  rebuilt.
-- **Query** is just the interface. Recall, search, graph navigation,
-  hooks. Nothing in the query layer is fundamentally better than
-  reading the artifact directly; it exists to make retrieval cheap.
+- **Artifacts** are ground truth. Transcripts, source notes, saved memories, imported documents. Immutable, episodic, source-backed.
+- **Semantics** are cheap shortcuts derived from artifacts with provenance chains back to the artifact that justifies them. Old claims get superseded, the semantic layer is constantly being rebuilt. 
+- **Query** is just the interface. Recall search, graph navigation, hooks. Nothing in the query layer is fundamentally better than reading the artifact directly. It exists to make retrieval cheap through compression. 
 
-Maintenance runs as a dreaming loop: cron-style passes that read recent
-artifacts, extract what matters, supersede what is stale, and propose
-small evidence-backed changes to identity files, skills, and the
-semantic layer. Continuity is not a feature that ships once. It is an
-operating substrate that is maintained.
+Maintenance runs in a dreaming loop. A pass that reads from a queue of recent artifacts and extracts what matters, mutating and extending the semantic layer, superseding what's stale and proposing small evidence-backed changes to identity/system-prompt files and skills. 
 
-## Seams
+And one capability is already further along than the rest: Signet secrets. Signet gives agents measured access to credentials without ever exposing their raw values. The daemon holds them, injects them at execution time, and redacts them from everything downstream. This is the shape that the rest of this document generalizes. 
 
-- **Source contracts.** A single source-artifact contract for vaults,
-  repos, docs, email, transcripts, and future providers. The pipeline
-  upstream of the contract is the only place source-specific code lives.
-- **Identity files.** `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`,
-  skills, and the dreaming loop's review surface. These directly shape
-  the next agent turn. Graph rows back them up; they do not replace
-  them.
-- **Skills.** Reviewed, portable procedural assets. They move across
-  harnesses without a per-harness migration project.
-- **Authority.** Permission and delegation boundaries travel with the
-  agent. Actions, mutations, and identity-file patches carry provenance
-  and a record of what the agent was allowed to do and why.
+### What we ship in 2026
 
-## Current focus
+- a desktop app and a dashboard a non-developer can use. Alongside the headless install developers already have. 
+- One memory engine: A single ingest queue with customizable interfaces for dreaming.
+- Temporal claims that age gracefully, and recall that reads the full ontology.
+- Benchmarks and evals as a receipt, not just a pitch. Recall quality is verified on shared eval harnesses from Supermemory with our testing methodology attached. Signet does not advertise self-invented numbers. 
 
-- Source-backed recall and source lifecycle.
-- The dreaming loop: transcript review, identity-file proposals,
-  semantic supersession, drift catches.
-- Benchmarks as receipt, not pitch. Recall quality that holds up
-  against LongMemEval and similar evals, with the source layer behind
-  it.
-- Portability across harnesses.
-- Repairable memory: inspect, edit, supersede, scope, and delete bad
-  context without losing provenance.
+## The long arc
 
-## Next directions
+AI is becoming the interface to a person's life. Frontier products already show what that looks like. You can connect your calendar, your files, your email, your health data, your finances, and the assistant gets dramatically more useful. Every one of those connections moves custody out of the data to the provider. So while the usefulness is real, so is the trade. 
 
-- Source layer as the wedge: one contract, many providers. The harder
-  version is event-triggered agents — sources as triggers, not just
-  recall inputs.
-- Authority artifacts for delegated action: intent → evidence →
-  approval → result, reconstructable.
-- Converging on one recommended memory-plugin default per harness
-  rather than shipping multiple parallel paths.
-- Dogfooded proving grounds: founder/product OS, research/sensemaking,
-  authority artifacts, team memory. Each is expressible as "use Signet
-  in X to do Y, measured by Z."
+We don't think the trade is necessary.
 
-## What Signet is not
+Signet's endgame is to become a secure personal database that sits between a person and every AI they use with the plumbing to grant measured, revocable, provenance-backed access to the data in it. Role-based access control for AI over your life, operated by you. The secret system is the proof of concept, an agent can use a credential without ever seeing it. Apply that same shape to health records, finances, private writing, relationships, the whole memory ontology and a person can get the real benefits of an AI that knows them without handing custody of their data to anyone. 
 
-This is the product-positioning list. Contribution policy — what
-gets merged, how state is stored, what the daemon accepts as input —
-lives in `AGENTS.md` and is not repeated here.
+That is the direction memory points once it's solved. An agent that remembers everything about you is only acceptable if the memory is yours. Stored where you can read it, delete it, and take it elsewhere. Signet builds the memory layer first because it's the hard technical core and because every harness needs it today. The vault is what the memory layer becomes. 
 
-- Not a hosted memory API. The data lives where the user can read and
-  delete it.
-- Not a harness-specific plugin. The product is the layer underneath
-  harnesses, not another one of them.
-- Not a vector store. Vectors and graph state are derived projections.
-  Artifacts are the source of truth.
-- Not a summarizer. The semantic layer is a navigation aid with
-  provenance. A summary that cannot lead back to the source it came
-  from is a wrong answer waiting to happen.
-- Not a training pipeline. Nothing leaves the user's machine. There is
-  no shared base model, no federated learning, no shadow fine-tuning
-  on user data. If a system claims to "learn what to remember" by
-  training on your context, ask where those weights go.
-- Not a vendor lock-in. Portability across tools, machines, and
-  models is the product, not a feature.
+What this implies, concretely, over time:
 
-This list is a charter, not a law of physics. Strong user demand and
-strong technical rationale can change it.
+- **Measured access beyond secrets.** Scope, expire, and revoke what any agent or harness can read. Down to the claim level, the same way secrets already work for credentials. 
+- **Authority artifacts for delegated action.** Intent → evidence → approval → result, reconstructable. When an agent acts for you, the record of what it was allowed to do, and why, is part of the substrate.
+- **The source layer as the wedge.** One source artifact contract for vault's, repos, docs, email transcripts, and future providers. The harder version is sources as triggers, not just recall inputs. 
+- **Portability as the moat.** file over app. Your context outlives every model, every harness, and every company, including this one. 
 
 ---
 
-*Written by Nicholai and Ant, June 2026. Replaces the February 21,
-2026 draft, which framed Signet around EIP-8004 wallet identity and a
-federated memory-relevance model. Both of those directions are off the
-table; the current framing is local substrate, source provenance, and
-harness portability.*
+*Written by Nicholai and Ant. revised in August 2026 to state the endgame: measured user custody access to personal data for AI, alongside the shipped product, which remains local first memory secrets and portability. This replaces the June 2026 draft, which described the continuity layer without naming where it led. 

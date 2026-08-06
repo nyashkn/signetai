@@ -11,6 +11,7 @@
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createDreamingMcpServer } from "./mcp/dreaming-tools.js";
 import { createMcpServer, refreshMarketplaceProxyTools } from "./mcp/tools.js";
 
 const DAEMON_URL =
@@ -57,15 +58,19 @@ if (resolvedAgentsDir) {
 	delete process.env.SIGNET_PATH;
 }
 
-const server = await createMcpServer({
-	daemonUrl: DAEMON_URL,
-	version: "0.1.0",
-	context: {
-		harness: process.env.SIGNET_HARNESS,
-		workspace: process.env.SIGNET_WORKSPACE ?? process.cwd(),
-		channel: process.env.SIGNET_CHANNEL,
-	},
-});
+const dreamingAgentId = process.env.SIGNET_DREAMING_AGENT_ID?.trim();
+const dreamingPassId = process.env.SIGNET_DREAMING_PASS_ID?.trim();
+const server = dreamingAgentId
+	? createDreamingMcpServer({ daemonUrl: DAEMON_URL, agentId: dreamingAgentId, passId: dreamingPassId, version: "0.1.0" })
+	: await createMcpServer({
+			daemonUrl: DAEMON_URL,
+			version: "0.1.0",
+			context: {
+				harness: process.env.SIGNET_HARNESS,
+				workspace: process.env.SIGNET_WORKSPACE ?? process.cwd(),
+				channel: process.env.SIGNET_CHANNEL,
+			},
+		});
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
@@ -73,15 +78,17 @@ await server.connect(transport);
 const refreshMsRaw = Number(process.env.SIGNET_MCP_PROXY_REFRESH_MS ?? "15000");
 const refreshMs = Number.isFinite(refreshMsRaw) && refreshMsRaw >= 1000 ? refreshMsRaw : 15000;
 
-const refreshTimer = setInterval(() => {
-	void refreshMarketplaceProxyTools(server, { notify: true });
-}, refreshMs);
+const refreshTimer = dreamingAgentId
+	? null
+	: setInterval(() => {
+			void refreshMarketplaceProxyTools(server, { notify: true });
+		}, refreshMs);
 
 let closing = false;
 const shutdown = () => {
 	if (closing) return;
 	closing = true;
-	clearInterval(refreshTimer);
+	if (refreshTimer) clearInterval(refreshTimer);
 	// Hard deadline: exit even if server.close() hangs
 	const deadline = setTimeout(() => process.exit(0), 3000);
 	deadline.unref();

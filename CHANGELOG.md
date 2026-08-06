@@ -6,6 +6,25 @@ All notable changes to Signet are documented here.
 
 Surface summary of the most recent release dates. See the release ledger below for exact version-by-version history.
 
+### 2026-08-06
+- Features: add GET /api/mode environment probe.
+- Bug fixes: stop test temp-dir leak + unblock event loop on locked file reads; sanitize auth env values; honor native embedding fallback; formal TTL-eviction lifecycle — checkpoint + idempotent finalization (#902); reflect live agent and pipeline state.
+- Refactoring: extract shared Signet runtime env builder; extract shared small helpers used by harness connectors (#957).
+
+### 2026-08-05
+- Features: redesign daily brief generation; disable stub nav tabs and secrets gate, rename account label; secrets vault, data-driven daily brief, and parity polish; replace Svelte dashboard with React + shadcn/ui; raise the pass timeout to 10 minutes; one universe pass over every agent scope, agentId threaded per operation; bounded agent surface — lean prompt, 11 tools, flag ops, search-on-demand.
+- Bug fixes: default requeue no longer starves summary jobs; reject cross-scope evidence; yield event loop in graph traversal; preserve full match counts; --max-batch is an aggregate cap across selected queues; bound dreaming evidence tools; estimate session-start token budgets; status and doctor surface dead-job backlog and unhealthy daemon health; dashboard no longer claims it started a healthy daemon; validate --tables enum list instead of silently dropping bad values; queue repair exits non-zero when the daemon request fails; reject invalid invocations; stop skill orphan loop; set safe Linux executable name; unblock compiled embedding runtime; alternate hygiene/content pass modes; unblock docker smoke build (dashboard tsconfig, native-bun 4.2.0 patch); persist disconnect config changes; register bundled OAuth flows; surface real daemon failures; aspect-first husk scan; assert native smoke on React dashboard assets; cap concurrent prompt-submit work with 503 backpressure; bound dreaming agent-scope discovery and halt after repeated failures; hoist entity-context hot paths; stop skill reconciler hot-loop; retire LLM enrichment, agent-scope entity names; synthesize a default policy when none is configured; never use the harness name as an agent scope; scan recent sources before narrowing — ingest steps list new evidence first; accept ids in get_evidence claim paths and derive citation kind/id from source_ref; accept redundant selectors that name the flagged entity in hygiene archives; stop surfacing the retired extraction pipeline in status output; let the agent cite and mint hygiene attention provenance.
+
+### 2026-08-04
+- Features: automatic startup recovery for crash-loop damage; startup grace period to prevent worker thundering herd; gate all background workers on system pressure; system-pressure signal and yielding write-batch primitive; queue auditable graph hygiene; materialize attributes as semantic memories; measure semantic structure quality; add scoped semantic attention; retain scoped pass runbooks; expose deterministic guard capabilities; add semantic quality report; trace agent capability calls; route agent passes through Pi and ACPX; add bounded agent execution path; expose cited agent operation endpoint; complete core operation handlers; unified ingest queue for dreaming and agentic dreaming [wip].
+- Bug fixes: defer hygiene scan from startup to first check tick; flock-based single-instance enforcement; gate native embedding warmup on provider=native; remove WAL checkpoint from startup recovery; make startup recovery fully synchronous; resolve sqlite-vec extension for bun global native binary installs; address code quality review — unused import/variable, dead comparison; critical recovery fixes — WAL checkpoint, migration guard; extend startup deadline and poll /health/live for liveness; re-check pressure before embedding tracker write; harden pressure signal purity and fix test leak; gate similarity route by memory lifecycle; invalidate stale derived snapshots; protect semantic claim projections; treat identity context as optional; defer low-volume consolidation safely; join concurrent dreaming passes; purge derived memories with sources; synchronize semantic memory lifecycle; keep source topology out of constellation; show derived semantic graph in constellation; allow complete benchmark agent passes; configure dreaming pass timeout; preserve active pass during embedding promotion; normalize chat completion endpoints; finalize dreaming after capture indexing; ingest dreaming sessions as episodic evidence; scope Dreaming status polling; preserve catalog metadata for compatible targets; prioritize material evidence changes; upgrade Pi agent runtime; centralize Zod compatibility boundary; expose ontology operation contracts; bound daemon agent tool calls; satisfy capability result contract; preserve Dreaming source provenance; resume oversized episodic evidence; retain rejected agent evidence; integrate first episodic backfill; retain rejected operation evidence; quarantine oversized episodic evidence; use persistent time-based retry backoff; isolate orphan cleanup to purge targets; exclude skill topology from context; preserve derived provenance boundary; route concrete diagnostics handlers; drop retired extraction worker asset; deduplicate temporal evidence; exclude archived episodic evidence; preserve empty initial cursor; retain cursor across idle passes; retain repeated compaction artifacts; offer applicable semantic operations; emit direct ontology payloads; purge Dreaming-derived semantic rows on disconnect; retire pre-existing pending legacy extract jobs on Dreaming cutover; gate legacy extract enqueue when Dreaming owns semantic writes; stamp derived semantics with configured source entry id; validate explicit evidence provenance; claim apply ownership before side effects; authorize and scope agentic routes; retain legacy state and bind plans to leases; preserve forgotten-source cancellation after rebase; escape table-cell backslashes.
+- Refactoring: slim prompt and enrich contract; navigate semantic state through tools; unify capability bindings; remove static prompt contract; remove static generation path; centralize cited operation application; require canonical citation references; derive agent citations from canonical evidence; share canonical evidence rendering; add daemon-owned agent tools; add shared episodic evidence search; add isolated Pi agent sessions; remove implicit legacy routing; remove legacy semantic decision path; remove legacy graph mutation helpers; retire legacy entity reclassification; audit feedback graph updates; remove structural backfill surface; retire unscoped legacy ingestion; remove retired extraction surfaces; complete legacy semantic write cutover; remove orphan extraction/graph transaction code; retire skill-graph direct semantic extraction; retire dependency-synthesis direct writer; retire direct retroactive supersession sweep; surface harness provenance and add multi-agent isolation tests; complete episodic-remember cutover with evidence citation; delete legacy extraction runtime and realign config/CLI/docs; remove retired structural classify/dependency producers; retire structural worker under Dreaming; drop unused reflection-worker wiring and worker re-exports; remove dead remember handler and pendingRemembers plumbing; consolidate memory_artifacts upsert into shared helper; route interactive pin/alias mutations through audited apply path; complete semantic writer cutover; apply audited semantic operations; expose transactional operation apply; consolidate episodic source selection; complete legacy dreaming schema cutover; remove legacy dreaming execution; stop shipping legacy dreaming worker; retire legacy dream routes; retire legacy dream CLI.
+- Docs: reflect Dreaming cutover; clarify inline linking boundary; align pipeline with Dreaming cutover; describe summary lineage cutover.
+
+### 2026-08-03
+- Bug fixes: prefer native install over wrapper; close hook stdin after read timeout.
+- Docs: refresh roadmap and vision for August 2026; add tests, regression tests, and evals policy.
+
 ### 2026-08-02
 - Bug fixes: persist memory embeddings across startup index promotion; validate checkpoint run IDs; unvalidated file path in checkpoint loading.
 - Refactoring: remove nativeShadowEnabled shadow proxy; remove SIGNET_DAEMON_RUNTIME rust switch and binary download.
@@ -19,23 +38,617 @@ Surface summary of the most recent release dates. See the release ledger below f
 ### 2026-07-28
 - Bug fixes: resolve wrapper entry after skipped postinstall; harden desktop runtime migration; migrate stale desktop runtimes; remove session synthesis routing.
 
-### 2026-07-27
-- Bug fixes: absolutize native smoke binary override path.
-- Docs: add plan-driven setup redesign draft spec.
-
-### 2026-07-26
-- Features: show ASCII brand banner on bare signet invocation.
-- Bug fixes: refuse migration on vec dimension mismatch + harden backfill; add migration backfill; guard checkInference and complete workload-state contract; separate extraction workload state.
-
-### 2026-07-25
-- Refactoring: consolidate workspace path resolution (#956).
-
-### 2026-07-24
-- Features: rework agents as identity & custody cards; rename Tasks→Agents, add identity and access config view; add dreaming view with pass brief and history timeline; add mobile responsive layout to redesign mockup.
-- Bug fixes: sync legacy extraction label with routing target (#1017); stop baking stale SIGNET_PATH into managed extensions; align assetPathsOverride key names with EmbeddingHandleOptions (#1018); validate routing config references on load (#1005); never report 100% embedding coverage while gaps remain (#906); await native smoke child teardown; rework agents — dense cards, session count, tactile chips; compact agent cards — spec bar, prompt tags, focus telemetry; dissolve dreaming card head, normalize code spans; surface extraction route blockers; replace emoji mutation symbols with typographic glyphs; unbox dreaming view, git-style mutation symbols, normalize prose; remove pass history ledger, rename Dreaming→Dreams with moon icon; dreaming brief leads with narrative summary, ledger demoted; quiet dreaming entity text, minimal buffer gauge, single summary line; unbox dreaming mutations, add buffer bar and entity pills; clean legacy config and honor repair dry runs; infer compatible privacy from endpoint.
-- Refactoring: share lenient JSON parsing; centralize MCP command resolution.
-
 ## Release Ledger
+
+## [0.164.1] - 2026-08-06
+
+Release summary: 1 bug fix.
+Tag range: `v0.164.0..v0.164.1`.
+
+### Bug Fixes
+
+- **daemon**: stop test temp-dir leak + unblock event loop on locked file reads (#1135)
+
+## [0.164.0] - 2026-08-06
+
+Release summary: 1 feature.
+Tag range: `v0.163.19..v0.164.0`.
+
+### Features
+
+- **daemon**: add GET /api/mode environment probe
+
+## [0.163.19] - 2026-08-06
+
+Release summary: 1 bug fix and 1 refactor.
+Tag range: `v0.163.18..v0.163.19`.
+
+### Bug Fixes
+
+- **connector-base**: sanitize auth env values
+
+### Refactoring
+
+- **connector-base**: extract shared Signet runtime env builder (#955)
+
+## [0.163.18] - 2026-08-06
+
+Release summary: 1 refactor.
+Tag range: `v0.163.17..v0.163.18`.
+
+### Refactoring
+
+- **connector-base**: extract shared small helpers used by harness connectors (#957) (#1128)
+
+## [0.163.17] - 2026-08-06
+
+Release summary: 2 bug fixes.
+Tag range: `v0.163.16..v0.163.17`.
+
+### Bug Fixes
+
+- **daemon**: honor native embedding fallback
+- **daemon**: formal TTL-eviction lifecycle — checkpoint + idempotent finalization (#902) (#1127)
+
+## [0.163.16] - 2026-08-06
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.15..v0.163.16`.
+
+### Bug Fixes
+
+- **dashboard**: reflect live agent and pipeline state (#1125)
+
+## [0.163.15] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.14..v0.163.15`.
+
+### Bug Fixes
+
+- **repair**: default requeue no longer starves summary jobs
+
+## [0.163.14] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.13..v0.163.14`.
+
+### Bug Fixes
+
+- **dreaming**: reject cross-scope evidence
+
+## [0.163.13] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.12..v0.163.13`.
+
+### Bug Fixes
+
+- **daemon**: yield event loop in graph traversal
+
+## [0.163.12] - 2026-08-05
+
+Release summary: 2 bug fixes.
+Tag range: `v0.163.11..v0.163.12`.
+
+### Bug Fixes
+
+- **repair**: preserve full match counts
+- **repair**: --max-batch is an aggregate cap across selected queues
+
+## [0.163.11] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.10..v0.163.11`.
+
+### Bug Fixes
+
+- **daemon**: bound dreaming evidence tools (#1117)
+
+## [0.163.10] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.9..v0.163.10`.
+
+### Bug Fixes
+
+- **daemon**: estimate session-start token budgets (#1116)
+
+## [0.163.9] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.8..v0.163.9`.
+
+### Bug Fixes
+
+- **ops**: status and doctor surface dead-job backlog and unhealthy daemon health (#1115)
+
+## [0.163.8] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.7..v0.163.8`.
+
+### Bug Fixes
+
+- **cli**: dashboard no longer claims it started a healthy daemon (#1112)
+
+## [0.163.7] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.6..v0.163.7`.
+
+### Bug Fixes
+
+- **repair**: validate --tables enum list instead of silently dropping bad values (#1111)
+
+## [0.163.6] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.5..v0.163.6`.
+
+### Bug Fixes
+
+- **repair**: queue repair exits non-zero when the daemon request fails (#1110)
+
+## [0.163.5] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.4..v0.163.5`.
+
+### Bug Fixes
+
+- **cli**: reject invalid invocations
+
+## [0.163.4] - 2026-08-05
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.163.3..v0.163.4`.
+
+No notable changes were captured from conventional commit subjects for this release.
+
+## [0.163.3] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.2..v0.163.3`.
+
+### Bug Fixes
+
+- **daemon**: stop skill orphan loop (#1107)
+
+## [0.163.2] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.1..v0.163.2`.
+
+### Bug Fixes
+
+- **desktop**: set safe Linux executable name (#1105)
+
+## [0.163.1] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.163.0..v0.163.1`.
+
+### Bug Fixes
+
+- **native**: unblock compiled embedding runtime
+
+## [0.163.0] - 2026-08-05
+
+Release summary: 1 feature.
+Tag range: `v0.162.6..v0.163.0`.
+
+### Features
+
+- **dashboard**: redesign daily brief generation
+
+## [0.162.6] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.162.5..v0.162.6`.
+
+### Bug Fixes
+
+- **dreaming**: alternate hygiene/content pass modes (#1101)
+
+## [0.162.5] - 2026-08-05
+
+Release summary: 2 bug fixes.
+Tag range: `v0.162.4..v0.162.5`.
+
+### Bug Fixes
+
+- **ci**: unblock docker smoke build (dashboard tsconfig, native-bun 4.2.0 patch) (#1102)
+- **dashboard**: persist disconnect config changes
+
+## [0.162.4] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.162.3..v0.162.4`.
+
+### Bug Fixes
+
+- **inference**: register bundled OAuth flows
+
+## [0.162.3] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.162.2..v0.162.3`.
+
+### Bug Fixes
+
+- **cli**: surface real daemon failures (#1074)
+
+## [0.162.2] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.162.1..v0.162.2`.
+
+### Bug Fixes
+
+- **dreaming**: aspect-first husk scan (#1094)
+
+## [0.162.1] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.162.0..v0.162.1`.
+
+### Bug Fixes
+
+- **release**: assert native smoke on React dashboard assets (#948)
+
+## [0.162.0] - 2026-08-05
+
+Release summary: 3 features.
+Tag range: `v0.161.4..v0.162.0`.
+
+### Features
+
+- **dashboard**: disable stub nav tabs and secrets gate, rename account label
+- **dashboard**: secrets vault, data-driven daily brief, and parity polish
+- **dashboard**: replace Svelte dashboard with React + shadcn/ui (#948)
+
+## [0.161.4] - 2026-08-05
+
+Release summary: 3 bug fixes.
+Tag range: `v0.161.3..v0.161.4`.
+
+### Bug Fixes
+
+- **daemon**: cap concurrent prompt-submit work with 503 backpressure
+- **daemon**: bound dreaming agent-scope discovery and halt after repeated failures
+- **daemon**: hoist entity-context hot paths
+
+## [0.161.3] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.161.2..v0.161.3`.
+
+### Bug Fixes
+
+- **daemon**: stop skill reconciler hot-loop; retire LLM enrichment, agent-scope entity names
+
+## [0.161.2] - 2026-08-05
+
+Release summary: 2 bug fixes.
+Tag range: `v0.161.1..v0.161.2`.
+
+### Bug Fixes
+
+- **routing**: synthesize a default policy when none is configured (#1072)
+- **hermes**: never use the harness name as an agent scope (#1084)
+
+## [0.161.1] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.161.0..v0.161.1`.
+
+### Bug Fixes
+
+- **dreaming**: scan recent sources before narrowing — ingest steps list new evidence first
+
+## [0.161.0] - 2026-08-05
+
+Release summary: 2 features.
+Tag range: `v0.160.1..v0.161.0`.
+
+### Features
+
+- **dreaming**: raise the pass timeout to 10 minutes
+- **dreaming**: one universe pass over every agent scope, agentId threaded per operation
+
+## [0.160.1] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.160.0..v0.160.1`.
+
+### Bug Fixes
+
+- **dreaming**: accept ids in get_evidence claim paths and derive citation kind/id from source_ref
+
+## [0.160.0] - 2026-08-05
+
+Release summary: 1 feature.
+Tag range: `v0.159.12..v0.160.0`.
+
+### Features
+
+- **dreaming**: bounded agent surface — lean prompt, 11 tools, flag ops, search-on-demand
+
+## [0.159.12] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.11..v0.159.12`.
+
+### Bug Fixes
+
+- **dreaming**: accept redundant selectors that name the flagged entity in hygiene archives
+
+## [0.159.11] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.10..v0.159.11`.
+
+### Bug Fixes
+
+- **cli**: stop surfacing the retired extraction pipeline in status output
+
+## [0.159.10] - 2026-08-05
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.9..v0.159.10`.
+
+### Bug Fixes
+
+- **dreaming**: let the agent cite and mint hygiene attention provenance (#1069)
+
+## [0.159.9] - 2026-08-04
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.159.8..v0.159.9`.
+
+No notable changes were captured from conventional commit subjects for this release.
+
+## [0.159.8] - 2026-08-04
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.159.7..v0.159.8`.
+
+No notable changes were captured from conventional commit subjects for this release.
+
+## [0.159.7] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.6..v0.159.7`.
+
+### Bug Fixes
+
+- **dreaming**: defer hygiene scan from startup to first check tick
+
+## [0.159.6] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.5..v0.159.6`.
+
+### Bug Fixes
+
+- **daemon**: flock-based single-instance enforcement
+
+## [0.159.5] - 2026-08-04
+
+Release summary: internal maintenance release with no conventional commit entries captured.
+Tag range: `v0.159.4..v0.159.5`.
+
+No notable changes were captured from conventional commit subjects for this release.
+
+## [0.159.4] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.3..v0.159.4`.
+
+### Bug Fixes
+
+- **daemon**: gate native embedding warmup on provider=native (#1073)
+
+## [0.159.3] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.2..v0.159.3`.
+
+### Bug Fixes
+
+- **daemon**: remove WAL checkpoint from startup recovery
+
+## [0.159.2] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.1..v0.159.2`.
+
+### Bug Fixes
+
+- **daemon**: make startup recovery fully synchronous
+
+## [0.159.1] - 2026-08-04
+
+Release summary: 1 bug fix.
+Tag range: `v0.159.0..v0.159.1`.
+
+### Bug Fixes
+
+- **core**: resolve sqlite-vec extension for bun global native binary installs
+
+## [0.159.0] - 2026-08-04
+
+Release summary: 4 features and 5 bug fixes.
+Tag range: `v0.158.0..v0.159.0`.
+
+### Features
+
+- **daemon**: automatic startup recovery for crash-loop damage
+- **daemon**: startup grace period to prevent worker thundering herd
+- **daemon**: gate all background workers on system pressure
+- **daemon**: system-pressure signal and yielding write-batch primitive
+
+### Bug Fixes
+
+- **daemon**: address code quality review — unused import/variable, dead comparison
+- **daemon**: critical recovery fixes — WAL checkpoint, migration guard
+- **cli**: extend startup deadline and poll /health/live for liveness
+- **daemon**: re-check pressure before embedding tracker write
+- **daemon**: harden pressure signal purity and fix test leak
+
+## [0.158.0] - 2026-08-04
+
+Release summary: 13 features, 53 bug fixes, 43 refactors, and 4 docs updates.
+Tag range: `v0.157.5..v0.158.0`.
+
+### Features
+
+- **dreaming**: queue auditable graph hygiene
+- **dreaming**: materialize attributes as semantic memories
+- **dreaming**: measure semantic structure quality
+- **dreaming**: add scoped semantic attention
+- **dreaming**: retain scoped pass runbooks
+- **dreaming**: expose deterministic guard capabilities
+- **dreaming**: add semantic quality report
+- **dreaming**: trace agent capability calls
+- **dreaming**: route agent passes through Pi and ACPX
+- **dreaming**: add bounded agent execution path
+- **dreaming**: expose cited agent operation endpoint
+- **ontology**: complete core operation handlers
+- **ingest**: unified ingest queue for dreaming and agentic dreaming [wip]
+
+### Bug Fixes
+
+- **memory**: gate similarity route by memory lifecycle
+- **memory**: invalidate stale derived snapshots
+- **memory**: protect semantic claim projections
+- **dreaming**: treat identity context as optional
+- **dreaming**: defer low-volume consolidation safely
+- **memorybench**: join concurrent dreaming passes
+- **dreaming**: purge derived memories with sources
+- **dreaming**: synchronize semantic memory lifecycle
+- **ontology**: keep source topology out of constellation
+- **ontology**: show derived semantic graph in constellation
+- **dreaming**: allow complete benchmark agent passes
+- **memorybench**: configure dreaming pass timeout
+- **dreaming**: preserve active pass during embedding promotion
+- **inference**: normalize chat completion endpoints
+- **memorybench**: finalize dreaming after capture indexing
+- **memorybench**: ingest dreaming sessions as episodic evidence
+- **memorybench**: scope Dreaming status polling
+- **inference**: preserve catalog metadata for compatible targets
+- **dreaming**: prioritize material evidence changes
+- **inference**: upgrade Pi agent runtime
+- **mcp**: centralize Zod compatibility boundary
+- **dreaming**: expose ontology operation contracts
+- **inference**: bound daemon agent tool calls
+- **dreaming**: satisfy capability result contract
+- **ontology**: preserve Dreaming source provenance
+- **dreaming**: resume oversized episodic evidence
+- **dreaming**: retain rejected agent evidence
+- **dreaming**: integrate first episodic backfill
+- **dreaming**: retain rejected operation evidence
+- **dreaming**: quarantine oversized episodic evidence
+- **dreaming**: use persistent time-based retry backoff
+- **retention**: isolate orphan cleanup to purge targets
+- **dreaming**: exclude skill topology from context
+- **dreaming**: preserve derived provenance boundary
+- **diagnostics**: route concrete diagnostics handlers
+- **build**: drop retired extraction worker asset
+- **dreaming**: deduplicate temporal evidence
+- **dreaming**: exclude archived episodic evidence
+- **dreaming**: preserve empty initial cursor
+- **dreaming**: retain cursor across idle passes
+- **lineage**: retain repeated compaction artifacts
+- **dreaming**: offer applicable semantic operations
+- **dreaming**: emit direct ontology payloads
+- **obsidian**: purge Dreaming-derived semantic rows on disconnect
+- **pipeline**: retire pre-existing pending legacy extract jobs on Dreaming cutover (#946)
+- **pipeline**: gate legacy extract enqueue when Dreaming owns semantic writes (#946)
+- **dreaming**: stamp derived semantics with configured source entry id
+- **dreaming**: validate explicit evidence provenance
+- **ingest**: claim apply ownership before side effects
+- **ingest**: authorize and scope agentic routes
+- **ingest**: retain legacy state and bind plans to leases
+- **ingest**: preserve forgotten-source cancellation after rebase
+- **ingest**: escape table-cell backslashes
+
+### Refactoring
+
+- **dreaming**: slim prompt and enrich contract
+- **dreaming**: navigate semantic state through tools
+- **dreaming**: unify capability bindings
+- **dreaming**: remove static prompt contract
+- **dreaming**: remove static generation path
+- **dreaming**: centralize cited operation application
+- **dreaming**: require canonical citation references
+- **dreaming**: derive agent citations from canonical evidence
+- **dreaming**: share canonical evidence rendering
+- **dreaming**: add daemon-owned agent tools
+- **dreaming**: add shared episodic evidence search
+- **inference**: add isolated Pi agent sessions
+- **inference**: remove implicit legacy routing
+- **dreaming**: remove legacy semantic decision path
+- **dreaming**: remove legacy graph mutation helpers
+- **dreaming**: retire legacy entity reclassification
+- **dreaming**: audit feedback graph updates
+- **dreaming**: remove structural backfill surface
+- **ingest**: retire unscoped legacy ingestion
+- **dreaming**: remove retired extraction surfaces
+- **dreaming**: complete legacy semantic write cutover (#946)
+- **pipeline**: remove orphan extraction/graph transaction code (#946)
+- **pipeline**: retire skill-graph direct semantic extraction (#946)
+- **pipeline**: retire dependency-synthesis direct writer (#946)
+- **pipeline**: retire direct retroactive supersession sweep (#946)
+- **dreaming**: surface harness provenance and add multi-agent isolation tests
+- **memory**: complete episodic-remember cutover with evidence citation (#946)
+- **pipeline**: delete legacy extraction runtime and realign config/CLI/docs (#946)
+- **pipeline**: remove retired structural classify/dependency producers (#946)
+- **daemon**: retire structural worker under Dreaming (#946)
+- **pipeline**: drop unused reflection-worker wiring and worker re-exports
+- **continuity**: remove dead remember handler and pendingRemembers plumbing
+- **memory**: consolidate memory_artifacts upsert into shared helper
+- **ontology**: route interactive pin/alias mutations through audited apply path
+- **dreaming**: complete semantic writer cutover
+- **dreaming**: apply audited semantic operations
+- **ontology**: expose transactional operation apply
+- **dreaming**: consolidate episodic source selection
+- **ingest**: complete legacy dreaming schema cutover
+- **ingest**: remove legacy dreaming execution
+- **ingest**: stop shipping legacy dreaming worker
+- **ingest**: retire legacy dream routes
+- **ingest**: retire legacy dream CLI
+
+### Docs
+
+- **roadmap**: reflect Dreaming cutover
+- **memory**: clarify inline linking boundary
+- **memory**: align pipeline with Dreaming cutover
+- **hooks**: describe summary lineage cutover
+
+## [0.157.5] - 2026-08-03
+
+Release summary: 1 bug fix.
+Tag range: `v0.157.4..v0.157.5`.
+
+### Bug Fixes
+
+- **update**: prefer native install over wrapper
+
+## [0.157.4] - 2026-08-03
+
+Release summary: 1 bug fix and 2 docs updates.
+Tag range: `v0.157.3..v0.157.4`.
+
+### Bug Fixes
+
+- **cli**: close hook stdin after read timeout
+
+### Docs
+
+- refresh roadmap and vision for August 2026
+- **agents**: add tests, regression tests, and evals policy
 
 ## [0.157.3] - 2026-08-02
 

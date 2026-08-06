@@ -14,40 +14,16 @@ import {
 	type SummaryJobRow,
 	type SummaryWorkerHandle,
 	canProcessSummaryJobs,
-	clearCommandStageRunning,
-	getCommandStageStatus,
-	hasCommandStageCompleted,
-	insertSummaryFacts,
 	isTerminalSummaryJobError,
 	leaseSummaryJobWhenAvailable,
-	markCommandStageCompleted,
-	markCommandStageRunning,
 	persistSessionSummaryArtifact,
 	recoverSummaryJobs,
 	resolveFailedSummaryJobStatus,
 	resolveSummaryHeadingDate,
-	runSummaryCommandProvider,
 	scoreContinuity,
-	shouldRunSignificanceGateForJob,
 	startSummaryRecovery,
 	startSummaryWorker,
 } from "./summary-worker";
-
-describe("canProcessSummaryJobs", () => {
-	it("preserves command extraction when synthesis is unavailable", () => {
-		expect(canProcessSummaryJobs(true, false)).toBe(true);
-	});
-
-	it("requires synthesis for non-command summary work", () => {
-		expect(canProcessSummaryJobs(false, true)).toBe(true);
-		expect(canProcessSummaryJobs(false, false)).toBe(false);
-	});
-
-	it("does not let command extraction bypass a pipeline pause", () => {
-		expect(canProcessSummaryJobs(true, false, true)).toBe(false);
-		expect(canProcessSummaryJobs(true, true, true)).toBe(false);
-	});
-});
 
 function makeAccessor(db: Database): DbAccessor {
 	return {
@@ -56,7 +32,7 @@ function makeAccessor(db: Database): DbAccessor {
 			try {
 				const result = fn(db as unknown as WriteDb);
 				db.exec("COMMIT");
-				return result;
+			return result;
 			} catch (err) {
 				db.exec("ROLLBACK");
 				throw err;
@@ -71,276 +47,24 @@ function makeAccessor(db: Database): DbAccessor {
 	};
 }
 
-const tmpDirs: string[] = [];
-const originalWhich = Bun.which;
-
-afterEach(() => {
-	Bun.which = originalWhich;
-	while (tmpDirs.length > 0) {
-		const dir = tmpDirs.pop();
-		if (!dir) continue;
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
-
-function makeAgentsDir(content: string): string {
-	const dir = mkdtempSync(join(tmpdir(), "signet-summary-worker-"));
-	tmpDirs.push(dir);
-	writeFileSync(join(dir, "agent.yaml"), content);
+function makeAgentsDir(yaml: string): string {
+	const dir = mkdtempSync(join(tmpdir(), "signet-summary-cfg-"));
+	writeFileSync(join(dir, "agent.yaml"), yaml);
 	return dir;
 }
 
-describe("insertSummaryFacts", () => {
-	let db: Database;
-	let accessor: DbAccessor;
-
-	beforeEach(() => {
-		db = new Database(":memory:");
-		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-		accessor = makeAccessor(db);
+describe("canProcessSummaryJobs", () => {
+	it("processes when synthesis is available", () => {
+		expect(canProcessSummaryJobs(true)).toBe(true);
 	});
 
-	afterEach(() => {
-		db.close();
+	it("does not process when synthesis is unavailable", () => {
+		expect(canProcessSummaryJobs(false)).toBe(false);
 	});
 
-	it("writes summary facts with updated_by metadata and default agent scope", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "codex",
-				project: "/mnt/work/dev/project",
-				session_key: "session-1",
-				session_id: "session-1",
-				id: "job-1",
-				agent_id: "",
-			},
-			[
-				{
-					content: "The daemon summary worker now writes updated_by for inserted facts.",
-					importance: 0.4,
-					type: "fact",
-					tags: "codex,summary",
-				},
-			],
-		);
-
-		expect(saved).toBe(1);
-
-		const row = db.prepare("SELECT who, source_id, source_type, project, agent_id, updated_by FROM memories").get() as
-			| {
-					who: string;
-					source_id: string | null;
-					source_type: string;
-					project: string | null;
-					agent_id: string;
-					updated_by: string;
-			  }
-			| undefined;
-
-		expect(row).toBeDefined();
-		expect(row?.who).toBe("codex");
-		expect(row?.source_id).toBe("session-1");
-		expect(row?.source_type).toBe("session_end");
-		expect(row?.project).toBe("/mnt/work/dev/project");
-		expect(row?.agent_id).toBe("default");
-		expect(row?.updated_by).toBe(SUMMARY_WORKER_UPDATED_BY);
-	});
-
-	it("fails closed to the default agent scope when runtime rows contain null agent ids", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "codex",
-				project: "/mnt/work/dev/project",
-				session_key: "session-null-agent",
-				agent_id: null,
-			} as unknown as Parameters<typeof insertSummaryFacts>[1],
-			[
-				{
-					content: "Null agent ids still persist summary facts under the default scope.",
-					importance: 0.4,
-					type: "fact",
-				},
-			],
-		);
-
-		expect(saved).toBe(1);
-
-		const row = db.prepare("SELECT agent_id FROM memories WHERE source_id = ?").get("session-null-agent") as
-			| { agent_id: string }
-			| undefined;
-		expect(row?.agent_id).toBe("default");
-	});
-
-	it("scopes duplicate detection to the fact owner's agent", () => {
-		const content = "Agent-scoped duplicate detection keeps this shared fact available to sub-agents.";
-
-		const firstSaved = insertSummaryFacts(
-			accessor,
-			{ harness: "claude-code", project: null, session_key: "sess-default", agent_id: "default" },
-			[{ content, importance: 0.4, type: "fact" }],
-		);
-		expect(firstSaved).toBe(1);
-
-		const duplicateSaved = insertSummaryFacts(
-			accessor,
-			{ harness: "claude-code", project: null, session_key: "sess-default-2", agent_id: "default" },
-			[{ content, importance: 0.4, type: "fact" }],
-		);
-		expect(duplicateSaved).toBe(0);
-
-		const crossAgentSaved = insertSummaryFacts(
-			accessor,
-			{ harness: "claude-code", project: null, session_key: "sess-agent-a", agent_id: "agent-a" },
-			[{ content, importance: 0.4, type: "fact" }],
-		);
-		expect(crossAgentSaved).toBe(1);
-
-		const rows = db
-			.prepare("SELECT agent_id FROM memories WHERE content = ? ORDER BY agent_id ASC")
-			.all(content) as Array<{ agent_id: string }>;
-		expect(rows).toEqual([{ agent_id: "agent-a" }, { agent_id: "default" }]);
-	});
-
-	it("populates content_hash so the embedding tracker can index summary facts", () => {
-		// Regression: summary-worker previously inserted facts without content_hash,
-		// making them invisible to the embedding tracker (which skips NULL-hash rows)
-		// and causing the embed backfill to cycle indefinitely on duplicate content.
-		insertSummaryFacts(
-			accessor,
-			{
-				harness: "claude-code",
-				project: null,
-				session_key: "sess-hash-test",
-				session_id: "sess-hash-test",
-				id: "job-hash",
-				agent_id: "test-agent",
-			},
-			[{ content: "Summary fact that needs a hash for embedding.", importance: 0.4, type: "fact" }],
-		);
-
-		const row = db.prepare("SELECT content_hash FROM memories WHERE source_id = 'sess-hash-test'").get() as
-			| { content_hash: string | null }
-			| undefined;
-
-		expect(row).toBeDefined();
-		expect(typeof row?.content_hash).toBe("string");
-		expect((row?.content_hash ?? "").length).toBeGreaterThan(0);
-	});
-
-	it("queues extraction jobs for inserted summary facts", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "oh-my-pi",
-				project: "/mnt/work/dev/project",
-				session_key: "sess-extract-queue",
-				session_id: "sess-extract-queue",
-				id: "job-extract-queue",
-				agent_id: "test-agent",
-			},
-			[
-				{
-					content: "The summary worker should enqueue extraction for synthesized facts about Alpine routing.",
-					type: "fact",
-				},
-				{ content: "OMP diagnostics should surface graph extraction failures from session synthesis.", type: "fact" },
-			],
-		);
-
-		expect(saved).toBe(2);
-
-		const jobs = db
-			.prepare(
-				`SELECT j.job_type, j.status, m.source_id
-				 FROM memory_jobs j
-				 JOIN memories m ON m.id = j.memory_id
-				 ORDER BY m.content ASC`,
-			)
-			.all() as Array<{ job_type: string; status: string; source_id: string }>;
-
-		expect(jobs).toEqual([
-			{ job_type: "extract", status: "pending", source_id: "sess-extract-queue" },
-			{ job_type: "extract", status: "pending", source_id: "sess-extract-queue" },
-		]);
-	});
-
-	it("treats content_hash collisions as deduplication instead of job failures", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "opencode",
-				project: null,
-				session_key: "sess-hash-collision",
-				session_id: "sess-hash-collision",
-				id: "job-hash-collision",
-				agent_id: "default",
-			},
-			[
-				{ content: "UI.", importance: 0.4, type: "fact" },
-				{ content: "UI!", importance: 0.4, type: "fact" },
-			],
-		);
-
-		expect(saved).toBe(1);
-
-		const row = db.prepare("SELECT COUNT(*) AS n FROM memories WHERE source_id = 'sess-hash-collision'").get() as {
-			n: number;
-		};
-		expect(row.n).toBe(1);
-	});
-
-	it("skips summary facts for temp sessions", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "codex",
-				project: "/tmp/signetai",
-				session_key: "sess-temp",
-				session_id: "sess-temp",
-				id: "job-temp",
-				agent_id: "default",
-			},
-			[
-				{
-					content: "This temp-session fact should never hit durable memory.",
-					importance: 0.4,
-					type: "fact",
-				},
-			],
-		);
-
-		expect(saved).toBe(0);
-
-		const row = db.prepare("SELECT COUNT(*) AS n FROM memories").get() as { n: number };
-		expect(row.n).toBe(0);
-	});
-
-	it("skips summary facts for synthetic session ids when project is absent", () => {
-		const saved = insertSummaryFacts(
-			accessor,
-			{
-				harness: "codex",
-				project: null,
-				session_key: "stable-session",
-				session_id: "fixture-42",
-				id: "job-synth",
-				agent_id: "default",
-			},
-			[
-				{
-					content: "This synthetic-session fact should never hit durable memory.",
-					importance: 0.4,
-					type: "fact",
-				},
-			],
-		);
-
-		expect(saved).toBe(0);
-
-		const row = db.prepare("SELECT COUNT(*) AS n FROM memories").get() as { n: number };
-		expect(row.n).toBe(0);
+	it("does not process when paused even if synthesis is available", () => {
+		expect(canProcessSummaryJobs(true, true)).toBe(false);
+		expect(canProcessSummaryJobs(false, true)).toBe(false);
 	});
 });
 
@@ -519,20 +243,19 @@ describe("recoverSummaryJobs", () => {
 		]);
 	});
 
-	it("clears in-flight command-stage-running marker during crash recovery but preserves completed checkpoint", () => {
+	it("recovers processing jobs during crash recovery", () => {
 		const now = new Date().toISOString();
 		const stmt = db.prepare(
 			`INSERT INTO summary_jobs
 			 (id, session_key, harness, project, transcript, status, result, attempts, max_attempts, created_at)
 			 VALUES (?, NULL, 'codex', NULL, 'transcript', 'processing', ?, 0, 3, ?)`,
 		);
-		stmt.run("job-running", "command-stage-running", now);
-		stmt.run("job-complete", "command-stage-complete", now);
+		stmt.run("job-stuck", "some-marker", now);
 
-		expect(recoverSummaryJobs(accessor, 10)).toEqual({ selected: 2, updated: 2 });
+		expect(recoverSummaryJobs(accessor, 10)).toEqual({ selected: 1, updated: 1 });
 
-		expect(getCommandStageStatus(accessor, "job-running")).toBe("none");
-		expect(getCommandStageStatus(accessor, "job-complete")).toBe("complete");
+		const row = db.prepare("SELECT status FROM summary_jobs WHERE id = 'job-stuck'").get() as { status: string };
+		expect(row.status).toBe("pending");
 	});
 
 	it("defers crash recovery off the synchronous startup path", async () => {
@@ -673,394 +396,6 @@ describe("summary job helpers", () => {
 	});
 });
 
-describe("shouldRunSignificanceGateForJob", () => {
-	it("runs significance gate for non-command extraction jobs", () => {
-		expect(shouldRunSignificanceGateForJob(false, "none")).toBe(true);
-		expect(shouldRunSignificanceGateForJob(false, "running")).toBe(true);
-		expect(shouldRunSignificanceGateForJob(false, "complete")).toBe(true);
-	});
-
-	it("runs significance gate before command stage has completed", () => {
-		expect(shouldRunSignificanceGateForJob(true, "none")).toBe(true);
-	});
-
-	it("skips significance gate for command retries once a stage checkpoint exists", () => {
-		expect(shouldRunSignificanceGateForJob(true, "running")).toBe(false);
-		expect(shouldRunSignificanceGateForJob(true, "complete")).toBe(false);
-	});
-});
-
-describe("command stage completion marker", () => {
-	let db: Database;
-	let accessor: DbAccessor;
-
-	beforeEach(() => {
-		db = new Database(":memory:");
-		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-		accessor = makeAccessor(db);
-	});
-
-	afterEach(() => {
-		db.close();
-	});
-
-	it("tracks running and completed stage checkpoints for command-mode retries", () => {
-		const now = new Date().toISOString();
-		db.prepare(
-			`INSERT INTO summary_jobs
-			 (id, session_key, harness, project, transcript, status, attempts, max_attempts, created_at, result)
-			 VALUES ('job-cmd-marker', NULL, 'codex', NULL, 'transcript', 'processing', 1, 3, ?, NULL)`,
-		).run(now);
-
-		expect(getCommandStageStatus(accessor, "job-cmd-marker")).toBe("none");
-		expect(hasCommandStageCompleted(accessor, "job-cmd-marker")).toBe(false);
-
-		markCommandStageRunning(accessor, "job-cmd-marker");
-		expect(getCommandStageStatus(accessor, "job-cmd-marker")).toBe("running");
-		expect(hasCommandStageCompleted(accessor, "job-cmd-marker")).toBe(false);
-
-		markCommandStageCompleted(accessor, "job-cmd-marker");
-
-		expect(getCommandStageStatus(accessor, "job-cmd-marker")).toBe("complete");
-		expect(hasCommandStageCompleted(accessor, "job-cmd-marker")).toBe(true);
-	});
-
-	it("does not mutate stage checkpoints when the job is not in processing state", () => {
-		const now = new Date().toISOString();
-		db.prepare(
-			`INSERT INTO summary_jobs
-			 (id, session_key, harness, project, transcript, status, attempts, max_attempts, created_at, result)
-			 VALUES ('job-cmd-pending', NULL, 'codex', NULL, 'transcript', 'pending', 0, 3, ?, NULL)`,
-		).run(now);
-
-		markCommandStageRunning(accessor, "job-cmd-pending");
-		markCommandStageCompleted(accessor, "job-cmd-pending");
-		clearCommandStageRunning(accessor, "job-cmd-pending");
-
-		expect(getCommandStageStatus(accessor, "job-cmd-pending")).toBe("none");
-		expect(hasCommandStageCompleted(accessor, "job-cmd-pending")).toBe(false);
-	});
-
-	it("clears the running checkpoint when command execution fails", () => {
-		const now = new Date().toISOString();
-		db.prepare(
-			`INSERT INTO summary_jobs
-			 (id, session_key, harness, project, transcript, status, attempts, max_attempts, created_at, result)
-			 VALUES ('job-cmd-fail-reset', NULL, 'codex', NULL, 'transcript', 'processing', 1, 3, ?, NULL)`,
-		).run(now);
-
-		markCommandStageRunning(accessor, "job-cmd-fail-reset");
-		expect(getCommandStageStatus(accessor, "job-cmd-fail-reset")).toBe("running");
-
-		clearCommandStageRunning(accessor, "job-cmd-fail-reset");
-		expect(getCommandStageStatus(accessor, "job-cmd-fail-reset")).toBe("none");
-	});
-});
-
-describe("runSummaryCommandProvider", () => {
-	function summaryJob(id: string, transcript = "test") {
-		return {
-			id,
-			session_key: `session-${id}`,
-			session_id: null,
-			harness: "codex",
-			project: "/tmp/project",
-			agent_id: "default",
-			transcript,
-			trigger: "test",
-			captured_at: null,
-			started_at: null,
-			ended_at: null,
-			attempts: 1,
-			max_attempts: 3,
-			created_at: new Date().toISOString(),
-		};
-	}
-
-	it("executes argv-safe command mode with token substitution and temp cleanup", async () => {
-		const marker = join(tmpdir(), `signet-summary-marker-${Date.now()}-${Math.random()}.txt`);
-		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
-		const scriptPath = join(dir, "summary-command-success.mjs");
-		writeFileSync(
-			scriptPath,
-			`import { existsSync, readFileSync, writeFileSync } from "node:fs";
-const [transcriptPath, sessionKey, project, agentId, markerPath] = process.argv.slice(2);
-if (!existsSync(transcriptPath)) process.exit(11);
-const text = readFileSync(transcriptPath, "utf8");
-if (!text.includes("hello command provider")) process.exit(12);
-if (sessionKey !== "session-123") process.exit(13);
-if (project !== "/tmp/project") process.exit(14);
-if (agentId !== "agent-abc") process.exit(15);
-writeFileSync(markerPath, transcriptPath, "utf8");
-`,
-			"utf8",
-		);
-
-		const cfg = loadMemoryConfig(dir);
-		const commandCfg = {
-			...cfg,
-			pipelineV2: {
-				...cfg.pipelineV2,
-				extraction: {
-					...cfg.pipelineV2.extraction,
-					provider: "command" as const,
-					command: {
-						bin: "node",
-						args: [scriptPath, "$TRANSCRIPT", "$SESSION_KEY", "$PROJECT", "$AGENT_ID", marker],
-					},
-				},
-			},
-		};
-		await runSummaryCommandProvider(
-			{
-				id: "job-1",
-				session_key: "session-123",
-				session_id: null,
-				harness: "codex",
-				project: "/tmp/project",
-				agent_id: "agent-abc",
-				transcript: "hello command provider",
-				trigger: "test",
-				captured_at: null,
-				started_at: null,
-				ended_at: null,
-				attempts: 1,
-				max_attempts: 3,
-				created_at: new Date().toISOString(),
-			},
-			commandCfg,
-		);
-
-		const transcriptPath = readFileSync(marker, "utf8").trim();
-		expect(transcriptPath.length).toBeGreaterThan(0);
-		expect(existsSync(transcriptPath)).toBe(false);
-		rmSync(marker, { force: true });
-	});
-
-	it("throws when command exits non-zero", async () => {
-		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
-		const scriptPath = join(dir, "summary-command-fail.mjs");
-		writeFileSync(scriptPath, "process.exit(7);\n", "utf8");
-
-		const cfg = loadMemoryConfig(dir);
-		const commandCfg = {
-			...cfg,
-			pipelineV2: {
-				...cfg.pipelineV2,
-				extraction: {
-					...cfg.pipelineV2.extraction,
-					provider: "command" as const,
-					command: {
-						bin: "node",
-						args: [scriptPath],
-					},
-				},
-			},
-		};
-		await expect(
-			runSummaryCommandProvider(
-				{
-					id: "job-2",
-					session_key: "session-xyz",
-					session_id: null,
-					harness: "codex",
-					project: "/tmp/project",
-					agent_id: "default",
-					transcript: "test",
-					trigger: "test",
-					captured_at: null,
-					started_at: null,
-					ended_at: null,
-					attempts: 1,
-					max_attempts: 3,
-					created_at: new Date().toISOString(),
-				},
-				commandCfg,
-			),
-		).rejects.toThrow("summary command exited with code 7");
-	});
-
-	it("waits for process exit after timeout before rejecting", async () => {
-		const marker = join(tmpdir(), `signet-summary-timeout-${Date.now()}-${Math.random()}.txt`);
-		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
-		const scriptPath = join(dir, "summary-command-timeout.mjs");
-		writeFileSync(
-			scriptPath,
-			`import { writeFileSync } from "node:fs";
-const marker = process.argv[2];
-process.on("SIGTERM", () => {
-  setTimeout(() => {
-    writeFileSync(marker, "terminated", "utf8");
-    process.exit(0);
-  }, 150);
-});
-setInterval(() => {}, 1000);
-`,
-			"utf8",
-		);
-
-		const cfg = loadMemoryConfig(dir);
-		const commandCfg = {
-			...cfg,
-			pipelineV2: {
-				...cfg.pipelineV2,
-				extraction: {
-					...cfg.pipelineV2.extraction,
-					timeout: 5000,
-					provider: "command" as const,
-					command: {
-						bin: "node",
-						args: [scriptPath, marker],
-					},
-				},
-			},
-		};
-
-		await expect(
-			runSummaryCommandProvider(
-				{
-					id: "job-timeout",
-					session_key: "session-timeout",
-					session_id: null,
-					harness: "codex",
-					project: "/tmp/project",
-					agent_id: "default",
-					transcript: "test",
-					trigger: "test",
-					captured_at: null,
-					started_at: null,
-					ended_at: null,
-					attempts: 1,
-					max_attempts: 3,
-					created_at: new Date().toISOString(),
-				},
-				commandCfg,
-			),
-		).rejects.toThrow("summary command timed out after 5000ms");
-
-		expect(existsSync(marker)).toBe(true);
-		rmSync(marker, { force: true });
-	}, 15_000);
-
-	it("aborts command mode promptly from the active worker signal", async () => {
-		const marker = join(tmpdir(), `signet-summary-abort-${Date.now()}-${Math.random()}.txt`);
-		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
-		const scriptPath = join(dir, "summary-command-abort.mjs");
-		writeFileSync(
-			scriptPath,
-			`import { writeFileSync } from "node:fs";
-writeFileSync(process.argv[2], String(process.pid), "utf8");
-setInterval(() => {}, 1000);
-`,
-			"utf8",
-		);
-		const cfg = loadMemoryConfig(dir);
-		const commandCfg = {
-			...cfg,
-			pipelineV2: {
-				...cfg.pipelineV2,
-				extraction: {
-					...cfg.pipelineV2.extraction,
-					timeout: 5000,
-					provider: "command" as const,
-					command: { bin: process.execPath, args: [scriptPath, marker] },
-				},
-			},
-		};
-		const controller = new AbortController();
-		const started = Date.now();
-		const run = runSummaryCommandProvider(summaryJob("job-abort"), commandCfg, controller.signal);
-
-		for (let i = 0; i < 40 && !existsSync(marker); i += 1) {
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-		controller.abort();
-
-		await expect(run).rejects.toThrow(/aborted/i);
-		expect(Date.now() - started).toBeLessThan(2500);
-		rmSync(marker, { force: true });
-	}, 8000);
-
-	it("kills stubborn command descendants on abort", async () => {
-		if (process.platform === "win32") return;
-		const root = join(tmpdir(), `signet-summary-descendant-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		const dir = makeAgentsDir("memory:\n  pipelineV2:\n    extraction:\n      provider: ollama\n");
-		const rootPidPath = join(root, "root.pid");
-		const childPidPath = join(root, "child.pid");
-		mkdirSync(root, { recursive: true });
-		const scriptPath = join(dir, "summary-command-descendant.sh");
-		writeFileSync(
-			scriptPath,
-			`#!/usr/bin/env bash
-trap '' TERM
-printf '%s' "$$" > ${JSON.stringify(rootPidPath)}
-sleep 30 &
-printf '%s' "$!" > ${JSON.stringify(childPidPath)}
-wait
-`,
-			"utf8",
-		);
-		chmodSync(scriptPath, 0o755);
-		const cfg = loadMemoryConfig(dir);
-		const commandCfg = {
-			...cfg,
-			pipelineV2: {
-				...cfg.pipelineV2,
-				extraction: {
-					...cfg.pipelineV2.extraction,
-					timeout: 5000,
-					provider: "command" as const,
-					command: { bin: scriptPath, args: [] },
-				},
-			},
-		};
-		const controller = new AbortController();
-
-		try {
-			const run = runSummaryCommandProvider(summaryJob("job-descendant"), commandCfg, controller.signal);
-			for (let i = 0; i < 40 && (!existsSync(rootPidPath) || !existsSync(childPidPath)); i += 1) {
-				await new Promise((resolve) => setTimeout(resolve, 25));
-			}
-			controller.abort();
-			await expect(run).rejects.toThrow(/aborted/i);
-
-			const rootPid = Number(readFileSync(rootPidPath, "utf8"));
-			const childPid = Number(readFileSync(childPidPath, "utf8"));
-			let rootAlive = true;
-			let childAlive = true;
-			for (let i = 0; i < 50; i += 1) {
-				try {
-					process.kill(rootPid, 0);
-				} catch {
-					rootAlive = false;
-				}
-				try {
-					process.kill(childPid, 0);
-				} catch {
-					childAlive = false;
-				}
-				if (!rootAlive && !childAlive) break;
-				await new Promise((resolve) => setTimeout(resolve, 25));
-			}
-			expect(rootAlive).toBe(false);
-			expect(childAlive).toBe(false);
-		} finally {
-			for (const path of [rootPidPath, childPidPath]) {
-				if (!existsSync(path)) continue;
-				const pid = Number(readFileSync(path, "utf8"));
-				if (pid > 0) {
-					try {
-						process.kill(pid, "SIGKILL");
-					} catch {
-						// Already exited.
-					}
-				}
-			}
-			rmSync(root, { recursive: true, force: true });
-		}
-	}, 8000);
-});
-
 describe("persistSessionSummaryArtifact", () => {
 	let dir = "";
 	let prevSignetPath: string | undefined;
@@ -1140,5 +475,25 @@ describe("persistSessionSummaryArtifact", () => {
 		await expect(
 			persistSessionSummaryArtifact(job, "Retry produced a different summary body.", null),
 		).resolves.toBeUndefined();
+	});
+});
+
+describe("summary jobs produce no fact memories or extract jobs (#913)", () => {
+	let db: Database;
+	let accessor: DbAccessor;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		accessor = makeAccessor(db);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("does not expose the retired summary-fact writer", async () => {
+		const module = await import("./summary-worker");
+		expect((module as Record<string, unknown>).insertSummaryFacts).toBeUndefined();
 	});
 });

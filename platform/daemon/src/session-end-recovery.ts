@@ -124,7 +124,7 @@ export function recoverMissingSessionEndOnClearStart(
 
 	// TS memory config has a separate dreaming summary path; the Rust manifest
 	// config currently exposes only pipelineV2, so Rust follows that runtime gate.
-	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode || memoryCfg.dreaming.enabled;
+	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode;
 
 	try {
 		// Keep target selection, duplicate detection, enqueue, and cleanup in one

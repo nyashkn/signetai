@@ -12,17 +12,22 @@ import { type ReadDb, type WriteDb, getDbAccessor, prepareTypedStatement } from 
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "../db-helpers";
 import { fetchEmbedding } from "../embedding-fetch";
 import { buildEmbeddingHealth } from "../embedding-health";
+import { stagingCoverage } from "../embedding-index-migration";
 import {
 	isActiveEmbeddingConfig,
 	readEmbeddingIndexState,
 	resolveActiveEmbeddingConfig,
 } from "../embedding-index-state";
-import { stagingCoverage } from "../embedding-index-migration";
 import { getInferenceRouterOrNull } from "../inference-router";
-import { linkMemoryToEntities } from "../inline-entity-linker";
 import { logger } from "../logger";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
-import { type RecallParams, type RecallResponse, buildAgentScopeClause, hybridRecall } from "../memory-search";
+import {
+	type RecallParams,
+	type RecallResponse,
+	buildAgentScopeClause,
+	hybridRecall,
+	memoryLifecycleSql,
+} from "../memory-search";
 import { recordMemorySearchTelemetry } from "../memory-search-telemetry";
 import { resolveMemorySearchTelemetryProject } from "../memory-search-telemetry-project";
 import { buildMemoryTimeline } from "../memory-timeline";
@@ -47,7 +52,6 @@ import {
 	hasMemoriesSessionIdColumnCache,
 	projectionErrors,
 	projectionInFlight,
-	queueExtractionJob,
 } from "./state";
 
 import {
@@ -930,6 +934,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					invalidMemoryTimestamps: 0,
 					invalidHistoryTimestamps: 0,
 					buckets: [],
+					dailyBuckets: [],
 				},
 				500,
 			);
@@ -1245,7 +1250,6 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			const importance = body.importance ?? parsedPrefixes.importance;
 			const pinned = (body.pinned ?? parsedPrefixes.pinned) ? 1 : 0;
 			const tags = hasBodyTags ? bodyTags : parsedPrefixes.tags;
-			const pipelineEnqueueEnabled = pipelineCfg.enabled;
 
 			const chunkPlans = chunks
 				.map((chunk, index) => {
@@ -1349,12 +1353,6 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 						if (byHash) return { status: "content_conflict" };
 					}
 
-					db.prepare(
-						`INSERT OR IGNORE INTO entities
-						 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
-						 VALUES (?, ?, ?, 'chunk_group', ?, 0, ?, ?)`,
-					).run(groupId, `chunk-group:${groupId}`, `chunk-group:${groupId}`, agentId, now, now);
-
 					for (let chunkIndex = 0; chunkIndex < chunkPlans.length; chunkIndex += 1) {
 						const plan = chunkPlans[chunkIndex];
 						const chunkId = plannedChunkIds[chunkIndex];
@@ -1371,10 +1369,11 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 							tags: tags ?? null,
 							pinned,
 							isDeleted: 0,
-							extractionStatus: pipelineEnqueueEnabled ? "pending" : "none",
+							extractionStatus: "none",
 							embeddingModel: null,
-							extractionModel: pipelineEnqueueEnabled ? pipelineCfg.extraction.model : null,
+							extractionModel: null,
 							updatedBy: who,
+							memoryKind: "episodic",
 							sourceType: "chunk",
 							sourceId: groupId,
 							sourcePath: rowProvenance.sourcePath ?? null,
@@ -1385,13 +1384,6 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 							visibility,
 							createdAt: now,
 						});
-
-						// Link chunk to group entity
-						db.prepare(
-							`INSERT OR IGNORE INTO memory_entity_mentions
-							 (memory_id, entity_id, mention_text, confidence, created_at)
-							 VALUES (?, ?, 'chunk', 1.0, ?)`,
-						).run(chunkId, groupId, now);
 					}
 
 					return { ids: plannedChunkIds, status: "inserted" };
@@ -1459,29 +1451,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 							error: String(e),
 						});
 					}
-
-					// Inline entity linking for chunk
-					try {
-						getDbAccessor().withWriteTx((db) => {
-							linkMemoryToEntities(db, chunkId, plan.chunk, agentId);
-						});
-					} catch {
-						// Non-fatal — pipeline extraction handles deeper linking
-					}
-
-					// Enqueue pipeline extraction if enabled
-					if (pipelineEnqueueEnabled) {
-						try {
-							queueExtractionJob(chunkId);
-						} catch (e) {
-							logger.warn("pipeline", "Failed to enqueue chunk extraction", {
-								chunkId,
-								error: String(e),
-							});
-						}
-					}
 				}
-
 				logger.info("memory", "Chunked memory saved", {
 					groupId,
 					chunkCount: savedChunkIds.length,
@@ -1529,7 +1499,6 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				? normalizedContent.normalizedContent
 				: normalizedContent.hashBasis;
 		const contentHash = normalizedContent.contentHash;
-		const pipelineEnqueueEnabled = pipelineCfg.enabled;
 		const chunkedIdempotencyMemory =
 			rowProvenance.idempotencyKey === undefined
 				? []
@@ -1556,7 +1525,6 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				if (byHash) return { deduped: true as const, row: byHash };
 
 				// No duplicate — insert
-				const hasStructured = !!body.structured;
 				txIngestEnvelope(db, {
 					id,
 					content: normalizedContent.storageContent,
@@ -1570,14 +1538,17 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					tags: tags ?? null,
 					pinned,
 					isDeleted: 0,
-					extractionStatus: hasStructured ? "complete" : pipelineEnqueueEnabled ? "pending" : "none",
+					extractionStatus: "none",
 					embeddingModel: null,
-					extractionModel: hasStructured
-						? "structured-passthrough"
-						: pipelineEnqueueEnabled
-							? pipelineCfg.extraction.model
-							: null,
+					extractionModel: null,
 					updatedBy: who,
+					memoryKind: "episodic",
+					evidenceMeta: body.structured
+						? JSON.stringify({
+								entities: body.structured.entities ?? [],
+								aspects: body.structured.aspects ?? [],
+							})
+						: null,
 					sourceType,
 					sourceId,
 					sourcePath: rowProvenance.sourcePath ?? null,
@@ -1704,49 +1675,22 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			});
 		}
 
-		// --- Structured vs pipeline path ---
-		let entitiesLinked = 0;
+		// --- Episodic evidence retained; no direct semantic side effects ---
+		// remember saves are immutable EPISODIC evidence. They are immediately
+		// retrievable (search/recall/list/get read non-deleted rows) but are
+		// never written directly into the knowledge graph. Only Dreaming derives
+		// semantic state from episodic rows via the shared episodic-sources
+		// selector. Inline entity linking, structured graph persistence, and
+		// legacy extract enqueue are intentionally absent here.
 		let hintsWritten = 0;
+		const structuredRetained = !!body.structured;
 
-		if (body.structured) {
-			const { txPersistStructured } = await import("../pipeline/graph-transactions.js");
-			try {
-				const result = getDbAccessor().withWriteTx((db) =>
-					txPersistStructured(db, {
-						entities: (body.structured?.entities ?? []).map((e) => ({
-							source: e.source,
-							sourceType: e.sourceType,
-							relationship: e.relationship,
-							target: e.target,
-							targetType: e.targetType,
-							confidence: e.confidence ?? 0.7,
-						})),
-						aspects: body.structured?.aspects ?? [],
-						sourceMemoryId: id,
-						content: normalizedContent.storageContent,
-						agentId,
-						now: createdAt,
-					}),
-				);
-				entitiesLinked = result.mentionsLinked;
-				logger.debug("memory", "Structured payload persisted", {
-					id,
-					entities: result.entitiesInserted + result.entitiesUpdated,
-					relations: result.relationsInserted,
-					aspects: result.aspectsCreated,
-					attributes: result.attributesCreated,
-					superseded: result.attributesSuperseded,
-					mentions: result.mentionsLinked,
-				});
-			} catch (e) {
-				logger.warn("memory", "Structured payload persistence failed (non-fatal)", {
-					id,
-					error: e instanceof Error ? e.message : String(e),
-				});
-			}
-
-			// Write structured hints
-			const allHints = [...(body.structured?.hints ?? []), ...(body.hints ?? [])];
+		// Prospective recall hints are agent-authored metadata that aid future
+		// retrieval of this evidence; they are not semantic graph state.
+		if (Array.isArray(body.hints) || structuredRetained) {
+			const allHints = structuredRetained
+				? [...(body.structured?.hints ?? []), ...(body.hints ?? [])]
+				: (body.hints ?? []);
 			if (allHints.length > 0) {
 				try {
 					getDbAccessor().withWriteTx((db) => {
@@ -1762,82 +1706,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 						}
 					});
 				} catch (e) {
-					logger.warn("memory", "Structured hints write failed (non-fatal)", {
-						id,
-						error: e instanceof Error ? e.message : String(e),
-					});
-				}
-			}
-		} else {
-			// --- Default path: inline entity linking + async pipeline ---
-			try {
-				const linkResult = getDbAccessor().withWriteTx((db) =>
-					linkMemoryToEntities(db, id, normalizedContent.storageContent, agentId),
-				);
-				entitiesLinked = linkResult.linked;
-				if (linkResult.linked > 0) {
-					logger.debug("memory", "Inline entity linking", {
-						id,
-						linked: linkResult.linked,
-						aspects: linkResult.aspects,
-						attributes: linkResult.attributes,
-					});
-				}
-			} catch (e) {
-				logger.warn("memory", "Inline entity linking failed (non-fatal)", {
-					id,
-					error: e instanceof Error ? e.message : String(e),
-				});
-			}
-
-			// Enqueue pipeline extraction if enabled
-			if (pipelineEnqueueEnabled) {
-				try {
-					queueExtractionJob(id);
-				} catch (e) {
-					getDbAccessor().withWriteTx((db) => {
-						db.prepare(
-							`UPDATE memories
-								 SET extraction_status = 'failed', extraction_model = ?
-								 WHERE id = ?`,
-						).run(pipelineCfg.extraction.model, id);
-					});
-					logger.warn("pipeline", "Failed to enqueue extraction job", {
-						memoryId: id,
-						error: String(e),
-					});
-				}
-			}
-
-			// Prospective hints
-			if (Array.isArray(body.hints) && body.hints.length > 0 && pipelineCfg.hints?.enabled) {
-				try {
-					getDbAccessor().withWriteTx((db) => {
-						const stmt = db.prepare(
-							`INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
-							 VALUES (?, ?, ?, ?, ?)`,
-						);
-						for (const hint of body.hints ?? []) {
-							const h = typeof hint === "string" ? hint.trim() : "";
-							if (h.length < 5 || h.length > 300) continue;
-							stmt.run(crypto.randomUUID(), id, agentId, h, now);
-							hintsWritten++;
-						}
-					});
-				} catch (e) {
-					logger.warn("memory", "Client-side hints write failed (non-fatal)", {
-						id,
-						error: e instanceof Error ? e.message : String(e),
-					});
-				}
-			} else if (pipelineCfg.hints?.enabled && pipelineEnqueueEnabled) {
-				try {
-					const { enqueueHintsJob } = await import("../pipeline/prospective-index.js");
-					getDbAccessor().withWriteTx((db) => {
-						enqueueHintsJob(db, id, normalizedContent.storageContent);
-					});
-				} catch (e) {
-					logger.warn("memory", "Hints job enqueue failed (non-fatal)", {
+					logger.warn("memory", "Hints write failed (non-fatal)", {
 						id,
 						error: e instanceof Error ? e.message : String(e),
 					});
@@ -1850,9 +1719,8 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			type: memType,
 			pinned: !!pinned,
 			embedded,
-			entities: entitiesLinked,
 			hints: hintsWritten,
-			structured: !!body.structured,
+			structured: structuredRetained,
 		});
 
 		return c.json({
@@ -1863,9 +1731,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			importance,
 			content: normalizedContent.storageContent,
 			embedded,
-			entities_linked: entitiesLinked,
+			entities_linked: 0,
 			hints_written: hintsWritten,
-			structured: !!body.structured,
+			structured: structuredRetained,
+			// Explicit non-silent indicator: structured input was retained as
+			// episodic evidence but NOT applied to the knowledge graph.
+			structured_applied: false,
 		});
 	});
 
@@ -1931,7 +1802,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					        m.idempotency_key, m.project, ${sessionSelect} m.confidence,
 					        m.access_count, m.last_accessed, m.is_deleted, m.deleted_at,
 					        m.extraction_status, m.embedding_model, m.version,
-					        m.created_at, m.updated_at, m.updated_by
+					        m.memory_kind, m.created_at, m.updated_at, m.updated_by
 					 FROM memories m
 					 WHERE m.id = ?
 					   AND (m.is_deleted = 0 OR m.is_deleted IS NULL)
@@ -2316,6 +2187,28 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 						currentVersion: txResult.currentVersion,
 						duplicateMemoryId: txResult.duplicateMemoryId,
 						error: "Duplicate content hash",
+					},
+					409,
+				);
+			case "episodic_content_immutable":
+				return c.json(
+					{
+						id: txResult.memoryId,
+						status: txResult.status,
+						currentVersion: txResult.currentVersion,
+						error:
+							"Episodic evidence is immutable: content and type cannot be changed. Update tags, importance, or pinned, or save a new memory.",
+					},
+					409,
+				);
+			case "semantic_projection_content_immutable":
+				return c.json(
+					{
+						id: txResult.memoryId,
+						status: txResult.status,
+						currentVersion: txResult.currentVersion,
+						error:
+							"Semantic claim projections are managed by the ontology. Use an audited ontology operation to change claim content or type.",
 					},
 					409,
 				);
@@ -3072,9 +2965,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			const searchData = getDbAccessor().withReadDb((db) => {
 				const embeddingRow = db
 					.prepare(`
-        SELECT vector
-        FROM embeddings
-        WHERE source_type = 'memory' AND source_id = ?
+        SELECT e.vector
+        FROM embeddings e
+        INNER JOIN memories m ON m.id = e.source_id
+        WHERE e.source_type = 'memory' AND e.source_id = ?
+        AND COALESCE(m.source_type, '') != 'aggregate-recall'
+        ${memoryLifecycleSql(db)}
         LIMIT 1
       `)
 					.get(id) as { vector: Buffer } | undefined;
@@ -3091,6 +2987,7 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 				return vectorSearch(db, queryVector, {
 					limit: k + 1,
 					type,
+					excludeAggregateRecall: true,
 				});
 			});
 
@@ -3112,8 +3009,8 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 					db
 						.prepare(`
         SELECT id, content, type, tags, confidence, created_at
-        FROM memories
-        WHERE id IN (${placeholders})
+        FROM memories m
+        WHERE id IN (${placeholders})${memoryLifecycleSql(db)}
       `)
 						.all(...ids) as Array<{
 						id: string;

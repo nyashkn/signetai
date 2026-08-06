@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
+import { isDaemonDerivedMemorySourceType } from "./memory-provenance";
 import { runMigrations } from "./migrations/index";
 import type { Conversation, Embedding, Memory } from "./types";
 import type { MemoryHistory, MemoryJob } from "./types";
@@ -56,6 +57,17 @@ function findSqliteVecExtension(): string | null {
 
 	// Try common locations in order
 	const searchPaths = [
+		// Native binary: process.execPath is .../node_modules/signetai/native/signet
+		// Extension is a sibling package in the same node_modules directory.
+		// Go up 3 levels from the binary to reach node_modules/, then into the
+		// platform package. This is the primary path for bun global installs.
+		join(dirname(dirname(dirname(process.execPath))), platformPkg, extFile),
+		// Native binary: extension nested inside signetai's own node_modules
+		// (without the "lib" prefix that npm uses)
+		join(dirname(dirname(process.execPath)), "node_modules", platformPkg, extFile),
+		// Bun default global install: ~/.bun/install/global/node_modules/<pkg>/vec0.so
+		join(process.env.BUN_INSTALL || join(homedir(), ".bun"), "install", "global", "node_modules", platformPkg, extFile),
+		join(process.env.BUN_INSTALL || join(homedir(), ".bun"), "install", "global", "node_modules", "signetai", "node_modules", platformPkg, extFile),
 		// Standard npm/yarn layout: __dirname is node_modules/@signet/core/dist/
 		join(__dirname, "..", "..", platformPkg, extFile),
 		// Installed package: __dirname is signetai/dist/, deps in own node_modules/
@@ -68,8 +80,6 @@ function findSqliteVecExtension(): string | null {
 		join(__dirname, "..", "..", "..", "node_modules", platformPkg, extFile),
 		// Monorepo root with bun structure
 		join(__dirname, "..", "..", "..", "node_modules", ".bun", `${platformPkg}@*`, "node_modules", platformPkg, extFile),
-		// Bun global install cache (~/.bun/install/cache/)
-		join(homedir(), ".bun", "install", "cache", `${platformPkg}@*`, extFile),
 		// Global npm install: derive from process.execPath
 		// e.g. /opt/homebrew/bin/node → /opt/homebrew/lib/node_modules/<pkg>/vec0.dylib
 		// e.g. /usr/bin/node → /usr/lib/node_modules/<pkg>/vec0.so
@@ -121,9 +131,6 @@ function findSqliteVecExtension(): string | null {
 			platformPkg,
 			extFile,
 		),
-		// Bun global install (bun add -g signetai)
-		join(homedir(), ".bun", "install", "global", "node_modules", platformPkg, extFile),
-		join(homedir(), ".bun", "install", "global", "node_modules", "signetai", "node_modules", platformPkg, extFile),
 	];
 
 	for (const searchPath of searchPaths) {
@@ -259,8 +266,8 @@ export class Database {
 				 (id, type, category, content, confidence, source_id,
 				  source_type, source_path, runtime_path, idempotency_key,
 				  tags, created_at, updated_at, updated_by, vector_clock,
-				  manual_override)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				  manual_override, memory_kind)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				id,
@@ -279,6 +286,7 @@ export class Database {
 				memory.updatedBy,
 				JSON.stringify(memory.vectorClock),
 				memory.manualOverride ? 1 : 0,
+				isDaemonDerivedMemorySourceType(memory.sourceType) ? null : "episodic",
 			);
 
 		return id;

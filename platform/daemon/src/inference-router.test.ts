@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { resetOAuthStateForTests, storeOAuthCredentials } from "./inference-oauth";
+import { registerOAuthProviderForTests, resetOAuthStateForTests, storeOAuthCredentials } from "./inference-oauth";
 import { getOrCreateInferenceRouter, resetInferenceRouterForTests } from "./inference-router";
 import { invalidateSecretsCache } from "./secrets";
 
@@ -26,10 +25,65 @@ function openAiSseResponse(
 	return new Response(chunks.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
+function writeDreamingAcpxAgentFixture(root: string): {
+	readonly argsPath: string;
+	readonly mcpConfigPathPath: string;
+	readonly mcpConfigCopyPath: string;
+} {
+	mkdirSync(join(root, "memory"), { recursive: true });
+	const bin = join(root, "fake-dreaming-acpx.sh");
+	const argsPath = join(root, "acpx-args.txt");
+	const mcpConfigPathPath = join(root, "acpx-mcp-path.txt");
+	const mcpConfigCopyPath = join(root, "acpx-mcp.json");
+	writeFileSync(
+		bin,
+		`#!/usr/bin/env bash
+printf '%s\\n' "$@" > ${JSON.stringify(argsPath)}
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then
+    printf '%s' "$2" > ${JSON.stringify(mcpConfigPathPath)}
+    cp "$2" ${JSON.stringify(mcpConfigCopyPath)}
+    break
+  fi
+  shift
+done
+cat >/dev/null
+printf 'dreaming agent completed\\n'
+`,
+	);
+	chmodSync(bin, 0o755);
+	writeFileSync(
+		join(root, "agent.yaml"),
+		`inference:
+  defaultPolicy: dreaming
+  targets:
+    dreaming:
+      executor: acpx
+      acpx:
+        agent: codex
+        bin: ${bin}
+        permissions: deny-all
+        hooks: disabled
+        terminal: false
+      models:
+        default:
+          model: gpt-5.4-mini
+  policies:
+    dreaming:
+      mode: strict
+      defaultTargets:
+        - dreaming/default
+  workloads:
+    memoryExtraction:
+      policy: dreaming
+`,
+	);
+	return { argsPath, mcpConfigPathPath, mcpConfigCopyPath };
+}
+
 afterEach(() => {
 	globalThis.fetch = originalFetch;
 	resetOAuthStateForTests();
-	unregisterOAuthProvider(REVOKED_OAUTH_PROVIDER_ID);
 	invalidateSecretsCache();
 	if (originalSignetPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_PATH");
 	else process.env.SIGNET_PATH = originalSignetPath;
@@ -47,6 +101,55 @@ afterEach(() => {
 });
 
 describe("InferenceRouter legacy API credentials", () => {
+	it("runs an ACPX agent with one ephemeral agent-scoped Dreaming MCP binding", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-dreaming-acpx-"));
+		const fixture = writeDreamingAcpxAgentFixture(dir);
+		try {
+			const router = getOrCreateInferenceRouter(dir);
+			const result = await router.runAgent(
+				{ operation: "memory_extraction", promptPreview: "consolidate selected evidence" },
+				"Use the supplied evidence and daemon tools.",
+				[],
+				{
+					acpxMcp: {
+						agentId: "agent-a",
+						passId: "pass-a",
+						daemonUrl: "http://127.0.0.1:3850",
+						authorizationToken: "scoped-agent-token",
+					},
+				},
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.value.decision.targetRef).toBe("dreaming/default");
+			expect(result.value.attempts).toEqual([expect.objectContaining({ targetRef: "dreaming/default", ok: true })]);
+
+			const args = readFileSync(fixture.argsPath, "utf8").trim().split("\n");
+			expect(args).toContain("--mcp-config");
+			const mcpConfigPath = readFileSync(fixture.mcpConfigPathPath, "utf8");
+			expect(args[args.indexOf("--mcp-config") + 1]).toBe(mcpConfigPath);
+			const mcpConfig = JSON.parse(readFileSync(fixture.mcpConfigCopyPath, "utf8")) as {
+				mcpServers: Array<{
+					name: string;
+					env: Array<{ name: string; value: string }>;
+				}>;
+			};
+			expect(mcpConfig.mcpServers).toHaveLength(1);
+			expect(mcpConfig.mcpServers[0]).toMatchObject({ name: "signet_dreaming" });
+			expect(mcpConfig.mcpServers[0]?.env).toEqual(
+				expect.arrayContaining([
+					{ name: "SIGNET_DREAMING_AGENT_ID", value: "agent-a" },
+					{ name: "SIGNET_DREAMING_PASS_ID", value: "pass-a" },
+					{ name: "SIGNET_DAEMON_URL", value: "http://127.0.0.1:3850" },
+					{ name: "SIGNET_TOKEN", value: "scoped-agent-token" },
+				]),
+			);
+			expect(existsSync(mcpConfigPath)).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("isolates a rejected OAuth refresh from healthy fallback targets", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "signet-router-oauth-refresh-"));
 		try {
@@ -87,17 +190,20 @@ describe("InferenceRouter legacy API credentials", () => {
 
 			process.env.SIGNET_PATH = dir;
 			invalidateSecretsCache();
-			registerOAuthProvider({
+			registerOAuthProviderForTests({
 				id: REVOKED_OAUTH_PROVIDER_ID,
 				name: "Revoked review OAuth",
-				async login() {
-					throw new Error("login not used");
-				},
-				async refreshToken() {
-					throw new Error("revoked refresh token");
-				},
-				getApiKey(credentials) {
-					return credentials.access;
+				oauth: {
+					name: "Revoked review OAuth",
+					async login() {
+						throw new Error("login not used");
+					},
+					async refresh() {
+						throw new Error("revoked refresh token");
+					},
+					async toAuth(credentials) {
+						return { apiKey: credentials.access };
+					},
 				},
 			});
 			await storeOAuthCredentials(REVOKED_OAUTH_PROVIDER_ID, {
@@ -135,8 +241,8 @@ describe("InferenceRouter legacy API credentials", () => {
 		}
 	});
 
-	it("uses OPENROUTER_API_KEY for legacy pipeline OpenRouter extraction targets", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "signet-router-openrouter-"));
+	it("requires an explicit inference workload instead of compiling legacy pipeline routing", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "signet-router-no-legacy-routing-"));
 		try {
 			mkdirSync(join(dir, "memory"), { recursive: true });
 			writeFileSync(
@@ -150,199 +256,14 @@ describe("InferenceRouter legacy API credentials", () => {
 `,
 			);
 
-			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
-			const seen: Array<{ readonly url: string; readonly authorization: string | null }> = [];
-			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				const headers = new Headers(init?.headers);
-				seen.push({ url, authorization: headers.get("authorization") });
-				if (url.endsWith("/models")) {
-					return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
-				}
-				return Promise.resolve(openAiSseResponse("aggregate recall answer", { prompt_tokens: 3, completion_tokens: 4 }));
-			}) as unknown as typeof fetch;
-
 			const router = getOrCreateInferenceRouter(dir);
+			expect(await router.hasWorkload("memory_extraction")).toBe(false);
 			const result = await router.execute(
-				{
-					operation: "tool_planning",
-					promptPreview: "aggregate recall",
-					expectedOutputTokens: 64,
-				},
-				"Summarize evidence",
-				{ maxTokens: 64, timeoutMs: 1000 },
+				{ operation: "memory_extraction", promptPreview: "must use the canonical workload" },
+				"Do not infer a legacy route",
 			);
-
-			expect(result.ok).toBe(true);
-			if (!result.ok) return;
-			expect(result.value.text).toBe("aggregate recall answer");
-			expect(result.value.decision.targetRef).toBe("legacy-extraction/default");
-			expect(seen.every((entry) => entry.authorization === "Bearer test-openrouter-key")).toBe(true);
-			expect(seen.map((entry) => entry.url)).toContain("https://openrouter.ai/api/v1/models");
-			expect(seen.map((entry) => entry.url)).toContain("https://openrouter.ai/api/v1/chat/completions");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("uses OPENAI_API_KEY for legacy pipeline OpenAI-compatible targets", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "signet-router-openai-compatible-"));
-		try {
-			mkdirSync(join(dir, "memory"), { recursive: true });
-			writeFileSync(
-				join(dir, "agent.yaml"),
-				`memory:
-  pipelineV2:
-    extraction:
-      provider: openai-compatible
-      model: gpt-4o-mini
-      endpoint: https://gateway.example.test/v1
-    synthesis:
-      enabled: false
-`,
-			);
-
-			process.env.OPENAI_API_KEY = "test-openai-compatible-key";
-			const seen: Array<{ readonly url: string; readonly authorization: string | null }> = [];
-			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				const headers = new Headers(init?.headers);
-				seen.push({ url, authorization: headers.get("authorization") });
-				if (url.endsWith("/models")) {
-					return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
-				}
-				return Promise.resolve(openAiSseResponse("compatible gateway answer", { prompt_tokens: 5, completion_tokens: 6 }));
-			}) as unknown as typeof fetch;
-
-			const router = getOrCreateInferenceRouter(dir);
-			const result = await router.execute(
-				{
-					operation: "tool_planning",
-					promptPreview: "aggregate recall",
-					expectedOutputTokens: 64,
-				},
-				"Summarize evidence",
-				{ maxTokens: 64, timeoutMs: 1000 },
-			);
-
-			expect(result.ok).toBe(true);
-			if (!result.ok) return;
-			expect(result.value.text).toBe("compatible gateway answer");
-			expect(result.value.decision.targetRef).toBe("legacy-extraction/default");
-			expect(
-				seen
-					.filter((entry) => entry.url.startsWith("https://gateway.example.test/v1"))
-					.every((entry) => entry.authorization === "Bearer test-openai-compatible-key"),
-			).toBe(true);
-			expect(seen.map((entry) => entry.url)).toContain("https://gateway.example.test/v1/models");
-			expect(seen.map((entry) => entry.url)).toContain("https://gateway.example.test/v1/chat/completions");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("does not require OPENAI_API_KEY for local legacy OpenAI-compatible targets", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "signet-router-local-openai-compatible-"));
-		try {
-			mkdirSync(join(dir, "memory"), { recursive: true });
-			writeFileSync(
-				join(dir, "agent.yaml"),
-				`memory:
-  pipelineV2:
-    extraction:
-      provider: openai-compatible
-      model: openai/gpt-oss-20b
-      endpoint: http://127.0.0.1:1234/v1
-    synthesis:
-      enabled: false
-`,
-			);
-
-			Reflect.deleteProperty(process.env, "OPENAI_API_KEY");
-			const seen: Array<{ readonly url: string; readonly authorization: string | null }> = [];
-			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				const headers = new Headers(init?.headers);
-				seen.push({ url, authorization: headers.get("authorization") });
-				if (url.endsWith("/models")) {
-					return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
-				}
-				return Promise.resolve(openAiSseResponse("local compatible answer", { prompt_tokens: 7, completion_tokens: 8 }));
-			}) as unknown as typeof fetch;
-
-			const router = getOrCreateInferenceRouter(dir);
-			const result = await router.execute(
-				{
-					operation: "tool_planning",
-					promptPreview: "aggregate recall",
-					expectedOutputTokens: 64,
-				},
-				"Summarize evidence",
-				{ maxTokens: 64, timeoutMs: 1000 },
-			);
-
-			expect(result.ok).toBe(true);
-			if (!result.ok) return;
-			expect(result.value.text).toBe("local compatible answer");
-			expect(result.value.decision.targetRef).toBe("legacy-extraction/default");
-			// Local keyless servers receive a placeholder auth header (pi-ai's resolver
-			// requires a non-empty apiKey); the key point is no REAL credential is
-			// required — the call succeeds with OPENAI_API_KEY unset.
-			expect(
-				seen.every((entry) => entry.authorization === null || entry.authorization === "Bearer signet-keyless"),
-			).toBe(true);
-			expect(seen.map((entry) => entry.url)).toContain("http://127.0.0.1:1234/v1/models");
-			expect(seen.map((entry) => entry.url)).toContain("http://127.0.0.1:1234/v1/chat/completions");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("executes a legacy extraction fallback target when the configured provider is blocked", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "signet-router-legacy-fallback-"));
-		try {
-			mkdirSync(join(dir, "memory"), { recursive: true });
-			writeFileSync(
-				join(dir, "agent.yaml"),
-				`memory:
-  pipelineV2:
-    extraction:
-      provider: openai-compatible
-      model: gpt-4o-mini
-      endpoint: https://gateway.example.test/v1
-      fallbackProvider: llama-cpp
-    synthesis:
-      enabled: false
-`,
-			);
-
-			process.env.OPENAI_API_KEY = undefined;
-			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url === "http://127.0.0.1:8080/v1/models") {
-					return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
-				}
-				if (url === "http://127.0.0.1:8080/v1/chat/completions" && typeof init?.body === "string") {
-					return Promise.resolve(openAiSseResponse("local fallback answer", { prompt_tokens: 9, completion_tokens: 10 }));
-				}
-				return Promise.resolve(new Response("unexpected fetch", { status: 500 }));
-			}) as unknown as typeof fetch;
-
-			const router = getOrCreateInferenceRouter(dir);
-			const result = await router.execute(
-				{
-					operation: "memory_extraction",
-					promptPreview: "extract",
-					expectedOutputTokens: 64,
-				},
-				"Extract durable facts",
-				{ maxTokens: 64, timeoutMs: 1000 },
-			);
-
-			expect(result.ok).toBe(true);
-			if (!result.ok) return;
-			expect(result.value.text).toBe("local fallback answer");
-			expect(result.value.decision.targetRef).toBe("legacy-extraction-fallback/default");
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.code).toBe("no-candidates");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -431,8 +352,9 @@ describe("InferenceRouter legacy API credentials", () => {
 		// Regression guard for the reasoning fix: on `main`, the factory derived
 		// reasoning from `=== "deep"` (TS2367, never matched) and pi-provider.ts
 		// never forwarded options.reasoning, so thinking was always off. With the
-		// fix, OpenRouter reasoning.enabled produces reasoning: { effort: "medium" }
-		// on the wire. This test fails on main and passes at HEAD.
+		// fix, OpenRouter reasoning.enabled produces a non-disabled reasoning
+		// effort on the wire. This model's current Pi catalog maps medium to no
+		// wire value and supports high, so Pi correctly clamps it to high.
 		const dir = mkdtempSync(join(tmpdir(), "signet-router-openrouter-reasoning-on-"));
 		try {
 			mkdirSync(join(dir, "memory"), { recursive: true });
@@ -496,7 +418,7 @@ describe("InferenceRouter legacy API credentials", () => {
 			// The fix forwards options.reasoning; pi-ai's openrouter thinkingFormat
 			// emits it as { effort: <level> }. Before the fix this was { effort: "none" }
 			// (disabled) or absent.
-			expect(requestBody?.reasoning).toEqual({ effort: "medium" });
+			expect(requestBody?.reasoning).toEqual({ effort: "high" });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -726,9 +648,9 @@ describe("InferenceRouter background quiescence", () => {
 				timedOut: false,
 			});
 			expect((await active).ok).toBe(false);
-			expect((await router.execute({ operation: "memory_extraction", promptPreview: "blocked" }, "Must not start")).ok).toBe(
-				false,
-			);
+			expect(
+				(await router.execute({ operation: "memory_extraction", promptPreview: "blocked" }, "Must not start")).ok,
+			).toBe(false);
 			expect(chatRequests).toBe(1);
 
 			completeChat = true;

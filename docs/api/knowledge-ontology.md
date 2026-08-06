@@ -363,8 +363,11 @@ smart model to merge, prune, and enrich the entity graph.
 
 ### GET /api/dream/status
 
-Return the current dreaming worker state, configuration, and recent passes.
-Requires `admin` permission.
+Return the current dreaming worker state, configuration, recent passes,
+quarantined evidence, and pending agent-scoped semantic attention. Attention
+is operational context for work such as due reviews, hygiene, contested claims,
+or an explicitly requeued evidence source; it never copies or replaces
+episodic evidence. Requires `admin` permission.
 
 **Query parameters**
 
@@ -379,6 +382,7 @@ Requires `admin` permission.
 {
   "enabled": true,
   "worker": { "running": true, "active": false, "activeAgentId": null },
+  "episodicTokensPending": 42000,
   "state": {
     "tokensSinceLastPass": 42000,
     "lastPassAt": "2026-04-01T12:00:00.000Z",
@@ -406,9 +410,155 @@ Requires `admin` permission.
       "summary": "Merged 3 duplicate entities, pruned 5 junk attributes",
       "error": null
     }
+  ],
+  "exclusions": [
+    {
+      "sourceKind": "artifact",
+      "sourceId": "sources/notebook/large-export.md",
+      "reason": "semantic_operation_rejected",
+      "passId": "pass-uuid",
+      "excludedAt": "2026-04-01 12:00:00",
+      "requeueRequestedAt": null,
+      "resolvedAt": null
+    }
+  ],
+  "attention": [
+    {
+      "id": "attention-uuid",
+      "kind": "review_due",
+      "subjectRef": "entity:aster",
+      "details": { "reason": "review_after reached" },
+      "priority": 90,
+      "createdAt": "2026-04-01 12:00:00"
+    }
   ]
 }
 ```
+
+An exclusion preserves only the source identity and processing status; it does
+not modify or discard the underlying episodic evidence. Current Dreaming passes
+record `semantic_operation_rejected` when the daemon rejects an agent's cited
+semantic operation. Oversized immutable evidence is instead resumed at a safe
+boundary across passes and is not quarantined.
+
+An attention item is selected with the next scoped pass and rendered as
+non-evidentiary context. It is resolved only after that pass completes; a
+failed pass leaves it pending. The worker can run for pending attention even
+when no new episodic evidence has arrived, while normal failure backoff still
+applies.
+
+### POST /api/dream/exclusions/requeue
+
+Request one quarantined evidence source be considered again after correcting
+the model or configuration issue that caused a rejected semantic operation.
+Requires `admin` permission.
+
+**Request body**
+
+```json
+{
+  "sourceKind": "artifact",
+  "sourceId": "sources/notebook/large-export.md",
+  "agentId": "noam"
+}
+```
+
+`sourceKind` must be one of `memory`, `artifact`, `transcript`, or `summary`.
+`sourceId` is the identifier returned by `GET /api/dream/status`. `agentId`
+uses the same scoped-agent resolution as Dreaming trigger requests.
+
+Returns `404` when the scoped exclusion is no longer active.
+Requeueing also records an `evidence_requeue` attention item, so it can wake a
+scoped Dreaming pass without waiting for unrelated new evidence.
+
+### POST /api/dream/operations
+
+Apply a batch of cited ontology operations for an external Dreaming agent.
+Requires `modify` permission. This is the daemon-owned semantic apply seam:
+the caller supplies operations and evidence, but the daemon resolves every
+episodic source in the credential's agent scope before it writes graph state.
+
+**Request body**
+
+```json
+{
+  "agentId": "noam",
+  "actor": "dreaming-agent",
+  "operations": [
+    {
+      "operation": "set_claim_value",
+      "payload": { "entityId": "entity-id", "aspect": "role", "value": "Engineer" },
+      "reason": "The cited note explicitly identifies this role.",
+      "evidence": [{ "sourceKind": "artifact", "sourceId": "note.md", "quote": "..." }],
+      "confidence": 0.9
+    }
+  ]
+}
+```
+
+`operations` must be non-empty. Each entry must use one of the same closed,
+payload-validated ontology operation schemas exposed by `apply_ontology_ops`
+from `GET /api/dream/tools`; a write requires a canonical episodic source and
+an exact supporting quote. The response is `200` for a fully accepted batch or
+`400` with structured rejection details. `agentId` uses scoped-agent
+resolution and cannot cross the credential's agent scope.
+
+### GET /api/dream/passes/:passId/tools
+
+Return the local, ordered Pi capability trace for one Dreaming pass: every
+tool's input, output, success result, and latency. The route is agent-scoped
+and requires `admin` permission. It is intended for reviewing whether the
+agent searched graph or episodic evidence before proposing semantic writes.
+
+### GET /api/dream/quality
+
+Return deterministic, agent-scoped semantic quality measures for the current
+Dreaming graph. `citationCoverage` counts active claim values that retain an
+exact quote in canonical proposal evidence plus a resolvable episodic source;
+a source pointer without a quote is not citation coverage. `graphGarbageRate` applies the shared
+entity-quality classifier and detects possessive duplicates, excluding
+source-native topology. `structureQuality` reports the unknown entity-type
+rate, exact `profile` aspect rate, and generic-aspect rate (`profile`,
+`details`, `general`, and `information`) for model-ablation comparisons.
+Requires `admin` permission.
+
+### GET /api/dream/tools
+
+List the canonical Dreaming capability registry, including each capability's
+JSON Schema. Pi sessions, restricted Dreaming MCP, and `signet dream` bind
+this same registry; clients must not reproduce a separate tool list. Requires
+`modify` permission.
+
+### POST /api/dream/tools/:capability
+
+Invoke one canonical Dreaming capability through the daemon. This is the
+transport binding for restricted MCP and shell-driven harnesses; the daemon
+validates the registry schema and pins all reads and writes to the credential's
+agent scope. Requires `modify` permission.
+
+**Request body**
+
+```json
+{
+  "agentId": "noam",
+  "input": { "query": "deployment target" }
+}
+```
+
+`input` must satisfy the selected capability's schema from `GET /api/dream/tools`.
+For example, `search_entities` accepts `query`, `type`, `limit`, and `offset`;
+`apply_ontology_ops` accepts a cited `operations` batch. Its schema is a
+closed union of the 19 audited ontology operations and each operation's
+payload fields, so clients can validate an operation before attempting a
+write. `check_entity_label`, `find_duplicate_entities`, and
+`check_contradiction` expose the daemon's read-only deterministic guards so a
+reasoner can consult them before proposing a write; cited operation validation
+and semantic writes remain daemon-owned. The request body cannot supply a
+second agent scope inside `input`. `runbook_read` returns recent scoped pass
+outcomes, applied/rejected operations, evidence windows, unresolved
+quarantines, and notes; `runbook_write` stores one short structured note on a
+currently running pass. CLI callers supply that pass with `--pass-id`; the Pi
+and restricted ACPX bindings receive it from the daemon-owned pass context.
 
 ### POST /api/dream/trigger
 
@@ -433,6 +583,15 @@ Poll `GET /api/dream/status` and check `passes[0].status` for completion.
 and defaults to the daemon configured agent; `agent_id`, the `agentId` query
 parameter, the `agent_id` query parameter, and `x-signet-agent-id` are also
 accepted.
+
+Explicit triggers always run the combined `incremental` runbook (hygiene
+queue first, then content ingestion). The worker's scheduled sweep passes,
+in contrast, alternate between two focused runbooks when both kinds of work
+are pending — `incremental-hygiene` (attention queue only) and
+`incremental-content` (new evidence only) — so content ingestion gets a
+guaranteed turn even while the hygiene queue stays full (#1098). The pass
+row's `mode` column and the status response's `state.lastPassMode` record
+the runbook that actually ran.
 
 **Response** — `202 Accepted`
 

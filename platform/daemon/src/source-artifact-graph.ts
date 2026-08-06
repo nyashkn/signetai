@@ -3,6 +3,7 @@ import type { WriteDb } from "./db-accessor";
 import { getDbAccessor } from "./db-accessor";
 import { countChanges } from "./db-helpers";
 import { requireDependencyReason } from "./dependency-history";
+import { purgeAttributeMemoryProjectionsInTx } from "./semantic-memory-projection";
 
 interface HeadingSection {
 	readonly heading: string;
@@ -252,6 +253,7 @@ export function purgeSourceArtifactStructureInTx(
 		)
 		.all(input.agentId, input.sourceId, input.sourcePath) as Array<{ id: string }>;
 	const entityIds = entityRows.map((row) => row.id);
+	purgeAttributeMemoryProjectionsInTx(db, input);
 
 	const attributes = countChanges(
 		db

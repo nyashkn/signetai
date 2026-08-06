@@ -49,7 +49,6 @@ export type {
 	DecisionAction,
 	PipelineFlag,
 	PipelineV2Config,
-	PipelineEscalationConfig,
 	PipelineExtractionConfig,
 	PipelineWorkerConfig,
 	PipelineClaudeCodeConfig,
@@ -89,7 +88,6 @@ export type {
 	EntityAttribute,
 	EntityDependency,
 	TaskMeta,
-	PipelineStructuralConfig,
 	PipelineSignificanceConfig,
 	PipelineModelRegistryConfig,
 	PipelineHintsConfig,
@@ -471,7 +469,6 @@ export {
 	makeRoutingTargetRef,
 	parseRoutingTargetRef,
 	isLocalInferenceEndpoint,
-	compileLegacyRoutingConfig,
 	parseRoutingConfig,
 	validateRoutingReferences,
 	allTargetRefs,
@@ -549,8 +546,9 @@ export {
 	type SignetUpdateTarget,
 } from "./signet-installation";
 
-// Document ingestion
-export { ingestPath } from "./ingest/index";
+// Memory provenance
+export { DAEMON_DERIVED_MEMORY_SOURCE_TYPES, isDaemonDerivedMemorySourceType } from "./memory-provenance";
+export { SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES } from "./ontology-topology";
 
 // Connector runtime types
 export {

@@ -7,8 +7,14 @@ import {
 	type InstallResult,
 	type UninstallResult,
 	atomicWriteText,
+	buildManagedExtensionContent,
 	buildManagedExtensionEnvBootstrap,
+	buildSignetRuntimeEnv,
+	isChildOf,
+	isJsonObject,
+	readTrimmedEnv,
 	removeManagedExtensionFile,
+	resolveRemoteDaemonUrl,
 	resolveSignetCliCommand,
 	resolveSignetDaemonUrl,
 	resolveSignetMcpCommand,
@@ -393,5 +399,161 @@ describe("removeManagedExtensionFile", () => {
 
 		expect(removeManagedExtensionFile(filePath, "signet-managed")).toBe(false);
 		expect(existsSync(filePath)).toBe(true);
+	});
+});
+
+describe("shared connector helpers (#957)", () => {
+	it("narrows plain records with isJsonObject", () => {
+		expect(isJsonObject({ a: 1 })).toBe(true);
+		expect(isJsonObject([])).toBe(false);
+		expect(isJsonObject(null)).toBe(false);
+		expect(isJsonObject("x")).toBe(false);
+		expect(isJsonObject(undefined)).toBe(false);
+	});
+
+	it("detects strict path containment with isChildOf", () => {
+		const parent = join(tmpdir(), "sig-957-parent");
+		expect(isChildOf(join(parent, "a", "b"), parent)).toBe(true);
+		expect(isChildOf(parent, parent)).toBe(false);
+		expect(isChildOf(join(parent, "..", "other"), parent)).toBe(false);
+		expect(isChildOf(join(parent, "sibling"), parent)).toBe(true);
+	});
+
+	it("reads trimmed non-empty env with readTrimmedEnv", () => {
+		const name = "SIGNET_957_TEST_ENV";
+		const previous = process.env[name];
+		try {
+			delete process.env[name];
+			expect(readTrimmedEnv(name)).toBeUndefined();
+			process.env[name] = "  value  ";
+			expect(readTrimmedEnv(name)).toBe("value");
+			process.env[name] = "   ";
+			expect(readTrimmedEnv(name)).toBeUndefined();
+		} finally {
+			process.env[name] = previous;
+		}
+	});
+
+	it("builds a managed extension with the injected constants", () => {
+		const content = buildManagedExtensionContent({
+			bundle: "BUNDLE_BODY",
+			marker: "SIGNET_MANAGED_TEST",
+			packageName: "@signet/test-extension",
+			entry: "dist/test.mjs",
+			env: {
+				signetPath: join(homedir(), ".agents"),
+				daemonUrl: "http://127.0.0.1:3850",
+				agentId: "default",
+			},
+		});
+		expect(content).toContain("SIGNET_MANAGED_TEST");
+		expect(content).toContain("@signet/test-extension");
+		expect(content).toContain("dist/test.mjs");
+		expect(content).toContain("BUNDLE_BODY");
+		expect(content.indexOf("BUNDLE_BODY")).toBeGreaterThan(content.indexOf("SIGNET_DAEMON_URL"));
+	});
+
+	it("throws when the bundled extension content is empty", () => {
+		expect(() =>
+			buildManagedExtensionContent({
+				bundle: "",
+				marker: "SIGNET_MANAGED_TEST",
+				packageName: "@signet/test-extension",
+				entry: "dist/test.mjs",
+				env: {
+					signetPath: join(homedir(), ".agents"),
+					daemonUrl: "http://127.0.0.1:3850",
+					agentId: "default",
+				},
+			}),
+		).toThrow(/empty/);
+	});
+});
+
+describe("buildSignetRuntimeEnv", () => {
+	const KEYS = ["SIGNET_DAEMON_URL", "SIGNET_API_KEY", "SIGNET_TOKEN", "SIGNET_AGENT_ID", "SIGNET_PATH"] as const;
+	let saved: Record<string, string | undefined>;
+
+	beforeEach(() => {
+		saved = {};
+		for (const key of KEYS) {
+			saved[key] = process.env[key];
+			delete process.env[key];
+		}
+	});
+
+	afterEach(() => {
+		for (const key of KEYS) {
+			if (saved[key] === undefined) delete process.env[key];
+			else process.env[key] = saved[key];
+		}
+	});
+
+	it("returns an empty map when nothing is configured", () => {
+		expect(buildSignetRuntimeEnv()).toEqual({});
+	});
+
+	it("sets SIGNET_PATH only when basePath is provided", () => {
+		expect(buildSignetRuntimeEnv({ basePath: "/tmp/agents" })).toEqual({ SIGNET_PATH: "/tmp/agents" });
+		expect(buildSignetRuntimeEnv()).not.toHaveProperty("SIGNET_PATH");
+	});
+
+	it("prefers SIGNET_API_KEY over SIGNET_TOKEN", () => {
+		process.env.SIGNET_API_KEY = "api-key";
+		process.env.SIGNET_TOKEN = "token";
+		process.env.SIGNET_DAEMON_URL = "http://127.0.0.1:3850";
+		expect(buildSignetRuntimeEnv()).toMatchObject({ SIGNET_API_KEY: "api-key" });
+		expect(buildSignetRuntimeEnv()).not.toHaveProperty("SIGNET_TOKEN");
+	});
+
+	it("falls back to SIGNET_TOKEN when the API key is absent", () => {
+		process.env.SIGNET_TOKEN = "token";
+		expect(buildSignetRuntimeEnv()).toEqual({ SIGNET_API_KEY: "token" });
+	});
+
+	it("strips embedded CR/LF from auth values before building the runtime env", () => {
+		process.env.SIGNET_API_KEY = " api\r\nkey ";
+		process.env.SIGNET_TOKEN = "token";
+		expect(buildSignetRuntimeEnv()).toEqual({ SIGNET_API_KEY: "apikey" });
+	});
+
+	it("omits the daemon URL unless explicitly set", () => {
+		expect(buildSignetRuntimeEnv()).not.toHaveProperty("SIGNET_DAEMON_URL");
+		process.env.SIGNET_DAEMON_URL = "http://daemon.local:3850";
+		expect(buildSignetRuntimeEnv()).toMatchObject({ SIGNET_DAEMON_URL: "http://daemon.local:3850" });
+	});
+
+	it("normalizes the daemon URL when explicitly set", () => {
+		process.env.SIGNET_DAEMON_URL = "https://daemon.example.test:3850/";
+		expect(buildSignetRuntimeEnv()).toMatchObject({ SIGNET_DAEMON_URL: "https://daemon.example.test:3850" });
+	});
+
+	it("includes SIGNET_AGENT_ID only when present", () => {
+		expect(buildSignetRuntimeEnv()).not.toHaveProperty("SIGNET_AGENT_ID");
+		process.env.SIGNET_AGENT_ID = "worker-1";
+		expect(buildSignetRuntimeEnv()).toEqual({ SIGNET_AGENT_ID: "worker-1" });
+	});
+});
+
+describe("resolveRemoteDaemonUrl", () => {
+	let saved: string | undefined;
+
+	beforeEach(() => {
+		saved = process.env.SIGNET_DAEMON_URL;
+		Reflect.deleteProperty(process.env, "SIGNET_DAEMON_URL");
+	});
+
+	afterEach(() => {
+		if (saved === undefined) Reflect.deleteProperty(process.env, "SIGNET_DAEMON_URL");
+		else process.env.SIGNET_DAEMON_URL = saved;
+	});
+
+	it("returns null when SIGNET_DAEMON_URL is unset", () => {
+		expect(resolveRemoteDaemonUrl()).toBeNull();
+	});
+
+	it("returns the normalized daemon URL when explicitly set", () => {
+		process.env.SIGNET_DAEMON_URL = "http://daemon.local:3850/";
+		expect(resolveRemoteDaemonUrl()).toBe("http://daemon.local:3850");
 	});
 });

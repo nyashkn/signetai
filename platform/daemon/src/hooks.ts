@@ -5,7 +5,7 @@
  * - onSessionStart: provide context/memories to inject
  * - onPreCompaction: provide summary instructions, receive summary
  * - onUserPromptSubmit: inject relevant memories per prompt
- * - onSessionEnd: extract memories from transcript via LLM
+ * - onSessionEnd: retain transcript and queue summary lineage for Dreaming
  * - onRemember: explicit memory save
  * - onRecall: explicit memory query
  */
@@ -22,13 +22,12 @@ import {
 	resolveStartupIdentityFiles,
 } from "@signet/core";
 import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "./agent-id";
-import { applyTokenBudget, selectWithTokenBudget } from "./context-budget";
+import { applyTokenBudget, selectWithEstimatedTokenBudget } from "./context-budget";
 import {
 	clearContinuity,
 	consumeState,
 	initContinuity,
 	recordPrompt,
-	recordRemember,
 	setStructuralSnapshot,
 	shouldCheckpoint,
 } from "./continuity-state";
@@ -76,7 +75,7 @@ import {
 	traverseKnowledgeGraph,
 } from "./pipeline/graph-traversal";
 import { enqueueSummaryJob } from "./pipeline/summary-worker";
-import { countTokens } from "./pipeline/tokenizer";
+import { estimateTokens } from "./pipeline/tokenizer";
 import { getDefaultPluginHost } from "./plugins/index";
 import type { PluginPromptTargetV1 } from "./plugins/types";
 import {
@@ -313,6 +312,8 @@ export interface SessionEndRequest {
 	sessionKey?: string;
 	agentId?: string;
 	cwd?: string;
+	/** Immutable capture time supplied by an importing harness. */
+	capturedAt?: string;
 	reason?: string;
 	runtimePath?: "plugin" | "legacy";
 }
@@ -321,6 +322,7 @@ export interface SessionEndResponse {
 	memoriesSaved: number;
 	queued?: boolean;
 	jobId?: string;
+	transcriptCaptureJobId?: string;
 }
 
 export interface CheckpointExtractRequest {
@@ -348,11 +350,6 @@ export interface RememberRequest {
 	agentId?: string;
 	idempotencyKey?: string;
 	runtimePath?: "plugin" | "legacy";
-}
-
-export interface RememberResponse {
-	saved: boolean;
-	id: string;
 }
 
 export interface RecallRequest {
@@ -791,7 +788,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			traversalEntityNames = focal.entityNames;
 
 			if (focal.entityIds.length > 0) {
-				const traversalResult = getDbAccessor().withReadDb((db) =>
+				const traversalResult = await getDbAccessor().withReadDbAsync((db) =>
 					traverseKnowledgeGraph(focal.entityIds, db, traversalAgentId, traversalRuntimeCfg),
 				);
 				traversalTimedOut = traversalResult.timedOut;
@@ -902,7 +899,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		});
 	}
 	const tokenBudget = Math.max(1, rawTokenBudget);
-	let memories = selectWithTokenBudget(sortedCandidates.slice(0, recallLimit), tokenBudget);
+	let memories = selectWithEstimatedTokenBudget(sortedCandidates.slice(0, recallLimit), tokenBudget);
 
 	// Predicted context from recent session analysis is additive on top of main
 	// recall: it surfaces topics the user is likely to need next regardless of how
@@ -1156,8 +1153,12 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	const duration = Date.now() - start;
 	const maxTokens = tokenBudget;
-	// Pre-reserve space for deterministic continuity sections so they are never truncated.
-	const reservedTokens = countTokens(recoverySection) + countTokens(constraintsSection) + countTokens(inheritedSection);
+	// Pre-reserve space for deterministic continuity sections so they are never
+	// truncated. The sections are character-budgeted upstream, so the cheap
+	// char-based estimate is sufficient — exact BPE encodes of these large
+	// sections block the event loop on every session start (#1114).
+	const reservedTokens =
+		estimateTokens(recoverySection) + estimateTokens(constraintsSection) + estimateTokens(inheritedSection);
 	const mainBudget = Math.max(0, maxTokens - reservedTokens);
 	let inject = injectParts.join("\n");
 	if (mainBudget === 0) {
@@ -1186,7 +1187,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		traversalMemories,
 		traversalConstraints,
 		traversalTimedOut,
-		injectTokens: countTokens(inject),
+		injectTokens: estimateTokens(inject),
 		injectChars: inject.length,
 		durationMs: duration,
 		phaseMs: {
@@ -1276,7 +1277,7 @@ ${guidelines}
 					digest,
 					promptCount: snap.promptCount,
 					memoryQueries: snap.pendingQueries,
-					recentRemembers: snap.pendingRemembers,
+					recentRemembers: [],
 					focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
 					focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
 					activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
@@ -1504,7 +1505,7 @@ export async function handleUserPromptSubmit(
 						digest: deps.formatPeriodicDigest(snap),
 						promptCount: snap.promptCount,
 						memoryQueries: snap.pendingQueries,
-						recentRemembers: snap.pendingRemembers,
+						recentRemembers: [],
 						focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
 						focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
 						activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
@@ -1712,7 +1713,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	const sessionKey = req.sessionKey || req.sessionId;
 	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey || req.sessionId });
 	ensureAgentRegistered(agentId);
-	const endedAt = new Date().toISOString();
+	const endedAt = req.capturedAt ?? new Date().toISOString();
 
 	// Keep session-start dedup across normal Stop/session-end hooks. Codex can
 	// emit Stop between turns and then emit SessionStart again when an idle
@@ -1760,7 +1761,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 					digest: formatSessionEndDigest(snap),
 					promptCount: snap.totalPromptCount,
 					memoryQueries: snap.pendingQueries,
-					recentRemembers: snap.pendingRemembers,
+					recentRemembers: [],
 					focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
 					focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
 					activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
@@ -1843,7 +1844,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	// is not held open by large transcript rewrites.
 	if (retainedTranscript && sessionKey) {
 		try {
-			upsertSessionTranscript(sessionKey, retainedTranscript, req.harness, req.cwd ?? null, agentId);
+			upsertSessionTranscript(sessionKey, retainedTranscript, req.harness, req.cwd ?? null, agentId, endedAt);
 		} catch (e) {
 			logger.warn("hooks", "Live transcript retention failed (non-fatal)", {
 				error: e instanceof Error ? e.message : String(e),
@@ -1854,7 +1855,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	// Safety cap against degenerate inputs (corrupt files, etc).
 	// The summary worker handles long transcripts via chunked
 	// map-reduce summarization, so this is a last-resort guard for
-	// extraction only — not for transcript retention.
+	// summary input only — not for transcript retention.
 	const MAX_TRANSCRIPT_CHARS = 100_000;
 	let summaryTranscript = retainedTranscript;
 	let truncated = false;
@@ -1867,14 +1868,14 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 		truncated = true;
 	}
 
-	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode || memoryCfg.dreaming.enabled;
+	const pipelineEnabled = memoryCfg.pipelineV2.enabled || memoryCfg.pipelineV2.shadowMode;
 	const hasSummaryLength = summaryTranscript.length >= 500;
 	let summaryStatus: "pending" | "skipped" | "not_requested" = pipelineEnabled ? "skipped" : "not_requested";
 	let jobId: string | undefined;
 
 	// Queue for async processing by the summary worker instead of
-	// blocking on LLM inference. The worker produces both a dated
-	// markdown summary and atomic fact rows.
+	// blocking on LLM inference. The worker produces immutable summary lineage;
+	// Dreaming later derives any semantic state from that evidence.
 	const noiseSession = isNoiseSession({
 		project: req.cwd ?? null,
 		sessionKey: sessionKey ?? null,
@@ -1883,7 +1884,7 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 	});
 
 	if (!pipelineEnabled) {
-		logger.info("hooks", "Session end extraction skipped — pipeline disabled");
+		logger.info("hooks", "Session end summary skipped — pipeline disabled");
 	} else if (noiseSession) {
 		logger.debug("hooks", "Session end summary skipped for noise session", {
 			harness: req.harness,
@@ -1932,9 +1933,10 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 		});
 	}
 
+	let transcriptCaptureJobId: string | null = null;
 	if (retainedTranscript.trim().length > 0 || rawTranscript.trim().length > 0) {
 		try {
-			enqueueTranscriptCaptureJob(getDbAccessor(), {
+			transcriptCaptureJobId = enqueueTranscriptCaptureJob(getDbAccessor(), {
 				agentId,
 				harness: req.harness,
 				sessionKey: sessionKey ?? null,
@@ -1986,7 +1988,12 @@ export async function handleSessionEnd(req: SessionEndRequest): Promise<SessionE
 		});
 	});
 
-	return { memoriesSaved: 0, queued: Boolean(jobId), jobId };
+	return {
+		memoriesSaved: 0,
+		queued: Boolean(jobId),
+		jobId,
+		...(transcriptCaptureJobId ? { transcriptCaptureJobId } : {}),
+	};
 }
 
 async function deferSessionEndWork(params: {
@@ -2084,7 +2091,7 @@ export function handleCheckpointExtract(req: CheckpointExtractRequest): Checkpoi
 
 	// Respect the pipeline master switch
 	const memoryCfg = loadMemoryConfig(getAgentsDir());
-	if (!memoryCfg.pipelineV2.enabled && !memoryCfg.pipelineV2.shadowMode && !memoryCfg.dreaming.enabled) {
+	if (!memoryCfg.pipelineV2.enabled && !memoryCfg.pipelineV2.shadowMode) {
 		logger.info("hooks", "Checkpoint extract skipped — pipeline disabled");
 		return { skipped: true };
 	}
@@ -2184,7 +2191,7 @@ export function handleCheckpointExtract(req: CheckpointExtractRequest): Checkpoi
 					digest: formatPeriodicDigest(snap),
 					promptCount: snap.totalPromptCount,
 					memoryQueries: snap.pendingQueries,
-					recentRemembers: snap.pendingRemembers,
+					recentRemembers: [],
 					focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
 					focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
 					activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
@@ -2263,98 +2270,6 @@ export function normalizeSessionTranscript(harness: string, raw: string): string
 }
 
 export { normalizeCodexTranscript, normalizeJsonConversationTranscript };
-
-// ============================================================================
-// Remember
-// ============================================================================
-
-export function handleRemember(req: RememberRequest): RememberResponse {
-	let content = req.content.trim();
-	let pinned = 0;
-	let importance = 0.8;
-
-	// Check for critical: prefix
-	if (content.toLowerCase().startsWith("critical:")) {
-		content = content.slice(9).trim();
-		pinned = 1;
-		importance = 1.0;
-	}
-
-	// Extract [tags] if present
-	let tags: string | null = null;
-	const tagMatch = content.match(/^\[([^\]]+)\]:\s*/);
-	if (tagMatch) {
-		tags = tagMatch[1];
-		content = content.slice(tagMatch[0].length);
-	}
-
-	const type = inferType(content);
-	const id = crypto.randomUUID();
-	const now = new Date().toISOString();
-
-	try {
-		const resultId = getDbAccessor().withWriteTx((db) => {
-			// Idempotency check inside write tx to eliminate races
-			if (req.idempotencyKey) {
-				try {
-					const existing = db.prepare("SELECT id FROM memories WHERE idempotency_key = ?").get(req.idempotencyKey) as
-						| { id: string }
-						| undefined;
-
-					if (existing) {
-						logger.info("hooks", "Idempotency hit, returning existing", {
-							id: existing.id,
-							key: req.idempotencyKey,
-						});
-						return existing.id;
-					}
-				} catch {
-					// Column might not exist yet (pre-migration 006)
-				}
-			}
-
-			db.prepare(
-				`INSERT INTO memories
-				 (id, content, type, importance, source_type, who, tags,
-				  pinned, project, idempotency_key, runtime_path,
-				  created_at, updated_at, updated_by)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			).run(
-				id,
-				content,
-				type,
-				importance,
-				"explicit",
-				req.who || req.harness,
-				tags,
-				pinned,
-				req.project || null,
-				req.idempotencyKey || null,
-				req.runtimePath || null,
-				now,
-				now,
-				req.who || req.harness || "hooks",
-			);
-
-			return id;
-		});
-
-		// Track for continuity checkpointing
-		recordRemember(req.sessionKey, content);
-
-		logger.info("hooks", "Memory saved", {
-			id: resultId,
-			type,
-			pinned: pinned === 1,
-			runtimePath: req.runtimePath,
-		});
-
-		return { saved: true, id: resultId };
-	} catch (e) {
-		logger.error("hooks", "Remember failed", e as Error);
-		return { saved: false, id: "" };
-	}
-}
 
 // ============================================================================
 // Memory Synthesis

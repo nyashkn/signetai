@@ -85,7 +85,6 @@ Current graph-affecting configuration is loaded from `memory.pipelineV2` in
 - `shadowMode`
 - `mutationsFrozen`
 - `graph.enabled`
-- `graph.extractionWritesEnabled`
 - traversal mode and bounds (`traversal.enabled`, `primary`, hop/branch/path limits, confidence, timeout, boost)
 - dampening settings
 - autonomous maintenance (`autonomous.enabled`, `frozen`, `allowUpdateDelete`, mode/polling)

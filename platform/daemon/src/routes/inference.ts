@@ -1,4 +1,7 @@
-import { getModels, getProviders } from "@earendil-works/pi-ai";
+import {
+	getBuiltinModels as getModels,
+	getBuiltinProviders as getProviders,
+} from "@earendil-works/pi-ai/providers/all";
 import {
 	ROUTING_COST_TIERS,
 	ROUTING_OPERATION_KINDS,

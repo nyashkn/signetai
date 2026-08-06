@@ -8,15 +8,13 @@ import {
 	type InstallResult,
 	type UninstallResult,
 	atomicWriteJson,
+	readTrimmedEnv,
+	resolveRemoteDaemonUrl,
+	resolveSignetApiKey,
 	resolveSignetCliCommand,
 	resolveSignetMcpCommand,
 } from "@signet/connector-base";
-import {
-	expandHome,
-	resolvePromptSubmitTimeoutMs,
-	resolveSessionStartTimeoutMs,
-	resolveSignetDaemonUrl,
-} from "@signet/core";
+import { expandHome, resolvePromptSubmitTimeoutMs, resolveSessionStartTimeoutMs } from "@signet/core";
 
 export type SignetMcpConfig =
 	| { readonly command: string; readonly args: readonly string[] }
@@ -59,7 +57,7 @@ interface NativePluginCommandResult {
  * explicitly because it can launch an optional-dependency binary outside that
  * package when postinstall did not link a local native binary. */
 function resolveSignetEntry(): string | null {
-	const wrapperDir = readEnv("SIGNET_WRAPPER_DIR") ?? readEnv("SIGNET_DIR");
+	const wrapperDir = readTrimmedEnv("SIGNET_WRAPPER_DIR") ?? readTrimmedEnv("SIGNET_DIR");
 	const candidates = [
 		wrapperDir ? join(wrapperDir, "bin", "signet.js") : null,
 		join(dirname(process.execPath), "..", "bin", "signet.js"),
@@ -95,19 +93,6 @@ function resolveSignetMcp(runtime: string | null = null): SignetMcpConfig {
 	const mcpEntry = entry ? join(dirname(entry), "..", "dist", "mcp-stdio.js") : null;
 	if (runtime && mcpEntry && existsSync(mcpEntry)) return { command: runtime, args: [mcpEntry] };
 	return resolveSignetMcpCommand();
-}
-
-function readEnv(name: string): string | undefined {
-	const value = process.env[name];
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function resolveRemoteDaemonUrl(): string | null {
-	const explicit = readEnv("SIGNET_DAEMON_URL");
-	if (!explicit) return null;
-	return resolveSignetDaemonUrl();
 }
 
 const CODEX_DESKTOP_APP_PATHS = [join(homedir(), "Applications", "Codex.app"), "/Applications/Codex.app"];
@@ -388,7 +373,7 @@ function cmdEnvQuote(value: string): string {
 }
 
 function readAuthTokenEnv(): string | undefined {
-	return readEnv("SIGNET_API_KEY") ?? readEnv("SIGNET_TOKEN");
+	return resolveSignetApiKey();
 }
 
 function withRemoteDaemonEnv(command: string, remoteDaemonUrl: string | null): string {
@@ -895,7 +880,7 @@ export class CodexConnector extends BaseConnector {
 	}
 
 	protected supportsNativePluginInstall(): boolean {
-		if (readEnv("SIGNET_CODEX_DISABLE_NATIVE_PLUGIN") === "1") return false;
+		if (readTrimmedEnv("SIGNET_CODEX_DISABLE_NATIVE_PLUGIN") === "1") return false;
 		const result = spawnSync("codex", ["plugin", "--help"], {
 			stdio: "ignore",
 			env: { ...process.env, CODEX_HOME: this.getCodexHome() },
@@ -904,7 +889,7 @@ export class CodexConnector extends BaseConnector {
 	}
 
 	protected nativePluginProvidesHooks(): boolean {
-		return readEnv("SIGNET_CODEX_FORCE_COMPAT_HOOKS") !== "1";
+		return readTrimmedEnv("SIGNET_CODEX_FORCE_COMPAT_HOOKS") !== "1";
 	}
 
 	protected installNativePlugin(codexHome: string): NativePluginCommandResult {

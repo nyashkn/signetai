@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	compileLegacyRoutingConfig,
 	isLocalInferenceEndpoint,
 	makeRoutingTargetRef,
 	parseRoutingConfig,
@@ -281,163 +280,6 @@ describe("inference config + decision engine", () => {
 		expect(decision.value.targetRef).toBe(makeRoutingTargetRef("gpt", "gpt54"));
 	});
 
-	it("keeps legacy routing implicit when agent.yaml has no inference block", () => {
-		const legacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "ollama",
-				model: "qwen3:4b",
-				endpoint: "http://127.0.0.1:11434",
-			},
-			synthesis: {
-				enabled: true,
-				provider: "ollama",
-				model: "qwen3:4b",
-				endpoint: "http://127.0.0.1:11434",
-			},
-		});
-		const parsed = parseRoutingConfig(
-			{
-				name: "Dot",
-				memory: {
-					pipelineV2: {
-						enabled: true,
-					},
-				},
-			},
-			legacy,
-		);
-		expect(parsed.ok).toBe(true);
-		if (!parsed.ok) return;
-		expect(parsed.value.source).toBe("legacy-implicit");
-		expect(parsed.value.enabled).toBe(true);
-		expect(parsed.value.defaultPolicy).toBe("legacy-default");
-	});
-
-	it("compiles legacy extraction fallbackProvider into routed fallback targets", () => {
-		const legacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "anthropic",
-				model: "claude-3-5-haiku-latest",
-				endpoint: undefined,
-				command: undefined,
-				fallbackProvider: "llama-cpp",
-			},
-			synthesis: {
-				enabled: false,
-				provider: "none",
-				model: "",
-				endpoint: undefined,
-			},
-		});
-		const fallbackRef = makeRoutingTargetRef("legacy-extraction-fallback", "default");
-
-		expect(legacy.targets["legacy-extraction"]?.executor).toBe("anthropic");
-		expect(legacy.targets["legacy-extraction-fallback"]?.executor).toBe("llama-cpp");
-		expect(legacy.targets["legacy-extraction-fallback"]?.privacy).toBe("local_only");
-		expect(legacy.policies["legacy-default"]?.fallbackTargets).toEqual([fallbackRef]);
-
-		const primaryDecision = resolveRoutingDecision(
-			legacy,
-			{ operation: "memory_extraction" },
-			{
-				targets: {
-					[makeRoutingTargetRef("legacy-extraction", "default")]: ready,
-					[fallbackRef]: ready,
-				},
-			},
-		);
-		expect(primaryDecision.ok).toBe(true);
-		if (!primaryDecision.ok) return;
-		expect(primaryDecision.value.targetRef).toBe(makeRoutingTargetRef("legacy-extraction", "default"));
-
-		const decision = resolveRoutingDecision(
-			legacy,
-			{ operation: "memory_extraction" },
-			{
-				targets: {
-					[makeRoutingTargetRef("legacy-extraction", "default")]: {
-						available: false,
-						health: "blocked",
-						circuitOpen: false,
-						accountState: "expired",
-						unavailableReason: "auth failed",
-					},
-					[fallbackRef]: ready,
-				},
-			},
-		);
-		expect(decision.ok).toBe(true);
-		if (!decision.ok) return;
-		expect(decision.value.targetRef).toBe(fallbackRef);
-	});
-
-	it("omits legacy extraction fallback targets when fallbackProvider is none", () => {
-		const legacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "anthropic",
-				model: "claude-3-5-haiku-latest",
-				endpoint: undefined,
-				command: undefined,
-				fallbackProvider: "none",
-			},
-			synthesis: {
-				enabled: false,
-				provider: "none",
-				model: "",
-				endpoint: undefined,
-			},
-		});
-
-		expect(legacy.targets["legacy-extraction-fallback"]).toBeUndefined();
-		expect(legacy.policies["legacy-default"]?.fallbackTargets).toEqual([]);
-	});
-
-	it("fails closed for legacy extraction when fallbackProvider is none and synthesis is available", () => {
-		const extractionRef = makeRoutingTargetRef("legacy-extraction", "default");
-		const synthesisRef = makeRoutingTargetRef("legacy-synthesis", "default");
-		const legacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "openai-compatible",
-				model: "remote-extractor",
-				endpoint: "https://gateway.example.test/v1",
-				command: undefined,
-				fallbackProvider: "none",
-			},
-			synthesis: {
-				enabled: true,
-				provider: "llama-cpp",
-				model: "qwen3:4b",
-				endpoint: "http://127.0.0.1:8080",
-			},
-		});
-
-		const decision = resolveRoutingDecision(
-			legacy,
-			{ operation: "memory_extraction" },
-			{
-				targets: {
-					[extractionRef]: {
-						available: false,
-						health: "blocked",
-						circuitOpen: false,
-						accountState: "missing",
-						unavailableReason: "missing credential",
-					},
-					[synthesisRef]: ready,
-				},
-			},
-		);
-
-		expect(decision.ok).toBe(false);
-		if ("error" in decision) {
-			expect(decision.error.code).toBe("no-candidates");
-			const trace = decision.error.details?.trace as
-				| { readonly candidates: readonly { readonly targetRef: string }[] }
-				| undefined;
-			expect(trace?.candidates.map((candidate) => candidate.targetRef)).toEqual([extractionRef]);
-		}
-	});
-
 	it("parses ACPX as a first-class restricted harness-backed target", () => {
 		const parsed = parseRoutingConfig({
 			inference: {
@@ -646,115 +488,6 @@ describe("inference config + decision engine", () => {
 			maxCapturedEvents: 128,
 			emptyResponseRetries: 3,
 		});
-	});
-
-	it("keeps legacy command and ACPX extraction as side-effect compatibility instead of router LLM extraction", () => {
-		const commandLegacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "command",
-				model: "custom-command",
-				endpoint: undefined,
-				command: { bin: "node", args: ["extract.mjs"] },
-			},
-			synthesis: {
-				enabled: true,
-				provider: "ollama",
-				model: "qwen3:4b",
-				endpoint: "http://127.0.0.1:11434",
-			},
-		});
-
-		expect(commandLegacy.targets["legacy-extraction"]).toBeUndefined();
-		expect(commandLegacy.workloads?.memoryExtraction).toBeUndefined();
-		expect(commandLegacy.targets["legacy-synthesis"]).toBeUndefined();
-
-		const acpxLegacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "acpx",
-				model: "gpt-5.4-mini",
-				endpoint: undefined,
-				command: undefined,
-			},
-			synthesis: {
-				enabled: true,
-				provider: "acpx",
-				model: "gpt-5.4-mini",
-				endpoint: undefined,
-			},
-		});
-
-		expect(acpxLegacy.targets["legacy-extraction"]).toBeUndefined();
-		expect(acpxLegacy.targets["legacy-synthesis"]).toBeUndefined();
-		expect(acpxLegacy.workloads?.memoryExtraction).toBeUndefined();
-		expect(acpxLegacy.enabled).toBe(false);
-	});
-
-	it("attaches legacy API credentials to routed API-backed workloads", () => {
-		const legacy = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "anthropic",
-				model: "claude-3-5-haiku-latest",
-				endpoint: undefined,
-				command: undefined,
-			},
-			synthesis: {
-				enabled: true,
-				provider: "openrouter",
-				model: "openai/gpt-4o-mini",
-				endpoint: "https://openrouter.ai/api/v1",
-			},
-		});
-
-		expect(legacy.accounts["legacy-anthropic"]).toMatchObject({
-			kind: "api",
-			providerFamily: "anthropic",
-			credentialRef: "ANTHROPIC_API_KEY",
-		});
-		expect(legacy.targets["legacy-extraction"]?.account).toBe("legacy-anthropic");
-		expect(legacy.targets["legacy-synthesis"]).toBeUndefined();
-
-		const compatible = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "openai-compatible",
-				model: "gpt-4o-mini",
-				endpoint: "https://api.openai.com/v1",
-				command: undefined,
-			},
-			synthesis: {
-				enabled: false,
-				provider: "none",
-				model: "",
-				endpoint: undefined,
-			},
-		});
-		expect(compatible.accounts["legacy-openai-compatible"]).toMatchObject({
-			kind: "api",
-			providerFamily: "openai-compatible",
-			credentialRef: "OPENAI_API_KEY",
-		});
-		expect(compatible.targets["legacy-extraction"]?.executor).toBe("openai-compatible");
-		expect(compatible.targets["legacy-extraction"]?.account).toBe("legacy-openai-compatible");
-
-		const localCompatible = compileLegacyRoutingConfig({
-			extraction: {
-				provider: "openai-compatible",
-				model: "openai/gpt-oss-20b",
-				endpoint: "http://127.0.0.1:1234/v1",
-				command: undefined,
-			},
-			synthesis: {
-				enabled: true,
-				provider: "openai-compatible",
-				model: "openai/gpt-oss-20b",
-				endpoint: "http://127.0.0.1:1234/v1",
-			},
-		});
-		expect(localCompatible.accounts["legacy-openai-compatible"]).toBeUndefined();
-		expect(localCompatible.targets["legacy-extraction"]?.executor).toBe("openai-compatible");
-		expect(localCompatible.targets["legacy-extraction"]?.kind).toBe("local");
-		expect(localCompatible.targets["legacy-extraction"]?.privacy).toBe("local_only");
-		expect(localCompatible.targets["legacy-extraction"]?.account).toBeUndefined();
-		expect(localCompatible.targets["legacy-synthesis"]).toBeUndefined();
 	});
 
 	it("parses OpenRouter reasoning controls on explicit targets", () => {
@@ -1169,6 +902,54 @@ describe("routing reference validation (#1005)", () => {
 		expect(parsed.ok).toBe(true);
 		if (!parsed.ok) return;
 		expect(validateRoutingReferences(parsed.value)).toEqual([]);
+	});
+
+	it("synthesizes a default policy when targets exist but no policies are configured (#1072)", () => {
+		// Regression for #1072: the connect flow / aggregate-recall route emit
+		// targets + accounts + workloads but no policy, which previously dead-ended
+		// every routed generation path (dream trigger, daily brief, reflections,
+		// route explain) in "No routing policy is configured.".
+		const backgroundRef = makeRoutingTargetRef("background", "default");
+		const aggregationRef = makeRoutingTargetRef("aggregation", "default");
+		const parsed = parseRoutingConfig({
+			inference: {
+				targets: {
+					background: { executor: "ollama", models: { default: { model: "gemma3" } } },
+					aggregation: { executor: "ollama", models: { default: { model: "gemma3" } } },
+				},
+				workloads: {
+					memoryExtraction: { target: backgroundRef },
+					aggregateRecall: { target: aggregationRef },
+				},
+			},
+		});
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		expect(parsed.value.defaultPolicy).toBe("default");
+		expect(parsed.value.policies.default?.defaultTargets).toEqual([backgroundRef, aggregationRef]);
+		expect(validateRoutingReferences(parsed.value).filter((i) => i.severity === "error")).toEqual([]);
+
+		// session_synthesis (dreaming) must route instead of erroring.
+		const synthesis = resolveRoutingDecision(
+			parsed.value,
+			{ operation: "session_synthesis" },
+			{ targets: { [backgroundRef]: ready } },
+		);
+		expect(synthesis.ok).toBe(true);
+		if (!synthesis.ok) return;
+		expect(synthesis.value.policyId).toBe("default");
+		expect(synthesis.value.targetRef).toBe(backgroundRef);
+
+		// `route explain --target <healthy ref>` must bypass the policy search too.
+		const explicit = resolveRoutingDecision(
+			parsed.value,
+			{ operation: "interactive", explicitTargets: [aggregationRef] },
+			{ targets: { [aggregationRef]: ready } },
+		);
+		expect(explicit.ok).toBe(true);
+		if (!explicit.ok) return;
+		expect(explicit.value.policyId).toBe("default");
+		expect(explicit.value.targetRef).toBe(aggregationRef);
 	});
 });
 

@@ -15,7 +15,10 @@ export interface UserPromptSubmitResponse {
 }
 
 export interface SessionEndResponse {
-	readonly message: string;
+	readonly memoriesSaved: number;
+	readonly queued?: boolean;
+	readonly jobId?: string;
+	readonly transcriptCaptureJobId?: string;
 }
 
 export interface HookRecallResult {

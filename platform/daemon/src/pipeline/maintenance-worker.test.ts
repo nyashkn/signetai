@@ -67,10 +67,6 @@ const BASE_CFG: PipelineV2Config = {
 		requeueCooldownMs: 0, // no cooldown for tests
 		requeueHourlyBudget: 1000,
 	},
-	structural: {
-		...DEFAULT_PIPELINE_V2.structural,
-		enabled: false,
-	},
 	// Stated, not inherited. The duplicate-identity scan is gated on this flag,
 	// and a spread of DEFAULT_PIPELINE_V2 shares its nested objects — so a suite
 	// that ran earlier and switched graph off took this one down with it, and the
@@ -267,17 +263,17 @@ describe("maintenance-worker", () => {
 	});
 
 	it("does not abort the cycle when the inference provider is not initialised", async () => {
-		// Regression: the retroactive supersession sweep called getLlmProvider()
-		// unguarded, which throws when no resolver is set. With the defaults
-		// (graph + feedback + supersession all enabled) this aborted the entire
-		// maintenance cycle, skipping retention, dedup, dead-memory scan, and
-		// feedback telemetry. The sweep must be best-effort/non-fatal.
+		// Regression: a maintenance execute-cycle must remain best-effort when
+		// no LLM provider resolver is wired up (e.g. mid-boot). The summary-
+		// condensation block in the execute path calls getLlmProvider()
+		// unguarded; a thrown error there must be caught and never abort the
+		// full cycle (retention, dedup, dead-memory scan, feedback telemetry).
 		const db = freshDb();
 		const accessor = asAccessor(db);
 		const tracker = createProviderTracker();
 
 		// Dead jobs → non-empty recommendations → exercises the execute branch
-		// where the supersession sweep runs after repairs.
+		// where the summary-condensation block runs after repairs.
 		for (let i = 0; i < 2; i++) {
 			db.prepare(
 				`INSERT INTO memory_jobs (id, memory_id, job_type, status, attempts, max_attempts, failed_at, created_at, updated_at)
@@ -380,6 +376,74 @@ describe("maintenance-worker", () => {
 		const scan = result.executed.find((r) => r.action === "proposeEntityMerges");
 		expect(scan?.message).toContain("blocked");
 		expect(scan?.affected).toBe(0);
+		db.close();
+	});
+
+	it("Dreaming-enabled maintenance cycle does not directly supersede semantic rows", async () => {
+		// Regression (#946): the maintenance worker previously invoked a direct
+		// retroactive supersession sweep that mutated entity_attributes status
+		// outside the audited Dreaming apply path. After the cutover, semantic
+		// supersession must flow through Dreaming's audited apply only. A
+		// maintenance cycle — even with graph + feedback enabled (the branch
+		// where the sweep used to run) — must leave contradicting sibling
+		// attributes untouched.
+		const db = freshDb();
+		const accessor = asAccessor(db);
+		const tracker = createProviderTracker();
+
+		// Entity + aspect
+		db.prepare(
+			`INSERT INTO entities (id, name, entity_type, canonical_name, mentions, agent_id, created_at, updated_at)
+			 VALUES ('entity-supersede', 'User', 'person', 'user', 2, 'default', ?, ?)`,
+		).run(now, now);
+		db.prepare(
+			`INSERT INTO entity_aspects (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+			 VALUES ('aspect-editor', 'entity-supersede', 'default', 'editor', 'editor', 0.5, ?, ?)`,
+		).run(now, now);
+
+		// Two contradicting siblings that the retired sweep *would* have
+		// flagged (value conflict on shared verb "prefers").
+		db.prepare(
+			`INSERT INTO memories (id, content, type, updated_by, created_at, updated_at, is_deleted)
+			 VALUES ('mem-vim', 'prefers vim', 'fact', 'test', ?, ?, 0)`,
+		).run(now, now);
+		db.prepare(
+			`INSERT INTO memories (id, content, type, updated_by, created_at, updated_at, is_deleted)
+			 VALUES ('mem-emacs', 'prefers emacs', 'fact', 'test', ?, ?, 0)`,
+		).run(now, now);
+		db.prepare(
+			`INSERT INTO entity_attributes
+			 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content, confidence, importance, status, created_at, updated_at)
+			 VALUES ('attr-vim', 'aspect-editor', 'default', 'mem-vim', 'attribute', 'user prefers vim', 'user prefers vim', 1, 0.5, 'active', ?, ?)`,
+		).run(now, now);
+		db.prepare(
+			`INSERT INTO entity_attributes
+			 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content, confidence, importance, status, created_at, updated_at)
+			 VALUES ('attr-emacs', 'aspect-editor', 'default', 'mem-emacs', 'attribute', 'user prefers emacs', 'user prefers emacs', 1, 0.5, 'active', ?, ?)`,
+		).run(now, now);
+
+		// Config mirroring the Dreaming-enabled defaults: graph + feedback on.
+		// Empty recommendations forces the graph/feedback block (where the
+		// sweep used to run) to execute.
+		const dreamingCfg: PipelineV2Config = {
+			...BASE_CFG,
+		};
+
+		const handle = startMaintenanceWorker(accessor, dreamingCfg, tracker, null);
+		handle.stop();
+
+		const result = await handle.tick();
+		// Healthy (no recommendations) → the graph/feedback branch ran.
+		expect(result.recommendations).toHaveLength(0);
+
+		// Neither contradicting sibling may be superseded by the cycle.
+		const statuses = db
+			.prepare(`SELECT id, status, superseded_by FROM entity_attributes WHERE aspect_id = 'aspect-editor' ORDER BY id`)
+			.all() as Array<{ id: string; status: string; superseded_by: string | null }>;
+		for (const row of statuses) {
+			expect(row.status).toBe("active");
+			expect(row.superseded_by).toBeNull();
+		}
 		db.close();
 	});
 });

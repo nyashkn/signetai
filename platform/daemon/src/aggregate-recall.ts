@@ -3,6 +3,7 @@ import type { LlmUsage, RouteRequest, RouterResult } from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
 import { type WriteDb, getDbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
+import { linkDerivedMemorySourcesInTx } from "./derived-memory-provenance";
 import { isActiveEmbeddingConfig, resolveActiveEmbeddingConfig } from "./embedding-index-state";
 import { logger } from "./logger";
 import type { EmbeddingConfig, ResolvedMemoryConfig } from "./memory-config";
@@ -16,8 +17,7 @@ import {
 	type RecallTimings,
 	hybridRecall,
 } from "./memory-search";
-import { enqueueExtractionJobInTx } from "./pipeline/extraction-queue";
-import { type IngestEnvelope, txIngestEnvelope } from "./transactions";
+import { type IngestEnvelope, insertHistoryEvent, txIngestEnvelope } from "./transactions";
 
 export type AggregateRecallBudget = "small" | "medium" | "large";
 export type AggregateRecallStoppedReason = "complete" | "no_evidence" | "router_unavailable" | "synthesis_failed";
@@ -75,6 +75,7 @@ interface AggregateMemoryRow {
 	readonly project: string | null;
 	readonly visibility?: string | null;
 	readonly created_at: string;
+	readonly stale_at?: string | null;
 }
 
 interface ContentHashMatch {
@@ -86,6 +87,7 @@ interface ContentHashMatch {
 interface AggregateDuplicateResolution {
 	readonly row: RecallResult;
 	readonly saved: boolean;
+	readonly refreshed?: boolean;
 }
 
 const BUDGET_QUERY_LIMITS: Record<AggregateRecallBudget, number> = {
@@ -485,7 +487,7 @@ function loadAggregateByKey(
 ): RecallResult | null {
 	const row = db
 		.prepare(
-			`SELECT id, content, source_id, type, tags, pinned, importance, who, project, visibility, created_at
+			`SELECT id, content, source_id, type, tags, pinned, importance, who, project, visibility, created_at, stale_at
 			 FROM memories
 			 WHERE idempotency_key = ?
 			   AND COALESCE(NULLIF(agent_id, ''), 'default') = ?
@@ -496,9 +498,33 @@ function loadAggregateByKey(
 			 LIMIT 1`,
 		)
 		.get(key, input.agentId, input.visibility) as AggregateMemoryRow | undefined;
-	if (!row) return null;
+	if (!row || row.stale_at !== null) return null;
 	if (input.project !== null && row.project !== input.project) return null;
 	return rowToRecallResult(row);
+}
+
+function loadStaleAggregateByKey(
+	db: WriteDb,
+	key: string,
+	input: { readonly agentId: string; readonly project: string | null; readonly visibility: "global" | "private" },
+): AggregateMemoryRow | null {
+	const row = db
+		.prepare(
+			`SELECT id, content, source_id, type, tags, pinned, importance, who, project, visibility, created_at, stale_at
+			 FROM memories
+			 WHERE idempotency_key = ?
+			   AND COALESCE(NULLIF(agent_id, ''), 'default') = ?
+			   AND source_type = 'aggregate-recall'
+			   AND visibility = ?
+			   AND scope IS NULL
+			   AND is_deleted = 0
+			   AND stale_at IS NOT NULL
+			 LIMIT 1`,
+		)
+		.get(key, input.agentId, input.visibility) as AggregateMemoryRow | undefined;
+	if (!row) return null;
+	if (input.project !== null && row.project !== input.project) return null;
+	return row;
 }
 
 function loadMemoryByContentHash(
@@ -525,22 +551,6 @@ function loadMemoryByContentHash(
 	};
 }
 
-function linkAggregateSources(
-	db: WriteDb,
-	aggregateMemoryId: string,
-	sourceMemoryIds: readonly string[],
-	agentId: string,
-	now: string,
-): void {
-	for (const sourceMemoryId of sourceMemoryIds) {
-		db.prepare(
-			`INSERT OR IGNORE INTO aggregate_memory_sources
-			 (aggregate_memory_id, source_memory_id, agent_id, created_at)
-			 VALUES (?, ?, ?, ?)`,
-		).run(aggregateMemoryId, sourceMemoryId, agentId, now);
-	}
-}
-
 function linkAggregateEvidenceSources(
 	db: WriteDb,
 	aggregateMemoryId: string,
@@ -548,13 +558,60 @@ function linkAggregateEvidenceSources(
 	agentId: string,
 	now: string,
 ): void {
-	for (const source of evidenceSources) {
-		db.prepare(
-			`INSERT OR IGNORE INTO aggregate_evidence_sources
-			 (aggregate_memory_id, source_kind, source_id, source_path, agent_id, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-		).run(aggregateMemoryId, source.sourceKind, source.sourceId, source.sourcePath, agentId, now);
-	}
+	linkDerivedMemorySourcesInTx(db, {
+		derivedMemoryId: aggregateMemoryId,
+		agentId,
+		sources: evidenceSources,
+		createdAt: now,
+	});
+}
+
+function refreshStaleAggregateMemory(
+	db: WriteDb,
+	input: {
+		readonly existing: AggregateMemoryRow;
+		readonly agentId: string;
+		readonly content: string;
+		readonly normalizedContent: string;
+		readonly contentHash: string;
+		readonly evidenceSources: readonly AggregateEvidenceSource[];
+		readonly now: string;
+	},
+): RecallResult {
+	const priorSources = db
+		.prepare(
+			`SELECT source_kind, source_id, source_path
+			 FROM derived_memory_sources
+			 WHERE derived_memory_id = ? AND agent_id = ?
+			 ORDER BY source_kind, source_id`,
+		)
+		.all(input.existing.id, input.agentId);
+	db.prepare(
+		`UPDATE memories
+		 SET content = ?, normalized_content = ?, content_hash = ?, stale_at = NULL,
+		     embedding_model = NULL, updated_at = ?, updated_by = 'signet',
+		     update_count = COALESCE(update_count, 0) + 1, version = version + 1
+		 WHERE id = ? AND agent_id = ? AND stale_at IS NOT NULL`,
+	).run(input.content, input.normalizedContent, input.contentHash, input.now, input.existing.id, input.agentId);
+	// The relation is an audit trail, not a cache: retain historical evidence
+	// pointers when this aggregate is re-derived. A future mutation of either
+	// the old or current evidence conservatively makes the snapshot stale again.
+	linkAggregateEvidenceSources(db, input.existing.id, input.evidenceSources, input.agentId, input.now);
+	insertHistoryEvent(db, {
+		memoryId: input.existing.id,
+		event: "rederived",
+		oldContent: input.existing.content,
+		newContent: input.content,
+		changedBy: "signet",
+		reason: "Aggregate evidence changed",
+		metadata: JSON.stringify({ priorSources, sources: input.evidenceSources }),
+		createdAt: input.now,
+	});
+	syncVecDeleteBySourceId(db, "memory", input.existing.id);
+	db.prepare("DELETE FROM embeddings WHERE source_type = 'memory' AND source_id = ?").run(input.existing.id);
+	const refreshed = loadAggregateMemory(db, input.existing.id);
+	if (!refreshed) throw new Error("Unable to reload refreshed aggregate memory");
+	return refreshed;
 }
 
 function linkAggregateQueryHint(
@@ -580,8 +637,9 @@ function resolveAggregateDuplicate(
 		readonly project: string | null;
 		readonly query: string;
 		readonly contentHash: string;
+		readonly normalizedContent: string;
+		readonly storageContent: string;
 		readonly answer: string;
-		readonly sourceMemoryIds: readonly string[];
 		readonly evidenceSources: readonly AggregateEvidenceSource[];
 		readonly saveVisibility: "global" | "private";
 		readonly now: string;
@@ -593,10 +651,29 @@ function resolveAggregateDuplicate(
 		visibility: input.saveVisibility,
 	});
 	if (existing) {
-		linkAggregateSources(db, existing.id, input.sourceMemoryIds, input.agentId, input.now);
 		linkAggregateEvidenceSources(db, existing.id, input.evidenceSources, input.agentId, input.now);
 		linkAggregateQueryHint(db, existing.id, input.agentId, input.query, input.now);
 		return { row: existing, saved: true };
+	}
+	const stale = loadStaleAggregateByKey(db, input.key, {
+		agentId: input.agentId,
+		project: input.project,
+		visibility: input.saveVisibility,
+	});
+	if (stale) {
+		return {
+			row: refreshStaleAggregateMemory(db, {
+				existing: stale,
+				agentId: input.agentId,
+				content: input.storageContent,
+				normalizedContent: input.normalizedContent,
+				contentHash: input.contentHash,
+				evidenceSources: input.evidenceSources,
+				now: input.now,
+			}),
+			saved: true,
+			refreshed: true,
+		};
 	}
 	const duplicateContent = loadMemoryByContentHash(db, input.contentHash, {
 		agentId: input.agentId,
@@ -610,7 +687,6 @@ function resolveAggregateDuplicate(
 	) {
 		return { row: unsavedAggregateResult(input.answer, input.key, input.project), saved: false };
 	}
-	linkAggregateSources(db, duplicateContent.row.id, input.sourceMemoryIds, input.agentId, input.now);
 	linkAggregateEvidenceSources(db, duplicateContent.row.id, input.evidenceSources, input.agentId, input.now);
 	linkAggregateQueryHint(db, duplicateContent.row.id, input.agentId, input.query, input.now);
 	return { row: duplicateContent.row, saved: true };
@@ -888,16 +964,16 @@ export async function aggregateRecall(
 					project,
 					query: params.query,
 					contentHash: normalized.contentHash,
+					normalizedContent: normalized.normalizedContent || normalized.hashBasis,
+					storageContent: normalized.storageContent,
 					answer,
-					sourceMemoryIds,
 					evidenceSources,
 					saveVisibility,
 					now,
 				});
 				if (duplicate) {
-					deduped = true;
+					deduped = duplicate.refreshed !== true;
 					saved = duplicate.saved;
-					if (duplicate.saved) enqueueExtractionJobInTx(db, duplicate.row.id);
 					return duplicate.row;
 				}
 				const id = deps.idFactory?.() ?? randomUUID();
@@ -936,8 +1012,9 @@ export async function aggregateRecall(
 						project,
 						query: params.query,
 						contentHash: normalized.contentHash,
+						normalizedContent: normalized.normalizedContent || normalized.hashBasis,
+						storageContent: normalized.storageContent,
 						answer,
-						sourceMemoryIds,
 						evidenceSources,
 						saveVisibility,
 						now,
@@ -947,15 +1024,12 @@ export async function aggregateRecall(
 						saved = false;
 						return unsavedAggregateResult(answer, key, project);
 					}
-					deduped = true;
+					deduped = racedDuplicate.refreshed !== true;
 					saved = racedDuplicate.saved;
-					if (racedDuplicate.saved) enqueueExtractionJobInTx(db, racedDuplicate.row.id);
 					return racedDuplicate.row;
 				}
-				linkAggregateSources(db, id, sourceMemoryIds, agentId, now);
 				linkAggregateEvidenceSources(db, id, evidenceSources, agentId, now);
 				linkAggregateQueryHint(db, id, agentId, params.query, now);
-				enqueueExtractionJobInTx(db, id);
 				saved = true;
 				return loadAggregateMemory(db, id);
 			}),
@@ -1006,7 +1080,9 @@ export async function aggregateRecall(
 			deduped,
 			budget,
 			queries,
-			sourceMemoryIds,
+			sourceMemoryIds: evidenceSources
+				.filter((source) => source.sourceKind === "memory")
+				.map((source) => source.sourceId),
 			stoppedReason: "complete",
 		},
 	});

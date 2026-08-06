@@ -33,12 +33,6 @@ and `GET /health/ready` for readiness.
   "shuttingDown": false,
   "updateAvailable": false,
   "pendingRestart": false,
-  "pipeline": {
-    "extractionRunning": true,
-    "extractionStalled": false,
-    "extractionPending": 0,
-    "extractionBackoffMs": 0
-  },
   "resources": {
     "total": -1,
     "memoryMd": 0,
@@ -197,8 +191,7 @@ silent fallback or hard-blocked extraction after boot.
     "shadowMode": false,
     "mutationsFrozen": false,
     "graph": {
-      "enabled": true,
-      "extractionWritesEnabled": true
+      "enabled": true
     },
     "autonomous": {
       "enabled": true,
@@ -210,14 +203,9 @@ silent fallback or hard-blocked extraction after boot.
     }
   },
   "pipeline": {
-    "extraction": {
-      "running": true,
-      "overloaded": false,
-      "loadPerCpu": 0.42,
-      "maxLoadPerCpu": 0.8,
-      "overloadBackoffMs": 30000,
-      "overloadSince": null,
-      "nextTickInMs": 1200
+    "queue": {
+      "memory": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null },
+      "summary": { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null }
     }
   },
   "providerResolution": {
@@ -234,7 +222,7 @@ silent fallback or hard-blocked extraction after boot.
       "since": null,
       "enabled": true,
       "paused": false,
-      "workerRunning": true,
+      "workerRunning": false,
       "ready": true,
       "blockedReason": null
     }
@@ -273,16 +261,19 @@ The `bypassedSessions` field reports how many active sessions currently have
 bypass enabled (see [Sessions and hooks API](./sessions-hooks.md#sessions)).
 `providerResolution.extraction` is the canonical workload-state object. Its
 `configured`, `resolved`, and `effective` labels describe provider selection;
-they do not imply that jobs are being serviced. Use `enabled`, `paused`,
-`workerRunning`, and `ready` to determine whether extraction is actually
-available for work. `blockedReason` is populated only for a blocked route.
+they do not imply that jobs are being serviced. Use `enabled`, `paused`, and
+`ready` to determine whether extraction is actually available for work. The
+standalone extraction worker was retired under the Dreaming cutover (#946),
+so `workerRunning` is always `false` and `ready` reflects route resolution
+alone (`active` or `degraded`). `blockedReason` is populated only for a
+blocked route.
 Monitor `status` for `degraded` or `blocked` states when the configured
 extraction provider is unavailable or routed to a fallback target.
 When extraction is blocked, `providerResolution.extraction.blockedBy` contains
 the first routing candidate's policy and runtime gate reasons in evaluation
 order. The array is empty for non-blocked states.
-When `pipeline.extraction.overloaded` is `true`, the extraction worker is
-intentionally backing off for `overloadBackoffMs` between polls.
+`pipeline.queue` exposes per-queue counts (memory / summary);
+the retired worker's load/overload telemetry is no longer reported.
 `transcripts.capture` exposes compact durable transcript-capture queue counts;
 use `GET /api/diagnostics/transcripts` for detailed artifact/audit diagnostics.
 Use `GET /api/inference/status` for the shared inference control plane status.
@@ -290,7 +281,7 @@ Use `GET /api/inference/status` for the shared inference control plane status.
 
 ### GET /api/diagnostics/queue
 
-Per-queue counts (memory / summary / extraction), oldest-dead job
+Per-queue counts (memory / summary), oldest-dead job
 references, and threshold metadata. Backend path uses the same shared
 threshold constants that `GET /api/status` and `/health/ready` consume.
 
@@ -303,19 +294,16 @@ Admin permission required.
   "timestamp": "2026-07-19T00:00:00.000Z",
   "queues": {
     "memory":     { "pending": 0, "leased": 0, "completed": 1, "failed": 0, "dead": 1667, "oldestAgeSec": 0, "oldestDeadAgeSec": 5.4e6, "lastError": null },
-    "summary":    { "pending": 0, "leased": 0, "completed": 92,  "failed": 0, "dead": 1667, "oldestAgeSec": 0, "oldestDeadAgeSec": 5.4e6, "lastError": "boom" },
-    "extraction": { "pending": 0, "leased": 0, "completed": 1,  "failed": 0, "dead": 0,    "oldestAgeSec": 0, "oldestDeadAgeSec": 0,    "lastError": null }
+    "summary":    { "pending": 0, "leased": 0, "completed": 92,  "failed": 0, "dead": 1667, "oldestAgeSec": 0, "oldestDeadAgeSec": 5.4e6, "lastError": "boom" }
   },
   "oldestDeadSummaryJob":    { "id": "...", "harness": "codex", "sessionKey": "...", "createdAt": "...", "attempts": 3, "error": "boom" },
   "oldestDeadMemoryJob":     { "...": "..." },
-  "oldestDeadExtractionJob": { "...": "..." },
   "thresholds": {
     "summaryDeadWarn": 50, "summaryDeadFail": 500,
     "summaryOldestPendingWarnSec": 300, "summaryOldestPendingFailSec": 1800,
     "summaryOldestDeadWarnSec": 86400,
     "memoryDeadWarn": 50, "memoryDeadFail": 500,
-    "memoryOldestPendingWarnSec": 300, "memoryOldestPendingFailSec": 1800,
-    "extractionDeadWarn": 10, "extractionDeadFail": 100
+    "memoryOldestPendingWarnSec": 300, "memoryOldestPendingFailSec": 1800
   }
 }
 ```
@@ -388,3 +376,19 @@ Returns all runtime feature flags.
   "anotherFeature": false
 }
 ```
+
+### GET /api/mode
+
+Environment probe (issue #1001). Deliberately lightweight and **unauthenticated** — the dashboard uses it to distinguish "talking to a real daemon" (any hostname: localhost, Tailscale, `.local`, tunnel, LAN IP) from the marketing site or the cloud app. If this endpoint responds, there is a real daemon behind the URL.
+
+**Response**
+
+```json
+{
+  "mode": "local",
+  "requiresAuth": false
+}
+```
+
+- `mode`: the daemon's auth mode (`local`, `team`, or `hybrid`).
+- `requiresAuth`: `false` in `local` mode, `true` in `team` and `hybrid` modes. The endpoint itself is always unauthenticated and carries no data beyond this documented shape. Authenticated data endpoints use Bearer tokens only, with no cookies.

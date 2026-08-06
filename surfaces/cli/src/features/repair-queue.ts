@@ -99,6 +99,25 @@ export function parseCsvFlag(value: string | undefined): string[] {
 		.filter((s) => s.length > 0);
 }
 
+/**
+ * Validate the `--tables` enum list. Returns the validated selectors, or
+ * `undefined` when the flag was omitted (the intentional both-queue default).
+ * Throws on any invalid value so a typo can never degrade into the broadest
+ * repair selection (issue #1050).
+ */
+export function parseTablesFlag(value: string | undefined): ("memory" | "summary")[] | undefined {
+	if (value === undefined) return undefined;
+	const parts: ("memory" | "summary")[] = [];
+	for (const rawPart of value.split(",")) {
+		const part = rawPart.trim();
+		if (part !== "memory" && part !== "summary") {
+			throw new Error(`invalid --tables value "${part}"; expected memory or summary`);
+		}
+		parts.push(part);
+	}
+	return parts;
+}
+
 /** Parse `--older-than=7d` / `--older-than=12h` / `--older-than=30m` into ms. */
 export function parseDurationFlag(value: string | undefined): number | undefined {
 	if (!value) return undefined;

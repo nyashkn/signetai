@@ -3,23 +3,24 @@
  *
  * Handles creating and removing skill nodes in the knowledge graph
  * when skills are installed or uninstalled. Each skill gets:
- * - An entity row (entity_type = 'skill')
+ * - An entity row (entity_type = 'skill') — source/native topology
  * - A skill_meta row with installation metadata
- * - An embedding from enriched frontmatter
- * - Entity extraction from the SKILL.md body
+ * - An embedding from the authored frontmatter
+ *
+ * Skill nodes are source topology: the SKILL.md frontmatter is the
+ * authoritative source, and this module writes the skill entity and its
+ * metadata directly. It does NOT perform LLM-driven semantic extraction
+ * from the SKILL.md body — semantic entity writes are owned by the
+ * audited Dreaming apply path, so cross-skill relations are never
+ * authored here (see #946 semantic-writer cutover).
  */
 
 import { createHash } from "node:crypto";
-import type { DbAccessor, WriteDb } from "../db-accessor";
+import type { DbAccessor } from "../db-accessor";
 import { syncVecDeleteByEmbeddingIds, syncVecInsert, vectorToBlob } from "../db-helpers";
 import { isActiveEmbeddingConfig, resolveActiveEmbeddingConfig } from "../embedding-index-state";
 import { logger } from "../logger";
 import type { EmbeddingConfig, PipelineV2Config } from "../memory-config";
-import { extractFactsAndEntities } from "./extraction";
-import { txPersistEntities } from "./graph-transactions";
-import { invalidateTraversalCache } from "./graph-traversal";
-import type { LlmProvider } from "./provider";
-import { enrichSkillFrontmatter } from "./skill-enrichment";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,14 +48,13 @@ export interface SkillInstallInput {
 
 export interface SkillInstallResult {
 	readonly entityId: string;
-	readonly enriched: boolean;
 	readonly embeddingCreated: boolean;
-	readonly entitiesExtracted: number;
 }
 
 export interface SkillUninstallInput {
 	readonly skillName: string;
 	readonly agentId?: string;
+	readonly entityId?: string;
 }
 
 export interface SkillUninstallResult {
@@ -68,6 +68,37 @@ export interface SkillUninstallResult {
 
 function skillEntityId(agentId: string, name: string): string {
 	return `skill:${agentId}:${name}`;
+}
+
+function findSkillEntityId(input: SkillUninstallInput, accessor: DbAccessor): string | null {
+	const agentId = input.agentId ?? "default";
+	const canonicalId = skillEntityId(agentId, input.skillName);
+
+	return accessor.withReadDb((db) => {
+		if (input.entityId) {
+			const explicit = db
+				.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?")
+				.get(input.entityId, agentId) as { id: string } | undefined;
+			if (explicit) return explicit.id;
+		}
+
+		const canonical = db.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ?").get(canonicalId, agentId) as
+			| { id: string }
+			| undefined;
+		if (canonical) return canonical.id;
+
+		const adopted = db
+			.prepare("SELECT id FROM entities WHERE name = ? AND agent_id = ? AND entity_type = 'skill' LIMIT 1")
+			.get(input.skillName, agentId) as { id: string } | undefined;
+		return adopted?.id ?? null;
+	});
+}
+
+function skillMetaIds(input: SkillUninstallInput): readonly string[] {
+	const agentId = input.agentId ?? "default";
+	const ids = new Set([skillEntityId(agentId, input.skillName)]);
+	if (input.entityId) ids.add(input.entityId);
+	return [...ids];
 }
 
 function buildEmbeddingText(fm: SkillFrontmatter): string {
@@ -113,7 +144,7 @@ function contentHash(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Install: create entity + skill_meta + embedding + extraction
+// Install: create entity + skill_meta + embedding
 // ---------------------------------------------------------------------------
 
 export async function installSkillNode(
@@ -122,45 +153,15 @@ export async function installSkillNode(
 	config: PipelineV2Config,
 	embeddingCfg: EmbeddingConfig,
 	fetchEmbedding: (text: string, cfg: EmbeddingConfig) => Promise<number[] | null>,
-	provider: LlmProvider | null,
 ): Promise<SkillInstallResult> {
 	const agentId = input.agentId ?? "default";
 	let entityId = skillEntityId(agentId, input.frontmatter.name);
 	const now = new Date().toISOString();
 	const procCfg = config.procedural;
 
-	let fm = input.frontmatter;
-	let enriched = false;
+	const fm = input.frontmatter;
 
-	// Step 1: Enrich if needed
-	const needsEnrichment =
-		fm.description.length < procCfg.enrichMinDescription || !fm.triggers || fm.triggers.length === 0;
-
-	if (procCfg.enrichOnInstall && needsEnrichment && provider === null) {
-		logger.warn("pipeline", "Skill enrichment skipped — LLM provider not available", {
-			skill: fm.name,
-			descriptionLength: fm.description.length,
-			hasTriggers: Boolean(fm.triggers && fm.triggers.length > 0),
-		});
-	}
-
-	if (procCfg.enrichOnInstall && needsEnrichment && provider !== null) {
-		const enrichResult = await enrichSkillFrontmatter(
-			{ name: fm.name, description: fm.description, body: input.body },
-			provider,
-		);
-		if (enrichResult) {
-			fm = {
-				...fm,
-				description: enrichResult.description || fm.description,
-				triggers: enrichResult.triggers.length > 0 ? enrichResult.triggers : fm.triggers,
-				tags: enrichResult.tags.length > 0 ? enrichResult.tags : fm.tags,
-			};
-			enriched = true;
-		}
-	}
-
-	// Step 2: Create entity + skill_meta in a write transaction
+	// Step 1: Create entity + skill_meta in a write transaction
 	accessor.withWriteTx((db) => {
 		// Check if entity already exists by id or name (idempotent)
 		const existing = db
@@ -204,7 +205,7 @@ export async function installSkillNode(
 				fm.triggers ? JSON.stringify(fm.triggers) : null,
 				fm.tags ? JSON.stringify(fm.tags) : null,
 				fm.permissions ? JSON.stringify(fm.permissions) : null,
-				enriched ? 1 : 0,
+				0,
 				now,
 				procCfg.importanceOnInstall,
 				procCfg.decayRate,
@@ -265,7 +266,7 @@ export async function installSkillNode(
 				fm.triggers ? JSON.stringify(fm.triggers) : null,
 				fm.tags ? JSON.stringify(fm.tags) : null,
 				fm.permissions ? JSON.stringify(fm.permissions) : null,
-				enriched ? 1 : 0,
+				0,
 				now,
 				procCfg.importanceOnInstall,
 				procCfg.decayRate,
@@ -275,7 +276,7 @@ export async function installSkillNode(
 		}
 	});
 
-	// Step 3: Generate embedding from enriched frontmatter
+	// Step 2: Generate embedding from the authored frontmatter
 	let embeddingCreated = false;
 	const embeddingText = buildEmbeddingText(fm);
 	const writeConfig = accessor.withReadDb((db) => resolveActiveEmbeddingConfig(db, embeddingCfg));
@@ -321,41 +322,13 @@ export async function installSkillNode(
 		});
 	}
 
-	// Step 4: Extract entities from SKILL.md body for graph relations
-	let entitiesExtracted = 0;
-	if (config.graph.enabled && provider !== null && input.body.trim().length >= 20) {
-		try {
-			const extraction = await extractFactsAndEntities(input.body, provider);
-			if (extraction.entities.length > 0) {
-				accessor.withWriteTx((db) => {
-					const result = txPersistEntities(db, {
-						entities: extraction.entities,
-						sourceMemoryId: entityId,
-						extractedAt: now,
-						agentId,
-					});
-					entitiesExtracted = result.entitiesInserted + result.entitiesUpdated;
-				});
-				invalidateTraversalCache();
-			}
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			logger.warn("pipeline", "Skill body extraction failed", {
-				skill: fm.name,
-				error: msg,
-			});
-		}
-	}
-
 	logger.info("pipeline", "Skill node installed", {
 		skill: fm.name,
 		entityId,
-		enriched,
 		embeddingCreated,
-		entitiesExtracted,
 	});
 
-	return { entityId, enriched, embeddingCreated, entitiesExtracted };
+	return { entityId, embeddingCreated };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,13 +337,18 @@ export async function installSkillNode(
 
 export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAccessor): SkillUninstallResult {
 	const agentId = input.agentId ?? "default";
-	const entityId = skillEntityId(agentId, input.skillName);
+	const entityId = findSkillEntityId(input, accessor);
+	const metaIds = skillMetaIds(input);
 
-	const exists = accessor.withReadDb(
-		(db) => db.prepare("SELECT id FROM entities WHERE id = ?").get(entityId) as { id: string } | undefined,
-	);
-
-	if (!exists) {
+	if (!entityId) {
+		const now = new Date().toISOString();
+		accessor.withWriteTx((db) => {
+			for (const metaId of metaIds) {
+				db.prepare(
+					"UPDATE skill_meta SET uninstalled_at = ?, updated_at = ? WHERE entity_id = ? AND agent_id = ? AND uninstalled_at IS NULL",
+				).run(now, now, metaId, agentId);
+			}
+		});
 		return { removed: false, entityId: null };
 	}
 
@@ -398,7 +376,9 @@ export function uninstallSkillNode(input: SkillUninstallInput, accessor: DbAcces
 		}
 
 		// 4. Hard-delete skill_meta + entity in same transaction
-		db.prepare("DELETE FROM skill_meta WHERE entity_id = ?").run(entityId);
+		for (const metaId of metaIds) {
+			db.prepare("DELETE FROM skill_meta WHERE entity_id = ? AND agent_id = ?").run(metaId, agentId);
+		}
 		db.prepare("DELETE FROM entities WHERE id = ?").run(entityId);
 	});
 

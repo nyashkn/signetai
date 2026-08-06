@@ -7,6 +7,7 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -77,22 +78,34 @@ interface DaemonInstance {
 		readonly blockedReason: string | null;
 		readonly hasWorkloadState: boolean;
 	} | null;
-	readonly extractionWorker: {
-		readonly running: boolean;
-		readonly overloaded: boolean;
-		readonly loadPerCpu: number | null;
-		readonly maxLoadPerCpu: number | null;
-		readonly overloadBackoffMs: number | null;
-		readonly overloadSince: string | null;
-		readonly nextTickInMs: number | null;
-	} | null;
 	readonly transcripts: {
 		readonly pending: number;
 		readonly failed: number;
 		readonly dead: number;
 	} | null;
+	/** Daemon composite health from `/api/status` (score + status). */
+	readonly health: {
+		readonly score: number | null;
+		readonly status: string | null;
+	} | null;
+	/** Pipeline queue counts from `/api/status` (memory/summary). */
+	readonly queue: {
+		readonly memory: QueueCountsFromStatus | null;
+		readonly summary: QueueCountsFromStatus | null;
+	} | null;
 	readonly probe: DaemonHealthProbe;
 	readonly openclaw: DaemonOpenClawHealthSummary | null;
+}
+
+interface QueueCountsFromStatus {
+	readonly pending: number;
+	readonly leased: number;
+	readonly completed: number;
+	readonly failed: number;
+	readonly dead: number;
+	readonly oldestAgeSec: number;
+	readonly oldestDeadAgeSec: number;
+	readonly lastError: string | null;
 }
 
 interface DaemonProbeDeps {
@@ -132,6 +145,11 @@ export function resolveDaemonPaths(env: NodeJS.ProcessEnv = process.env): string
 		.filter((path, index, items) => items.indexOf(path) === index);
 }
 
+/** Resolve the daemon executable that the current CLI would launch. */
+export function resolveDaemonPath(env: NodeJS.ProcessEnv = process.env): string | null {
+	return resolveDaemonPaths(env).find((path) => existsSync(path)) ?? null;
+}
+
 function daemonPaths(): string[] {
 	return resolveDaemonPaths();
 }
@@ -152,6 +170,22 @@ export function sleep(ms: number): Promise<void> {
 async function isDaemonHealthyAt(baseUrl: string): Promise<boolean> {
 	try {
 		const response = await fetch(`${baseUrl}/health`, {
+			signal: AbortSignal.timeout(1200),
+		});
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Cheap liveness check: hits /health/live which never touches the DB.
+ * Used during startup polling so a daemon running migrations or recovery
+ * (where /health may be slow or unavailable) is still detected as alive.
+ */
+async function isDaemonAliveAt(baseUrl: string): Promise<boolean> {
+	try {
+		const response = await fetch(`${baseUrl}/health/live`, {
 			signal: AbortSignal.timeout(1200),
 		});
 		return response.ok;
@@ -344,6 +378,10 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 						host?: string;
 						bindHost?: string;
 						networkMode?: string;
+						health?: {
+							score?: number;
+							status?: string;
+						};
 						resources?: {
 							rss?: number | null;
 							heapUsed?: number | null;
@@ -368,17 +406,7 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 								blockedReason?: string | null;
 							};
 						};
-						pipeline?: {
-							extraction?: {
-								running?: boolean;
-								overloaded?: boolean;
-								loadPerCpu?: number | null;
-								maxLoadPerCpu?: number | null;
-								overloadBackoffMs?: number | null;
-								overloadSince?: string | null;
-								nextTickInMs?: number | null;
-							};
-						};
+						pipeline?: Record<string, unknown>;
 						transcripts?: {
 							capture?: {
 								pending?: number;
@@ -388,11 +416,34 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 						};
 					};
 					const extraction = data.providerResolution?.extraction;
-					const extractionWorker = data.pipeline?.extraction;
 					const transcripts = data.transcripts?.capture;
 					const resources = data.resources;
 					const openclawReport = await fetchJsonOrNull<unknown>(baseUrl, "/api/diagnostics/openclaw");
 					const readiness = await fetchDaemonReadiness(baseUrl);
+					const healthRaw = data.health;
+					const pipelineRaw = data.pipeline;
+					const queueRaw =
+						typeof pipelineRaw === "object" && pipelineRaw !== null ? Reflect.get(pipelineRaw, "queue") : undefined;
+					const health =
+						typeof healthRaw === "object" && healthRaw !== null
+							? {
+									score:
+										typeof Reflect.get(healthRaw, "score") === "number"
+											? (Reflect.get(healthRaw, "score") as number)
+											: null,
+									status:
+										typeof Reflect.get(healthRaw, "status") === "string"
+											? (Reflect.get(healthRaw, "status") as string)
+											: null,
+								}
+							: null;
+					const queue =
+						typeof queueRaw === "object" && queueRaw !== null
+							? {
+									memory: normalizeQueueCountsFromStatus(Reflect.get(queueRaw, "memory")),
+									summary: normalizeQueueCountsFromStatus(Reflect.get(queueRaw, "summary")),
+								}
+							: null;
 					return {
 						baseUrl,
 						pid: data.pid ?? null,
@@ -434,20 +485,6 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 									hasWorkloadState: typeof extraction.ready === "boolean",
 								}
 							: null,
-						extractionWorker: extractionWorker
-							? {
-									running: extractionWorker.running === true,
-									overloaded: extractionWorker.overloaded === true,
-									loadPerCpu: typeof extractionWorker.loadPerCpu === "number" ? extractionWorker.loadPerCpu : null,
-									maxLoadPerCpu:
-										typeof extractionWorker.maxLoadPerCpu === "number" ? extractionWorker.maxLoadPerCpu : null,
-									overloadBackoffMs:
-										typeof extractionWorker.overloadBackoffMs === "number" ? extractionWorker.overloadBackoffMs : null,
-									overloadSince: extractionWorker.overloadSince ?? null,
-									nextTickInMs:
-										typeof extractionWorker.nextTickInMs === "number" ? extractionWorker.nextTickInMs : null,
-								}
-							: null,
 						transcripts: transcripts
 							? {
 									pending: typeof transcripts.pending === "number" ? transcripts.pending : 0,
@@ -455,6 +492,8 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 									dead: typeof transcripts.dead === "number" ? transcripts.dead : 0,
 								}
 							: null,
+						health,
+						queue,
 						probe: reachableDaemonProbe(baseUrl, data.pid ?? null, readiness),
 						openclaw: summarizeOpenClawHealth(openclawReport),
 					};
@@ -473,8 +512,9 @@ async function getDaemonInstances(): Promise<DaemonInstance[]> {
 				networkMode: null,
 				resources: null,
 				extraction: null,
-				extractionWorker: null,
 				transcripts: null,
+				health: null,
+				queue: null,
 				probe: reachableDaemonProbe(
 					baseUrl,
 					null,
@@ -496,9 +536,55 @@ function normalizeCmd(value: string): string {
 	return normalize(value).replaceAll("\\", "/").toLowerCase();
 }
 
+function executablePathVariants(executablePath: string): readonly string[] {
+	const variants = [executablePath];
+	try {
+		variants.push(realpathSync(executablePath));
+	} catch {
+		// The executable may have been replaced during an update. The command
+		// line still gives us the best available ownership signal in that case.
+	}
+	return [...new Set(variants.map(normalizeCmd))];
+}
+
+/** Return whether a daemon command line contains the requested executable. */
+export function daemonCommandUsesExecutable(command: string, executablePath: string): boolean {
+	const normalizedCommand = normalizeCmd(command);
+	return executablePathVariants(executablePath).some((candidate) => normalizedCommand.includes(candidate));
+}
+
+/**
+ * A running daemon may outlive the CLI installation that started it. Rebind
+ * only when its command line is known and points at a different executable;
+ * an unreadable command line is left alone for safety.
+ */
+export function shouldRebindDaemon(currentCommand: string | null, desiredExecutablePath: string): boolean {
+	return currentCommand !== null && !daemonCommandUsesExecutable(currentCommand, desiredExecutablePath);
+}
+
 function matchesDaemon(cmd: string, paths: readonly string[]): boolean {
 	const normalizedCmd = normalizeCmd(cmd);
 	return daemonMarks(paths).some((path) => normalizedCmd.includes(normalizeCmd(path)));
+}
+
+function normalizeQueueCountsFromStatus(value: unknown): QueueCountsFromStatus | null {
+	if (typeof value !== "object" || value === null) return null;
+	const record = value as Record<string, unknown>;
+	const toNumber = (key: string): number => {
+		const raw = record[key];
+		return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+	};
+	const lastErrorRaw = record.lastError;
+	return {
+		pending: toNumber("pending"),
+		leased: toNumber("leased"),
+		completed: toNumber("completed"),
+		failed: toNumber("failed"),
+		dead: toNumber("dead"),
+		oldestAgeSec: toNumber("oldestAgeSec"),
+		oldestDeadAgeSec: toNumber("oldestDeadAgeSec"),
+		lastError: typeof lastErrorRaw === "string" && lastErrorRaw.trim().length > 0 ? lastErrorRaw : null,
+	};
 }
 
 function readCmd(pid: number): string | null {
@@ -510,6 +596,22 @@ function readCmd(pid: number): string | null {
 		}
 	} catch {
 		// Fall through.
+	}
+
+	if (process.platform === "win32") {
+		const script = `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($process) { $process.CommandLine }`;
+		for (const command of ["powershell.exe", "pwsh"]) {
+			try {
+				const proc = spawnSync(command, ["-NoProfile", "-NonInteractive", "-Command", script], {
+					encoding: "utf-8",
+					windowsHide: true,
+					timeout: 3000,
+				});
+				if (proc.status === 0 && proc.stdout.trim()) return proc.stdout.trim();
+			} catch {
+				// Try the next available PowerShell command.
+			}
+		}
 	}
 
 	try {
@@ -593,8 +695,9 @@ export async function getDaemonStatus(): Promise<{
 	networkMode: string | null;
 	resources: DaemonResourceUsage | null;
 	extraction: DaemonInstance["extraction"];
-	extractionWorker: DaemonInstance["extractionWorker"];
 	transcripts: DaemonInstance["transcripts"];
+	health: DaemonInstance["health"];
+	queue: DaemonInstance["queue"];
 	probe: DaemonHealthProbe;
 	openclaw: DaemonOpenClawHealthSummary | null;
 }> {
@@ -612,8 +715,9 @@ export async function getDaemonStatus(): Promise<{
 			networkMode: preferred.networkMode,
 			resources: preferred.resources,
 			extraction: preferred.extraction,
-			extractionWorker: preferred.extractionWorker,
 			transcripts: preferred.transcripts,
+			health: preferred.health,
+			queue: preferred.queue,
 			probe: {
 				...preferred.probe,
 				processPid: preferred.probe.processPid ?? fallbackPid,
@@ -633,11 +737,41 @@ export async function getDaemonStatus(): Promise<{
 		networkMode: null,
 		resources: null,
 		extraction: null,
-		extractionWorker: null,
 		transcripts: null,
+		health: null,
+		queue: null,
 		probe,
 		openclaw: null,
 	};
+}
+
+interface DaemonOwnershipStatus {
+	readonly running: boolean;
+	readonly pid: number | null;
+}
+
+export type DaemonRebindResult = "not-running" | "already-current" | "unknown" | "restarted" | "failed";
+
+/**
+ * Switch a healthy daemon to the executable selected by the current CLI when
+ * an older daemon was started from another Signet installation.
+ */
+export async function rebindDaemonIfNeeded(
+	desiredExecutablePath: string,
+	deps: {
+		readonly getDaemonStatus: () => Promise<DaemonOwnershipStatus>;
+		readonly readCommand: (pid: number) => string | null;
+		readonly stopDaemon: (pid: number) => Promise<boolean>;
+	},
+): Promise<DaemonRebindResult> {
+	const status = await deps.getDaemonStatus();
+	if (!status.running) return "not-running";
+	if (status.pid === null) return "unknown";
+
+	const currentCommand = deps.readCommand(status.pid);
+	if (!shouldRebindDaemon(currentCommand, desiredExecutablePath)) return currentCommand ? "already-current" : "unknown";
+
+	return (await deps.stopDaemon(status.pid)) ? "restarted" : "failed";
 }
 
 export interface DaemonStartArgsInput {
@@ -897,15 +1031,59 @@ export function buildLaunchdDaemonStopArgs(label: string = LAUNCHD_DAEMON_LABEL)
 	return ["bootout", `${currentLaunchdDomain()}/${label}`];
 }
 
+/** Minimal structural shape of the `launchctl print` probe so tests can stub it. */
+type LaunchctlProbeSpawnSync = (
+	command: string,
+	args: readonly string[],
+	options: { readonly stdio: "ignore"; readonly windowsHide: boolean; readonly timeout: number },
+) => {
+	readonly status: number | null;
+};
+
+/**
+ * Whether launchd currently has the Signet daemon job loaded. Under KeepAlive
+ * the job respawns the daemon on exit, so `stop`/`start` must coordinate with
+ * it. The check is darwin-only; other platforms return false.
+ */
+export function isLaunchdDaemonLoaded(
+	deps: { readonly platform?: NodeJS.Platform; readonly spawnSync?: LaunchctlProbeSpawnSync } = {},
+): boolean {
+	if ((deps.platform ?? process.platform) !== "darwin") return false;
+	const spawn = deps.spawnSync ?? spawnSync;
+	const result = spawn("launchctl", ["print", `${currentLaunchdDomain()}/${LAUNCHD_DAEMON_LABEL}`], {
+		stdio: "ignore",
+		windowsHide: true,
+		timeout: 3000,
+	});
+	return result.status === 0;
+}
+
 export function didSystemdDaemonStart(result: Pick<SpawnSyncReturns<Buffer>, "status" | "signal" | "error">): boolean {
 	return result.status === 0 && result.signal === null && result.error === undefined;
 }
 
 export const didLaunchdDaemonStart = didSystemdDaemonStart;
 
-export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boolean> {
-	if (await isDaemonRunning()) {
+export async function startDaemon(agentsDir: string = AGENTS_DIR, preferredDaemonPath?: string): Promise<boolean> {
+	const daemonPath = preferredDaemonPath ?? resolveDaemonPath();
+	if (!daemonPath) {
+		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
+		return false;
+	}
+
+	const rebindResult = await rebindDaemonIfNeeded(daemonPath, {
+		getDaemonStatus,
+		readCommand: (pid) => readCmd(pid),
+		stopDaemon: (pid) => stopDaemon(agentsDir, pid),
+	});
+	if (rebindResult === "already-current" || rebindResult === "unknown") {
 		return true;
+	}
+	if (rebindResult === "failed") {
+		return false;
+	}
+	if (rebindResult === "restarted") {
+		console.error(chalk.dim("  Existing daemon uses another Signet installation; switching to the current one."));
 	}
 
 	if (await hasDaemonProcess(agentsDir)) {
@@ -921,23 +1099,6 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boole
 	const logDir = join(daemonDir, "logs");
 	mkdirSync(daemonDir, { recursive: true });
 	mkdirSync(logDir, { recursive: true });
-
-	// In dev, runtime.ts lives in lib/ so cliDir (dirname(__dirname)) = src/.
-	// In the published bundle, everything flattens into dist/cli.js so
-	// __dirname already points at dist/ — check it first to handle the
-	// bundled layout where cliDir overshoots to the package root.
-	let daemonPath: string | null = null;
-	for (const loc of daemonPaths()) {
-		if (existsSync(loc)) {
-			daemonPath = loc;
-			break;
-		}
-	}
-
-	if (!daemonPath) {
-		console.error(chalk.red("Daemon not found. Try reinstalling signet."));
-		return false;
-	}
 
 	const attributionNotice = macOSLaunchAgentAttributionNotice(daemonPath);
 	if (attributionNotice) {
@@ -1013,12 +1174,20 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boole
 				startupLogPath,
 			}),
 		);
-		const bootout = spawnSync("launchctl", buildLaunchdDaemonStopArgs(), {
-			stdio: ["ignore", "ignore", stderrTarget],
-			windowsHide: true,
-			env: daemonEnv,
-			timeout: 5000,
-		});
+		// Boot out any loaded job before (re)bootstrap. When no job is loaded
+		// (fresh start, or a restart that already booted it out), launchctl
+		// exits 3 with "Boot-out failed: 3: No such process" — launchd handoff
+		// noise, not a start failure. Skip the bootout in that case so the
+		// message never pollutes the startup log (#1074).
+		let bootout: SpawnSyncReturns<Buffer> | null = null;
+		if (isLaunchdDaemonLoaded()) {
+			bootout = spawnSync("launchctl", buildLaunchdDaemonStopArgs(), {
+				stdio: ["ignore", "ignore", stderrTarget],
+				windowsHide: true,
+				env: daemonEnv,
+				timeout: 5000,
+			});
+		}
 		const bootstrap = spawnSync("launchctl", buildLaunchdDaemonStartArgs(plistPath), {
 			stdio: ["ignore", "ignore", stderrTarget],
 			windowsHide: true,
@@ -1039,7 +1208,7 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boole
 				try {
 					appendFileSync(
 						startupLogPath,
-						`[launchd fallback] bootoutStatus=${bootout.status ?? "null"} bootstrapStatus=${bootstrap.status ?? "null"} kickstartStatus=${kickstart.status ?? "null"} bootoutError=${bootout.error?.message ?? ""} bootstrapError=${bootstrap.error?.message ?? ""} kickstartError=${kickstart.error?.message ?? ""}
+						`[launchd fallback] bootoutStatus=${bootout ? (bootout.status ?? "null") : "skipped"} bootstrapStatus=${bootstrap.status ?? "null"} kickstartStatus=${kickstart.status ?? "null"} bootoutError=${bootout?.error?.message ?? ""} bootstrapError=${bootstrap.error?.message ?? ""} kickstartError=${kickstart.error?.message ?? ""}
 `,
 					);
 				} catch {
@@ -1088,13 +1257,21 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boole
 	}
 
 	// Use wall-clock deadline instead of iteration count so the budget
-	// is always ~15 real seconds regardless of how long each health
-	// probe takes (connection-refused can stall up to 1.2s per probe).
+	// is always sufficient regardless of how long each health probe takes.
+	// A large/legacy workspace may need 30-40s for migrations + startup
+	// recovery before the HTTP server binds. 60s covers the worst case
+	// while still failing fast on a genuinely broken daemon.
 	// If the spawned process exits early (fast failure), break immediately.
-	const deadline = Date.now() + 15_000;
+	const deadline = Date.now() + 60_000;
 	while (Date.now() < deadline) {
 		await sleep(250);
 		if (procExited) break;
+		// Check liveness first (cheap, DB-free /health/live), then health
+		// (DB-touching /health). On a fresh start the server may bind before
+		// migrations finish — /health/live catches that case.
+		for (const baseUrl of DAEMON_BASE_URLS) {
+			if (await isDaemonAliveAt(baseUrl)) return true;
+		}
 		if (await isDaemonRunning()) {
 			return true;
 		}
@@ -1118,7 +1295,7 @@ export async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boole
 	return false;
 }
 
-export async function stopDaemon(agentsDir: string = AGENTS_DIR): Promise<boolean> {
+export async function stopDaemon(agentsDir: string = AGENTS_DIR, preferredPid?: number): Promise<boolean> {
 	if (process.platform === "darwin") {
 		spawnSync("launchctl", buildLaunchdDaemonStopArgs(), {
 			stdio: "ignore",
@@ -1127,7 +1304,7 @@ export async function stopDaemon(agentsDir: string = AGENTS_DIR): Promise<boolea
 		});
 	}
 
-	const pids = new Set<number>();
+	const pids = new Set<number>(preferredPid === undefined ? [] : [preferredPid]);
 	const managed = readManagedDaemonPid(agentsDir);
 	if (managed !== null) {
 		pids.add(managed);

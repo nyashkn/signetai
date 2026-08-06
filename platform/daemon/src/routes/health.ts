@@ -11,13 +11,13 @@ import {
 } from "../diagnostics";
 import { getAllFeatureFlags } from "../feature-flags";
 import { loadMemoryConfig } from "../memory-config";
-import { getPipelineWorkerStatus } from "../pipeline";
 import { getResourceSnapshot } from "../resource-monitor";
 import { getUpdateState } from "../update-system";
 import {
 	AGENTS_DIR,
 	CURRENT_VERSION,
 	PORT,
+	authConfig,
 	getCurrentAgentsDir,
 	getExtractionWorkloadState,
 	providerRuntimeResolution,
@@ -156,9 +156,8 @@ function checkInference(): { ok: boolean; detail: InferenceCheck; reason: string
 		};
 	}
 	const extraction = getExtractionWorkloadState({
-		enabled: cfg.pipelineV2.enabled,
+		enabled: false,
 		paused: cfg.pipelineV2.paused,
-		workerRunning: getPipelineWorkerStatus().extraction.running,
 	});
 	const detail: InferenceCheck = {
 		status: extraction.status,
@@ -186,13 +185,6 @@ export function mountHealthRoutes(app: Hono): void {
 				dbOk = true;
 			});
 		} catch {}
-		const workers = getPipelineWorkerStatus();
-		const extraction = workers.extraction;
-		const stalled =
-			extraction.running &&
-			extraction.stats !== undefined &&
-			extraction.stats.pending > 0 &&
-			Date.now() - extraction.stats.lastProgressAt > 60_000;
 
 		return c.json({
 			status: shuttingDown ? "shutting_down" : "healthy",
@@ -205,12 +197,6 @@ export function mountHealthRoutes(app: Hono): void {
 			shuttingDown,
 			updateAvailable: us.lastCheck?.updateAvailable ?? false,
 			pendingRestart: us.pendingRestartVersion !== null,
-			pipeline: {
-				extractionRunning: extraction.running,
-				extractionStalled: stalled,
-				extractionPending: extraction.stats?.pending ?? 0,
-				extractionBackoffMs: extraction.stats?.backoffMs ?? 0,
-			},
 			resources: getResourceSnapshot(),
 		});
 	});
@@ -294,5 +280,15 @@ export function mountHealthRoutes(app: Hono): void {
 
 	app.get("/api/features", (c) => {
 		return c.json(getAllFeatureFlags());
+	});
+
+	// Environment probe (issue #1001): deliberately lightweight and
+	// unauthenticated so the dashboard can distinguish "talking to a real
+	// daemon" (any hostname: localhost, Tailscale, .local, tunnel, LAN IP)
+	// from the marketing site or cloud app. `mode` reflects the daemon's
+	// auth mode; `requiresAuth` reflects whether data endpoints require a
+	// token in that mode.
+	app.get("/api/mode", (c) => {
+		return c.json({ mode: authConfig.mode, requiresAuth: authConfig.mode !== "local" });
 	});
 }

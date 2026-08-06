@@ -36,7 +36,6 @@ function makeState(overrides: Partial<ContinuityState> = {}): ContinuityState {
 		totalPromptCount: 5,
 		lastCheckpointAt: Date.now() - 60_000,
 		pendingQueries: [],
-		pendingRemembers: [],
 		pendingPromptSnippets: [],
 		startedAt: Date.now() - 300_000,
 		structuralSnapshot: undefined,
@@ -282,7 +281,6 @@ describe("formatPeriodicDigest", () => {
 			totalPromptCount: 15,
 			lastCheckpointAt: Date.now(),
 			pendingQueries: ["typescript", "auth"],
-			pendingRemembers: ["User likes dark mode"],
 			pendingPromptSnippets: [],
 			startedAt: Date.now() - 600_000, // 10 min ago
 			structuralSnapshot: undefined,
@@ -294,7 +292,6 @@ describe("formatPeriodicDigest", () => {
 		expect(digest).toContain("Prompts: 15");
 		expect(digest).toContain("10m");
 		expect(digest).toContain("typescript, auth");
-		expect(digest).toContain("User likes dark mode");
 	});
 
 	test("omits activity section when empty", () => {
@@ -307,7 +304,6 @@ describe("formatPeriodicDigest", () => {
 			totalPromptCount: 3,
 			lastCheckpointAt: Date.now(),
 			pendingQueries: [],
-			pendingRemembers: [],
 			pendingPromptSnippets: [],
 			startedAt: Date.now() - 120_000,
 			structuralSnapshot: undefined,
@@ -337,11 +333,9 @@ describe("formatPeriodicDigest", () => {
 	it("includes memory activity", () => {
 		const state = makeState({
 			pendingQueries: ["auth", "login"],
-			pendingRemembers: ["user prefers dark mode"],
 		});
 		const digest = formatPeriodicDigest(state);
 		expect(digest).toContain("Queries: auth, login");
-		expect(digest).toContain("Remembered: user prefers dark mode");
 	});
 
 	it("includes structural context ahead of prompts when present", () => {
@@ -392,7 +386,6 @@ describe("formatPreCompactionDigest", () => {
 	it("includes memory activity", () => {
 		const state = makeState({
 			pendingQueries: ["database schema"],
-			pendingRemembers: ["uses postgres"],
 		});
 		const digest = formatPreCompactionDigest(state);
 		expect(digest).toContain("### Memory Activity");
@@ -407,7 +400,6 @@ describe("formatSessionEndDigest", () => {
 			totalPromptCount: 15,
 			pendingPromptSnippets: ["final cleanup", "commit changes"],
 			pendingQueries: ["deployment", "config"],
-			pendingRemembers: ["project uses bun"],
 		});
 		const digest = formatSessionEndDigest(state);
 		expect(digest).toContain("## Session End Checkpoint");

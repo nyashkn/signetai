@@ -53,7 +53,7 @@ export interface OldestDeadJob {
 // Queue source identification
 // ---------------------------------------------------------------------------
 
-export type QueueSource = "memory" | "summary" | "extraction";
+export type QueueSource = "memory" | "summary";
 
 interface QueueCountsQueryResult {
 	readonly pending: number;
@@ -75,7 +75,7 @@ interface OldestDeadRow {
 	readonly error: string | null;
 }
 
-function safeQueueRows(db: ReadDb, table: string): QueueCountsQueryResult | undefined {
+function safeQueueRows(db: ReadDb, table: string, predicate = "1 = 1"): QueueCountsQueryResult | undefined {
 	if (!tableExists(db, table)) return undefined;
 	// Reject anything that isn't obviously a queue table — never feed
 	// user-controlled table names into a literal here.
@@ -95,9 +95,10 @@ function safeQueueRows(db: ReadDb, table: string): QueueCountsQueryResult | unde
 			MIN(CASE WHEN status IN ('pending','leased') THEN created_at END) AS oldestAt,
 			MIN(CASE WHEN status = 'dead' THEN created_at END) AS oldestDeadAt,
 			(SELECT error FROM ${table}
-				WHERE status IN ('pending','leased','dead') AND error IS NOT NULL
+				WHERE status IN ('pending','leased','dead') AND ${predicate} AND error IS NOT NULL
 				ORDER BY ${lastErrorOrder} LIMIT 1) AS lastError
 		FROM ${table}
+		WHERE ${predicate}
 	`);
 	return stmt.get() as QueueCountsQueryResult | undefined;
 }
@@ -110,27 +111,6 @@ function hasColumn(db: ReadDb, table: string, column: string): boolean {
 		name: string;
 	}>;
 	return rows.some((r) => r.name === column);
-}
-
-function jobMemoryRows(db: ReadDb, jobType: string): QueueCountsQueryResult | undefined {
-	if (!tableExists(db, "memory_jobs")) return undefined;
-	if (!/^[a-z][a-z0-9_]*$/i.test(jobType)) return undefined;
-	const stmt = db.prepare(`
-		SELECT
-			SUM(CASE WHEN status = 'pending'  THEN 1 ELSE 0 END) AS pending,
-			SUM(CASE WHEN status = 'leased'   THEN 1 ELSE 0 END) AS leased,
-			SUM(CASE WHEN status = 'completed'THEN 1 ELSE 0 END) AS completed,
-			SUM(CASE WHEN status = 'failed'   THEN 1 ELSE 0 END) AS failed,
-			SUM(CASE WHEN status = 'dead'     THEN 1 ELSE 0 END) AS dead,
-			MIN(CASE WHEN status IN ('pending','leased') THEN created_at END) AS oldestAt,
-			MIN(CASE WHEN status = 'dead' THEN created_at END) AS oldestDeadAt,
-			(SELECT error FROM memory_jobs
-				WHERE job_type = ? AND status IN ('pending','leased','dead') AND error IS NOT NULL
-				ORDER BY updated_at DESC LIMIT 1) AS lastError
-		FROM memory_jobs
-		WHERE job_type = ?
-	`);
-	return stmt.get(jobType, jobType) as QueueCountsQueryResult | undefined;
 }
 
 function ageSec(value: string | null): number {
@@ -157,15 +137,12 @@ function rowToCounts(row: QueueCountsQueryResult | undefined): QueueCounts {
 /**
  * Per-table counts for one queue source.
  *
- * `memory` reads `memory_jobs` table; `summary` reads `summary_jobs`
- * table; `extraction` filters `memory_jobs` by `job_type = 'extraction'`
- * (so the extraction pipeline slice is visible even though it shares
- * the table with other memory jobs).
+ * `memory` reads live `memory_jobs` (excluding terminal legacy `extract`
+ * jobs); `summary` reads `summary_jobs`.
  */
 export function getQueueCounts(db: ReadDb, source: QueueSource): QueueCounts {
-	if (source === "memory") return rowToCounts(safeQueueRows(db, "memory_jobs"));
+	if (source === "memory") return rowToCounts(safeQueueRows(db, "memory_jobs", "job_type <> 'extract'"));
 	if (source === "summary") return rowToCounts(safeQueueRows(db, "summary_jobs"));
-	if (source === "extraction") return rowToCounts(jobMemoryRows(db, "extraction"));
 	// Defensive — TS narrowing treats any unrecognized value as `never`
 	// through exhaustive union discrimination.
 	return EMPTY_QUEUE_COUNTS;
@@ -183,7 +160,7 @@ export function getOldestDeadJob(db: ReadDb, source: QueueSource): OldestDeadJob
 				`SELECT id, harness, session_key AS sessionKey, created_at AS createdAt,
 				        attempts, error
 				 FROM summary_jobs
-				 WHERE status = 'dead'
+					 WHERE status = 'dead'
 				 ORDER BY created_at ASC LIMIT 1`,
 			)
 			.get() as OldestDeadRow | undefined;
@@ -197,15 +174,14 @@ export function getOldestDeadJob(db: ReadDb, source: QueueSource): OldestDeadJob
 			error: row.error,
 		};
 	}
-	if (source === "memory" || source === "extraction") {
+	if (source === "memory") {
 		if (!tableExists(db, "memory_jobs")) return null;
-		const typeFilter = source === "extraction" ? "AND job_type = 'extraction'" : "";
 		const row = db
 			.prepare(
 				`SELECT id, job_type AS harness, memory_id AS sessionKey, created_at AS createdAt,
 				        attempts, error
 				 FROM memory_jobs
-				 WHERE status = 'dead' ${typeFilter}
+					 WHERE status = 'dead' AND job_type <> 'extract'
 				 ORDER BY created_at ASC LIMIT 1`,
 			)
 			.get() as OldestDeadRow | undefined;
@@ -225,10 +201,8 @@ export function getOldestDeadJob(db: ReadDb, source: QueueSource): OldestDeadJob
 export interface QueueDiagnosticsSnapshot {
 	readonly memory: QueueCounts;
 	readonly summary: QueueCounts;
-	readonly extraction: QueueCounts;
 	readonly oldestDeadSummaryJob: OldestDeadJob | null;
 	readonly oldestDeadMemoryJob: OldestDeadJob | null;
-	readonly oldestDeadExtractionJob: OldestDeadJob | null;
 }
 
 const QUEUE_SNAPSHOT_CACHE_TTL_MS = 30_000;
@@ -253,10 +227,8 @@ export function getQueueDiagnosticsSnapshot(
 	const value: QueueDiagnosticsSnapshot = {
 		memory: getQueueCounts(db, "memory"),
 		summary: getQueueCounts(db, "summary"),
-		extraction: getQueueCounts(db, "extraction"),
 		oldestDeadSummaryJob: getOldestDeadJob(db, "summary"),
 		oldestDeadMemoryJob: getOldestDeadJob(db, "memory"),
-		oldestDeadExtractionJob: getOldestDeadJob(db, "extraction"),
 	};
 	queueSnapshotCache.set(db, { expiresAt: now + QUEUE_SNAPSHOT_CACHE_TTL_MS, value });
 	return value;
@@ -280,8 +252,6 @@ export interface QueueThresholds {
 	readonly memoryDeadFail: number;
 	readonly memoryOldestPendingWarnSec: number;
 	readonly memoryOldestPendingFailSec: number;
-	readonly extractionDeadWarn: number;
-	readonly extractionDeadFail: number;
 }
 
 export const DEFAULT_QUEUE_THRESHOLDS: QueueThresholds = {
@@ -294,8 +264,6 @@ export const DEFAULT_QUEUE_THRESHOLDS: QueueThresholds = {
 	memoryDeadFail: 500,
 	memoryOldestPendingWarnSec: 300,
 	memoryOldestPendingFailSec: 1800,
-	extractionDeadWarn: 10,
-	extractionDeadFail: 100,
 };
 
 export interface QueueScore {
@@ -374,10 +342,6 @@ export function scoreCountsWithThresholds(
 		);
 		penalty += a.penalty;
 		bump(a.status);
-	} else if (source === "extraction") {
-		const d = deadScore(counts.dead, thresholds.extractionDeadWarn, thresholds.extractionDeadFail);
-		penalty += d.penalty;
-		bump(d.status);
 	}
 
 	const score = clamp01(1 - penalty);

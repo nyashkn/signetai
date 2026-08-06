@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import { requirePermission } from "../auth";
 import { getDbAccessor } from "../db-accessor";
-import { archiveEntityAlias, createEntityAlias, findAliasHolder, listEntityAliases } from "../knowledge-graph";
+import { findAliasHolder, listEntityAliases } from "../knowledge-graph";
 import { getInferenceProviderOrNull } from "../llm";
 import {
 	OntologyAssertionError,
@@ -204,21 +204,30 @@ export function registerOntologyRoutes(app: Hono): void {
 			return c.json({ error: `alias_kind must be one of: ${ALIAS_KINDS.join(", ")}` }, 400);
 		}
 		try {
-			const item = createEntityAlias(getDbAccessor(), {
+			const { result } = applyOntologyOperation(getDbAccessor(), {
+				agentId: scoped.agentId,
+				actor: readString(body, "created_by") ?? c.req.header("x-signet-actor") ?? "operator",
+				operation: "create_entity_alias",
+				payload: {
+					entity_id: c.req.param("id"),
+					alias,
+					alias_kind: aliasKind ?? null,
+					org_entity_id: readString(body, "org_entity_id") ?? null,
+					confidence: readNumber(body, "confidence"),
+					source: readString(body, "source") ?? null,
+				},
+			});
+			const item = listEntityAliases(getDbAccessor(), {
 				agentId: scoped.agentId,
 				entityId: c.req.param("id"),
-				alias,
-				aliasKind: aliasKind ?? null,
-				orgEntityId: readString(body, "org_entity_id") ?? null,
-				confidence: readNumber(body, "confidence"),
-				source: readString(body, "source") ?? null,
-			});
+				status: "all",
+			}).find((row) => row.id === result?.aliasId);
 			return c.json({ item }, 201);
 		} catch (err) {
 			const message = messageForError(err);
 			// One handle resolves to one entity per agent (migration 077's unique
-			// index). A collision is the invariant holding, not a server fault — the
-			// caller has to unlink the current holder first.
+			// index). A collision is the invariant holding, not a server fault — and
+			// the caller's next move depends on who holds it, so name them.
 			if (message.includes("UNIQUE")) {
 				const holder = findAliasHolder(getDbAccessor(), { agentId: scoped.agentId, alias });
 				return c.json(
@@ -226,20 +235,32 @@ export function registerOntologyRoutes(app: Hono): void {
 					409,
 				);
 			}
-			if (message.endsWith("not found")) return c.json({ error: message }, 404);
-			return c.json({ error: message }, 400);
+			return c.json({ error: message }, statusForError(err));
 		}
 	});
 
 	app.delete("/api/ontology/entities/:id/aliases/:aliasId", (c) => {
 		const scoped = resolveAgent(c, c.req.query("agent_id"));
 		if (scoped.response) return scoped.response;
-		const item = archiveEntityAlias(getDbAccessor(), {
+		try {
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: scoped.agentId,
+				actor: c.req.header("x-signet-actor") ?? "operator",
+				operation: "archive_entity_alias",
+				payload: {
+					entity_id: c.req.param("id"),
+					alias_id: c.req.param("aliasId"),
+				},
+			});
+		} catch (err) {
+			if (err instanceof OntologyProposalError && err.status === 404) return c.json({ error: "Alias not found" }, 404);
+			return c.json({ error: messageForError(err) }, statusForError(err));
+		}
+		const item = listEntityAliases(getDbAccessor(), {
 			agentId: scoped.agentId,
 			entityId: c.req.param("id"),
-			aliasId: c.req.param("aliasId"),
-		});
-		if (!item) return c.json({ error: "Alias not found" }, 404);
+			status: "all",
+		}).find((row) => row.id === c.req.param("aliasId"));
 		return c.json({ item });
 	});
 

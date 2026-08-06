@@ -4,6 +4,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import type { WriteDb } from "./db-accessor";
 import { getDbAccessor } from "./db-accessor";
 import { requireDependencyReason } from "./dependency-history";
+import { purgeAttributeMemoryProjectionsInTx } from "./semantic-memory-projection";
 
 const OBSIDIAN_SOURCE_KIND = "source_obsidian_markdown";
 
@@ -394,6 +395,18 @@ function purgeObsidianSourceFileStructureInTx(
 	const filePath = normalizedPath(input.filePath);
 	const fileRel = relPath(root, filePath);
 	const documentEntityId = idFor(input.agentId, input.sourceId, "document", fileRel);
+	purgeAttributeMemoryProjectionsInTx(db, {
+		agentId: input.agentId,
+		sourceId: input.sourceId,
+		sourceRoot: root,
+		sourcePath: filePath,
+	});
+	purgeAttributeMemoryProjectionsInTx(db, {
+		agentId: input.agentId,
+		sourceId: input.sourceId,
+		sourceRoot: "dreaming",
+		sourcePath: filePath,
+	});
 
 	const attributes = db
 		.prepare(
@@ -404,6 +417,12 @@ function purgeObsidianSourceFileStructureInTx(
 			   AND source_path = ?`,
 		)
 		.run(input.agentId, input.sourceId, root, filePath).changes;
+	const derivedAttributes = db
+		.prepare(
+			`DELETE FROM entity_attributes
+			 WHERE agent_id = ? AND source_id = ? AND source_root = 'dreaming' AND source_path = ?`,
+		)
+		.run(input.agentId, input.sourceId, filePath).changes;
 	const aspects = db
 		.prepare("DELETE FROM entity_aspects WHERE agent_id = ? AND entity_id = ?")
 		.run(input.agentId, documentEntityId).changes;
@@ -428,7 +447,7 @@ function purgeObsidianSourceFileStructureInTx(
 			)
 			.run(input.agentId, input.sourceId, root, filePath).changes +
 		purgeOrphanedDocumentReferences(db, input.agentId, input.sourceId, root);
-	return { entities, attributes, dependencies, communities: aspects };
+	return { entities, attributes: attributes + derivedAttributes, dependencies, communities: aspects };
 }
 
 export function indexObsidianSourceStructure(
@@ -666,6 +685,11 @@ export function purgeObsidianSourceStructure(
 	const agentWhere = input.agentId ? "agent_id = ? AND " : "";
 	const params = input.agentId ? [input.agentId, input.sourceId, root] : [input.sourceId, root];
 	return getDbAccessor().withWriteTx((db) => {
+		purgeAttributeMemoryProjectionsInTx(db, {
+			agentId: input.agentId,
+			sourceId: input.sourceId,
+			sourceRoot: root,
+		});
 		const attrs = db
 			.prepare(`DELETE FROM entity_attributes WHERE ${agentWhere}source_id = ? AND source_root = ?`)
 			.run(...params).changes;
@@ -678,7 +702,40 @@ export function purgeObsidianSourceStructure(
 		const communities = db
 			.prepare(`DELETE FROM entity_communities WHERE ${agentWhere}source_id = ? AND source_root = ?`)
 			.run(...params).changes;
-		return { entities, attributes: attrs, dependencies: deps, communities };
+		// Also remove Dreaming-derived semantic rows that carry this configured
+		// Signet source entry id but the literal source_root 'dreaming' instead of
+		// the vault root. Newly created Dreaming entities are source-owned; existing
+		// user-owned entities retain their provenance when new evidence mentions
+		// them. This keeps the disconnect purge consistent with purgeSourceOwnedRows
+		// (used by GitHub/Discord), which deletes source-owned graph rows by id.
+		const derivedParams = input.agentId ? [input.agentId, input.sourceId] : [input.sourceId];
+		purgeAttributeMemoryProjectionsInTx(db, {
+			agentId: input.agentId,
+			sourceId: input.sourceId,
+			sourceRoot: "dreaming",
+		});
+		const derivedAttrs = db
+			.prepare(`DELETE FROM entity_attributes WHERE ${agentWhere}source_id = ? AND source_root = 'dreaming'`)
+			.run(...derivedParams).changes;
+		const derivedDeps = db
+			.prepare(`DELETE FROM entity_dependencies WHERE ${agentWhere}source_id = ? AND source_root = 'dreaming'`)
+			.run(...derivedParams).changes;
+		const derivedEntityIds = db
+			.prepare(`SELECT id FROM entities WHERE ${agentWhere}source_id = ? AND source_root = 'dreaming'`)
+			.all(...derivedParams) as Array<{ id: string }>;
+		if (derivedEntityIds.length > 0) {
+			const deleteAspects = db.prepare("DELETE FROM entity_aspects WHERE entity_id = ?");
+			for (const entity of derivedEntityIds) deleteAspects.run(entity.id);
+		}
+		const derivedEntities = db
+			.prepare(`DELETE FROM entities WHERE ${agentWhere}source_id = ? AND source_root = 'dreaming'`)
+			.run(...derivedParams).changes;
+		return {
+			entities: entities + derivedEntities,
+			attributes: attrs + derivedAttrs,
+			dependencies: deps + derivedDeps,
+			communities,
+		};
 	});
 }
 

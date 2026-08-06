@@ -3,14 +3,8 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import {
-	getEntityHealth,
-	getPinnedEntities,
-	pinEntity,
-	propagateMemoryStatus,
-	unpinEntity,
-	upsertAspect,
-} from "./knowledge-graph";
+import { getEntityHealth, getPinnedEntities } from "./knowledge-graph";
+import { applyOntologyOperation } from "./ontology-proposals";
 import { applyFtsOverlapFeedback, decayAspectWeights } from "./pipeline/aspect-feedback";
 import { resolveFocalEntities } from "./pipeline/graph-traversal";
 
@@ -71,7 +65,12 @@ describe("knowledge feedback", () => {
 		insertEntity("entity-pinned", "Pinned Project", "project");
 		insertEntity("entity-project", "other-project", "project");
 
-		pinEntity(getDbAccessor(), "entity-pinned", "default");
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "test",
+			operation: "pin_entity",
+			payload: { id: "entity-pinned" },
+		});
 
 		const pinned = getPinnedEntities(getDbAccessor(), "default");
 		expect(pinned).toHaveLength(1);
@@ -87,7 +86,12 @@ describe("knowledge feedback", () => {
 		expect(resolved.entityIds).toContain("entity-project");
 		expect(resolved.source).toBe("project");
 
-		unpinEntity(getDbAccessor(), "entity-pinned", "default");
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "test",
+			operation: "unpin_entity",
+			payload: { id: "entity-pinned" },
+		});
 		expect(getPinnedEntities(getDbAccessor(), "default")).toHaveLength(0);
 	});
 
@@ -96,7 +100,12 @@ describe("knowledge feedback", () => {
 		initDbAccessor(dbPath);
 
 		insertEntity("entity-pinned", "Pinned Project", "project");
-		pinEntity(getDbAccessor(), "entity-pinned", "default");
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "test",
+			operation: "pin_entity",
+			payload: { id: "entity-pinned" },
+		});
 
 		const resolved = getDbAccessor().withReadDb((db) =>
 			resolveFocalEntities(db, "default", {
@@ -126,21 +135,19 @@ describe("knowledge feedback", () => {
 
 		insertEntity("entity-1", "Alpha", "project");
 		insertMemory("memory-1", "remember alpha");
-		const aspect = upsertAspect(getDbAccessor(), {
-			entityId: "entity-1",
-			agentId: "default",
-			name: "core",
-			weight: 0.5,
-		});
-
 		getDbAccessor().withWriteTx((db) => {
 			const now = new Date().toISOString();
+			db.prepare(
+				`INSERT INTO entity_aspects
+				 (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+				 VALUES ('aspect-1', 'entity-1', 'default', 'core', 'core', 0.5, ?, ?)`,
+			).run(now, now);
 			db.prepare(
 				`INSERT INTO entity_attributes
 				 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content,
 				  confidence, importance, status, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, 'attribute', ?, ?, 1, 0.5, 'active', ?, ?)`,
-			).run("attr-1", aspect.id, "default", "memory-1", "remember alpha", "remember alpha", now, now);
+			).run("attr-1", "aspect-1", "default", "memory-1", "remember alpha", "remember alpha", now, now);
 			db.prepare(
 				`INSERT INTO session_memories
 				 (id, session_key, memory_id, source, effective_score, final_score, rank,
@@ -159,7 +166,7 @@ describe("knowledge feedback", () => {
 
 		const afterFeedback = getDbAccessor().withReadDb(
 			(db) =>
-				db.prepare("SELECT weight FROM entity_aspects WHERE id = ?").get(aspect.id) as
+				db.prepare("SELECT weight FROM entity_aspects WHERE id = ?").get("aspect-1") as
 					| Record<string, unknown>
 					| undefined,
 		);
@@ -167,7 +174,7 @@ describe("knowledge feedback", () => {
 
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare("UPDATE entity_aspects SET weight = 0.11, updated_at = datetime('now', '-30 days') WHERE id = ?").run(
-				aspect.id,
+				"aspect-1",
 			);
 		});
 		const decayed = decayAspectWeights(getDbAccessor(), "default", {
@@ -179,7 +186,7 @@ describe("knowledge feedback", () => {
 
 		const afterDecay = getDbAccessor().withReadDb(
 			(db) =>
-				db.prepare("SELECT weight FROM entity_aspects WHERE id = ?").get(aspect.id) as
+				db.prepare("SELECT weight FROM entity_aspects WHERE id = ?").get("aspect-1") as
 					| Record<string, unknown>
 					| undefined,
 		);

@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type DreamingConfig,
@@ -18,84 +18,118 @@ import {
 	resolveStartupIdentityFiles,
 } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import {
+	type EpisodicCursor,
+	type EpisodicSourceRecord,
+	readEpisodicSource,
+	readRecentEpisodicSources,
+} from "../episodic-sources";
+import { getDreamingHygieneCandidatesInDb } from "../knowledge-graph-hygiene";
 import { logger } from "../logger";
-import { extractBalancedJsonObjects } from "./extraction";
+import { createDreamingAgentTools } from "./dreaming-agent-tools";
+import {
+	type DreamingAttention,
+	enqueueDreamingAttentionInTx,
+	getDreamingAttention,
+	getDreamingAttentionInDb,
+	getDreamingAttentionSnapshots,
+	renderDreamingAttentionForPrompt,
+	resolveDreamingAttentionInTx,
+} from "./dreaming-attention";
+import type { DreamingToolCallTrace } from "./dreaming-capabilities";
+import {
+	type DreamingEvidenceFragment,
+	createDreamingAgentEvidence,
+	nextDreamingEvidenceFragment,
+	renderDreamingEvidence,
+} from "./dreaming-evidence";
+import type { ApplyDreamingOperationsResult, DreamingOperationRequest } from "./dreaming-operations";
+import {
+	readDreamingRunbook,
+	recordDreamingEvidenceWindowInTx,
+	renderDreamingRunbookForPrompt,
+} from "./dreaming-runbook";
 import { countTokens } from "./tokenizer";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type DreamingMode = "incremental" | "compact";
+export type DreamingMode = "incremental" | "compact" | "incremental-hygiene" | "incremental-content";
 
-type DreamingMutation =
-	| {
-			readonly op: "create_entity";
-			readonly name: string;
-			readonly type?: string;
-			readonly aspects?: ReadonlyArray<{
-				readonly name: string;
-				readonly attributes?: readonly string[];
-			}>;
-	  }
-	| {
-			readonly op: "merge_entities";
-			readonly source: readonly string[];
-			readonly target: string;
-			readonly reason?: string;
-	  }
-	| {
-			readonly op: "delete_entity";
-			readonly name: string;
-			readonly reason?: string;
-	  }
-	| {
-			readonly op: "update_aspect";
-			readonly entity: string;
-			readonly aspect: string;
-			readonly attributes: readonly string[];
-	  }
-	| {
-			readonly op: "delete_aspect";
-			readonly entity: string;
-			readonly aspect: string;
-			readonly reason?: string;
-	  }
-	| {
-			readonly op: "supersede_attribute";
-			readonly entity: string;
-			readonly aspect: string;
-			readonly old: string;
-			readonly new: string;
-	  }
-	| {
-			readonly op: "create_attribute";
-			readonly entity: string;
-			readonly aspect: string;
-			readonly content: string;
-	  }
-	| {
-			readonly op: "delete_attribute";
-			readonly entity: string;
-			readonly aspect: string;
-			readonly content: string;
-			readonly reason?: string;
-	  };
-
-export interface DreamingResult {
-	readonly mutations: readonly DreamingMutation[];
-	readonly summary: string;
-	readonly tokensConsumed: number;
-	/** Mutations discarded at parse time because they failed shape validation. */
-	readonly invalidMutations: number;
-}
+/**
+ * The focused runbook a scheduled pass follows (#1098): hygiene passes
+ * process the attention queue only, content passes ingest new evidence
+ * only. Combined modes ("incremental", "compact") keep the full runbook.
+ */
+export type DreamingPassFocus = "hygiene" | "content";
 
 export interface DreamingState {
-	readonly tokensSinceLastPass: number;
 	readonly consecutiveFailures: number;
+	readonly lastFailureAt: string | null;
 	readonly lastPassAt: string | null;
+	readonly evidenceCursor: EpisodicCursor | null;
 	readonly lastPassId: string | null;
 	readonly lastPassMode: string | null;
+}
+
+/** Queue bounded deterministic graph cleanup work for the next Dreaming pass. */
+export function enqueueDreamingHygieneAttention(accessor: DbAccessor, agentId: string, limit = 50): number {
+	return accessor.withWriteTx((db) => {
+		const candidates = getDreamingHygieneCandidatesInDb(db, { agentId, limit });
+		for (const candidate of candidates) {
+			enqueueDreamingAttentionInTx(db, {
+				agentId,
+				kind: "hygiene",
+				subjectRef: candidate.subjectRef,
+				details: candidate.details,
+				priority: candidate.priority,
+				reopen: false,
+			});
+		}
+		return candidates.length;
+	});
+}
+
+function parseEpisodicCursor(value: string | null): EpisodicCursor | null {
+	if (!value) return null;
+	try {
+		const parsed = JSON.parse(value) as {
+			capturedAt?: unknown;
+			kind?: unknown;
+			id?: unknown;
+			fragmentOffset?: unknown;
+		};
+		if (typeof parsed.capturedAt !== "string" || typeof parsed.id !== "string") return null;
+		if (
+			parsed.kind !== null &&
+			parsed.kind !== "memory" &&
+			parsed.kind !== "artifact" &&
+			parsed.kind !== "transcript" &&
+			parsed.kind !== "summary"
+		) {
+			return null;
+		}
+		const fragmentOffset =
+			typeof parsed.fragmentOffset === "number" &&
+			Number.isSafeInteger(parsed.fragmentOffset) &&
+			parsed.fragmentOffset > 0
+				? parsed.fragmentOffset
+				: undefined;
+		return {
+			capturedAt: parsed.capturedAt,
+			kind: parsed.kind ?? null,
+			id: parsed.id,
+			...(fragmentOffset ? { fragmentOffset } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
+
+/** Exported for cursor round-trip tests. */
+export function _testParseEpisodicCursor(value: string | null): EpisodicCursor | null {
+	return parseEpisodicCursor(value);
 }
 
 interface DreamingPassRow {
@@ -112,121 +146,165 @@ interface DreamingPassRow {
 	readonly error: string | null;
 }
 
-interface SessionSummaryRow {
+export interface DreamingToolCall {
 	readonly id: string;
-	readonly content: string;
-	readonly tokenCount: number;
-	readonly sessionKey: string | null;
-	readonly project: string | null;
-	readonly latestAt: string;
+	readonly passId: string;
+	readonly sequence: number;
+	readonly toolCallId: string | null;
+	readonly toolName: string;
+	readonly input: unknown;
+	readonly output: unknown;
+	readonly success: boolean;
+	readonly latencyMs: number;
+	readonly createdAt: string;
 }
 
-interface EntityRow {
-	readonly id: string;
-	readonly name: string;
-	readonly entityType: string;
-	readonly description: string | null;
+export interface DreamingEvidenceExclusion {
+	readonly sourceKind: EpisodicSourceRecord["kind"];
+	readonly sourceId: string;
+	readonly reason: string;
+	readonly passId: string;
+	readonly excludedAt: string;
+	readonly requeueRequestedAt: string | null;
+	readonly resolvedAt: string | null;
 }
 
-interface AspectRow {
-	readonly id: string;
-	readonly entityId: string;
-	readonly name: string;
-	readonly weight: number;
+export type { DreamingAttention } from "./dreaming-attention";
+
+/** Routed bounded-agent executor. The daemon creates the tools and owns all writes. */
+export interface DreamingAgentExecutor {
+	run(input: {
+		readonly passId: string;
+		readonly prompt: string;
+		readonly tools: ReturnType<typeof createDreamingAgentTools>;
+		readonly timeoutMs: number;
+		readonly maxTokens: number;
+	}): Promise<{ readonly summary?: string }>;
 }
 
-interface AttributeRow {
-	readonly id: string;
-	readonly aspectId: string;
-	readonly kind: string;
-	readonly content: string;
-	readonly status: string;
-	readonly importance: number;
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface DependencyRow {
-	readonly id: string;
-	readonly sourceEntityId: string;
-	readonly targetEntityId: string;
-	readonly dependencyType: string;
-	readonly strength: number;
-	readonly confidence: number;
-	readonly reason: string | null;
+function readNonEmptyString(value: unknown): string | null {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-export type LlmGenerateFn = (prompt: string, opts?: { timeoutMs?: number; maxTokens?: number }) => Promise<string>;
+/**
+ * Keep evidence cited by an agent operation that the daemon rejects. The
+ * agentic calls preserve this audit/requeue trail even when citation
+ * validation fails before the operation service can return per-item results.
+ */
+function rejectedAgentEvidence(
+	result: ApplyDreamingOperationsResult,
+	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
+	sources: readonly EpisodicSourceRecord[],
+): readonly EpisodicSourceRecord[] {
+	const rejectedIndexes = new Set<number>(result.items.filter((item) => !item.ok).map((item) => item.index));
+	const rejectedOperations =
+		rejectedIndexes.size > 0
+			? operations.filter((_operation, index) => rejectedIndexes.has(index))
+			: result.ok
+				? []
+				: operations;
+	const references = new Set<string>();
+	for (const operation of rejectedOperations) {
+		for (const evidence of operation.evidence ?? []) {
+			if (!isRecord(evidence)) continue;
+			const sourceRef = readNonEmptyString(evidence.source_ref);
+			if (sourceRef) references.add(sourceRef);
+		}
+	}
+	return sources.filter((source) => references.has(`${source.kind}:${source.id}`));
+}
+
+/** Recover cited sources when tool-schema validation rejects an operation before the apply seam runs. */
+function operationEvidenceFromToolInput(input: unknown): readonly Pick<DreamingOperationRequest, "evidence">[] {
+	if (!isRecord(input) || !Array.isArray(input.operations)) return [];
+	return input.operations.flatMap((operation) => {
+		if (!isRecord(operation) || !Array.isArray(operation.evidence)) return [];
+		return [{ evidence: operation.evidence }];
+	});
+}
 
 // ---------------------------------------------------------------------------
 // Dreaming state DB helpers
 // ---------------------------------------------------------------------------
 
-export function getDreamingState(accessor: DbAccessor, agentId: string): DreamingState {
-	return accessor.withReadDb((db) => {
-		const row = db
+function readDreamingState(db: ReadDb, agentId: string): DreamingState {
+	let row:
+		| {
+				consecutive_failures: number;
+				last_failure_at: string | null;
+				last_pass_at: string | null;
+				evidence_cursor: string | null;
+				last_pass_id: string | null;
+				last_pass_mode: string | null;
+		  }
+		| undefined;
+	try {
+		row = db
 			.prepare(
-				`SELECT tokens_since_last_pass, consecutive_failures,
-				        last_pass_at, last_pass_id, last_pass_mode
+				`SELECT consecutive_failures, last_failure_at,
+				        last_pass_at, evidence_cursor, last_pass_id, last_pass_mode
 				 FROM dreaming_state WHERE agent_id = ?`,
 			)
-			.get(agentId) as
-			| {
-					tokens_since_last_pass: number;
-					consecutive_failures: number;
-					last_pass_at: string | null;
-					last_pass_id: string | null;
-					last_pass_mode: string | null;
-			  }
-			| undefined;
-		if (!row) {
-			return { tokensSinceLastPass: 0, consecutiveFailures: 0, lastPassAt: null, lastPassId: null, lastPassMode: null };
-		}
+			.get(agentId) as typeof row;
+	} catch {
+		// The constellation can be read while an old workspace migrates.
+		row = undefined;
+	}
+	if (!row) {
 		return {
-			tokensSinceLastPass: row.tokens_since_last_pass,
-			consecutiveFailures: row.consecutive_failures,
-			lastPassAt: row.last_pass_at,
-			lastPassId: row.last_pass_id,
-			lastPassMode: row.last_pass_mode,
+			consecutiveFailures: 0,
+			lastFailureAt: null,
+			lastPassAt: null,
+			evidenceCursor: null,
+			lastPassId: null,
+			lastPassMode: null,
 		};
-	});
+	}
+	return {
+		consecutiveFailures: row.consecutive_failures,
+		lastFailureAt: row.last_failure_at,
+		lastPassAt: row.last_pass_at,
+		evidenceCursor: parseEpisodicCursor(row.evidence_cursor),
+		lastPassId: row.last_pass_id,
+		lastPassMode: row.last_pass_mode,
+	};
 }
 
-export function addDreamingTokens(accessor: DbAccessor, agentId: string, tokens: number): void {
-	accessor.withWriteTx((db) => {
-		const exists = db.prepare("SELECT 1 FROM dreaming_state WHERE agent_id = ?").get(agentId);
-		if (exists) {
-			db.prepare(
-				`UPDATE dreaming_state
-				 SET tokens_since_last_pass = tokens_since_last_pass + ?,
-				     updated_at = datetime('now')
-				 WHERE agent_id = ?`,
-			).run(tokens, agentId);
-		} else {
-			db.prepare(
-				`INSERT INTO dreaming_state (agent_id, tokens_since_last_pass)
-				 VALUES (?, ?)`,
-			).run(agentId, tokens);
-		}
-	});
+export function getDreamingState(accessor: DbAccessor, agentId: string): DreamingState {
+	return accessor.withReadDb((db) => readDreamingState(db, agentId));
 }
 
-function resetDreamingTokens(db: WriteDb, agentId: string, passId: string, mode: string): void {
+function resetDreamingTokens(
+	db: WriteDb,
+	agentId: string,
+	passId: string,
+	mode: string,
+	evidenceCursor: EpisodicCursor | null,
+	lastPassAt: string | null,
+): void {
 	const exists = db.prepare("SELECT 1 FROM dreaming_state WHERE agent_id = ?").get(agentId);
 	if (exists) {
 		db.prepare(
 			`UPDATE dreaming_state
-			 SET tokens_since_last_pass = 0,
-			     consecutive_failures = 0,
-			     last_pass_at = datetime('now'),
+			 SET consecutive_failures = 0,
+			     last_failure_at = NULL,
+			     last_pass_at = ?,
+			     evidence_cursor = ?,
 			     last_pass_id = ?,
 			     last_pass_mode = ?,
 			     updated_at = datetime('now')
 			 WHERE agent_id = ?`,
-		).run(passId, mode, agentId);
+		).run(lastPassAt, evidenceCursor === null ? null : JSON.stringify(evidenceCursor), passId, mode, agentId);
 	} else {
 		db.prepare(
-			`INSERT INTO dreaming_state (agent_id, tokens_since_last_pass, consecutive_failures, last_pass_at, last_pass_id, last_pass_mode)
-			 VALUES (?, 0, 0, datetime('now'), ?, ?)`,
-		).run(agentId, passId, mode);
+			`INSERT INTO dreaming_state
+			 (agent_id, consecutive_failures, last_failure_at, last_pass_at, evidence_cursor, last_pass_id, last_pass_mode)
+			 VALUES (?, 0, NULL, ?, ?, ?, ?)`,
+		).run(agentId, lastPassAt, evidenceCursor === null ? null : JSON.stringify(evidenceCursor), passId, mode);
 	}
 }
 
@@ -237,13 +315,14 @@ export function recordDreamingFailure(accessor: DbAccessor, agentId: string): vo
 			db.prepare(
 				`UPDATE dreaming_state
 				 SET consecutive_failures = consecutive_failures + 1,
+				     last_failure_at = datetime('now'),
 				     updated_at = datetime('now')
 				 WHERE agent_id = ?`,
 			).run(agentId);
 		} else {
 			db.prepare(
-				`INSERT INTO dreaming_state (agent_id, tokens_since_last_pass, consecutive_failures)
-				 VALUES (?, 0, 1)`,
+				`INSERT INTO dreaming_state (agent_id, tokens_since_last_pass, consecutive_failures, last_failure_at)
+				 VALUES (?, 0, 1, datetime('now'))`,
 			).run(agentId);
 		}
 	});
@@ -295,1056 +374,591 @@ export function getDreamingPasses(accessor: DbAccessor, agentId: string, limit =
 	});
 }
 
+const MAX_DREAMING_TOOL_TRACE_JSON_CHARS = 128_000;
+
+function serializeToolTrace(value: unknown): string {
+	let json: string | undefined;
+	try {
+		json = JSON.stringify(value);
+	} catch (error) {
+		return JSON.stringify({ serializationError: error instanceof Error ? error.message : String(error) });
+	}
+	if (json === undefined) return "null";
+	if (json.length <= MAX_DREAMING_TOOL_TRACE_JSON_CHARS) return json;
+	return JSON.stringify({
+		truncated: true,
+		originalChars: json.length,
+		preview: json.slice(0, MAX_DREAMING_TOOL_TRACE_JSON_CHARS),
+	});
+}
+
+function parseToolTrace(value: string): unknown {
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {
+		return { malformedTrace: true };
+	}
+}
+
+function recordDreamingToolCall(
+	accessor: DbAccessor,
+	agentId: string,
+	passId: string,
+	sequence: number,
+	trace: DreamingToolCallTrace,
+): void {
+	accessor.withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO dreaming_tool_calls
+			 (id, agent_id, pass_id, sequence, tool_call_id, tool_name, input_json, output_json, success, latency_ms)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			randomUUID(),
+			agentId,
+			passId,
+			sequence,
+			trace.toolCallId || null,
+			trace.tool,
+			serializeToolTrace(trace.input),
+			serializeToolTrace(trace.output),
+			trace.output.ok ? 1 : 0,
+			Math.max(0, Math.floor(trace.latencyMs)),
+		);
+	});
+}
+
+/** Return the Pi capability trace for one scoped Dreaming pass. */
+export function getDreamingToolCalls(
+	accessor: DbAccessor,
+	agentId: string,
+	passId: string,
+): readonly DreamingToolCall[] {
+	return accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT id, pass_id AS passId, sequence, tool_call_id AS toolCallId,
+				        tool_name AS toolName, input_json AS inputJson, output_json AS outputJson,
+				        success, latency_ms AS latencyMs, created_at AS createdAt
+				 FROM dreaming_tool_calls
+				 WHERE agent_id = ? AND pass_id = ?
+				 ORDER BY sequence ASC`,
+				)
+				.all(agentId, passId)
+				.map((row) => {
+					const typed = row as {
+						id: string;
+						passId: string;
+						sequence: number;
+						toolCallId: string | null;
+						toolName: string;
+						inputJson: string;
+						outputJson: string;
+						success: number;
+						latencyMs: number;
+						createdAt: string;
+					};
+					return {
+						id: typed.id,
+						passId: typed.passId,
+						sequence: typed.sequence,
+						toolCallId: typed.toolCallId,
+						toolName: typed.toolName,
+						input: parseToolTrace(typed.inputJson),
+						output: parseToolTrace(typed.outputJson),
+						success: typed.success === 1,
+						latencyMs: typed.latencyMs,
+						createdAt: typed.createdAt,
+					};
+				}) as DreamingToolCall[],
+	);
+}
+
+export function getDreamingEvidenceExclusions(
+	accessor: DbAccessor,
+	agentId: string,
+): readonly DreamingEvidenceExclusion[] {
+	return accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT source_kind AS sourceKind, source_id AS sourceId, reason,
+				        pass_id AS passId, excluded_at AS excludedAt,
+				        requeue_requested_at AS requeueRequestedAt, resolved_at AS resolvedAt
+				 FROM dreaming_evidence_exclusions
+				 WHERE agent_id = ? AND resolved_at IS NULL
+				 ORDER BY excluded_at DESC, source_kind ASC, source_id ASC`,
+				)
+				.all(agentId) as DreamingEvidenceExclusion[],
+	);
+}
+
+export function requestDreamingEvidenceRequeue(
+	accessor: DbAccessor,
+	agentId: string,
+	sourceKind: EpisodicSourceRecord["kind"],
+	sourceId: string,
+): boolean {
+	return accessor.withWriteTx((db) => {
+		const result = db
+			.prepare(
+				`UPDATE dreaming_evidence_exclusions
+				 SET requeue_requested_at = datetime('now')
+				 WHERE agent_id = ? AND source_kind = ? AND source_id = ? AND resolved_at IS NULL`,
+			)
+			.run(agentId, sourceKind, sourceId) as { changes: number };
+		if (result.changes === 0) return false;
+		enqueueDreamingAttentionInTx(db, {
+			agentId,
+			kind: "evidence_requeue",
+			subjectRef: `${sourceKind}:${sourceId}`,
+			details: { sourceKind, sourceId },
+			priority: 80,
+		});
+		return true;
+	});
+}
+
+function recordDreamingEvidenceExclusionsInTx(
+	db: WriteDb,
+	agentId: string,
+	passId: string,
+	sources: readonly EpisodicSourceRecord[],
+	reason: string,
+): void {
+	const statement = db.prepare(
+		`INSERT INTO dreaming_evidence_exclusions
+		 (agent_id, source_kind, source_id, reason, pass_id, excluded_at, requeue_requested_at, resolved_at)
+			 VALUES (?, ?, ?, ?, ?, datetime('now'), NULL, NULL)
+		 ON CONFLICT(agent_id, source_kind, source_id) DO UPDATE SET
+		   reason = excluded.reason,
+		   pass_id = excluded.pass_id,
+		   excluded_at = excluded.excluded_at,
+		   requeue_requested_at = NULL,
+		   resolved_at = NULL`,
+	);
+	for (const source of sources) statement.run(agentId, source.kind, source.id, reason, passId);
+}
+
+function resolveRequeuedEvidenceInTx(db: WriteDb, agentId: string, sources: readonly EpisodicSourceRecord[]): void {
+	const statement = db.prepare(
+		`UPDATE dreaming_evidence_exclusions
+		 SET resolved_at = datetime('now')
+		 WHERE agent_id = ? AND source_kind = ? AND source_id = ?
+		   AND requeue_requested_at IS NOT NULL AND resolved_at IS NULL`,
+	);
+	for (const source of sources) statement.run(agentId, source.kind, source.id);
+}
+
 // ---------------------------------------------------------------------------
 // Data fetching for prompt assembly
 // ---------------------------------------------------------------------------
 
-function fetchUnprocessedSummaries(
+function fetchEpisodicEvidence(
 	db: ReadDb,
 	agentId: string,
 	since: string | null,
 	limit: number,
-): readonly SessionSummaryRow[] {
-	const query = since
-		? `SELECT id, content, token_count AS tokenCount,
-		          session_key AS sessionKey, project,
-		          latest_at AS latestAt
-		   FROM session_summaries
-		   WHERE agent_id = ? AND depth = 0
-		     AND COALESCE(source_type, 'summary') = 'summary'
-		     AND latest_at > ?
-		   ORDER BY latest_at ASC
-		   LIMIT ?`
-		: `SELECT id, content, token_count AS tokenCount,
-		          session_key AS sessionKey, project,
-		          latest_at AS latestAt
-		   FROM session_summaries
-		   WHERE agent_id = ? AND depth = 0
-		     AND COALESCE(source_type, 'summary') = 'summary'
-		   ORDER BY latest_at ASC
-		   LIMIT ?`;
-	const args = since ? [agentId, since, limit] : [agentId, limit];
-	return db.prepare(query).all(...args) as SessionSummaryRow[];
-}
-
-function fetchEntityGraph(
-	db: ReadDb,
-	agentId: string,
-	limits?: { entities?: number; aspects?: number; attributes?: number; dependencies?: number },
-): {
-	entities: readonly EntityRow[];
-	aspects: readonly AspectRow[];
-	attributes: readonly AttributeRow[];
-	dependencies: readonly DependencyRow[];
-} {
-	const maxEntities = limits?.entities ?? 2000;
-	const maxAspects = limits?.aspects ?? 10_000;
-	const maxAttrs = limits?.attributes ?? 50_000;
-	const maxDeps = limits?.dependencies ?? 10_000;
-
-	const entities = db
-		.prepare(
-			`SELECT id, name, entity_type AS entityType, description
-			 FROM entities WHERE agent_id = ?
-			 ORDER BY mentions DESC, updated_at DESC
-			 LIMIT ?`,
-		)
-		.all(agentId, maxEntities) as EntityRow[];
-
-	const aspects = db
-		.prepare(
-			`SELECT ea.id, ea.entity_id AS entityId, ea.name, ea.weight
-			 FROM entity_aspects ea
-			 WHERE ea.agent_id = ?
-			 ORDER BY ea.weight DESC
-			 LIMIT ?`,
-		)
-		.all(agentId, maxAspects) as AspectRow[];
-
-	const attributes = db
-		.prepare(
-			`SELECT ea.id, ea.aspect_id AS aspectId, ea.kind, ea.content,
-			        ea.status, ea.importance
-			 FROM entity_attributes ea
-			 WHERE ea.agent_id = ? AND ea.status = 'active'
-			 ORDER BY ea.importance DESC
-			 LIMIT ?`,
-		)
-		.all(agentId, maxAttrs) as AttributeRow[];
-
-	const dependencies = db
-		.prepare(
-			`SELECT id, source_entity_id AS sourceEntityId,
-			        target_entity_id AS targetEntityId,
-			        dependency_type AS dependencyType,
-			        strength, confidence, reason
-			 FROM entity_dependencies
-			 WHERE agent_id = ?
-			 LIMIT ?`,
-		)
-		.all(agentId, maxDeps) as DependencyRow[];
-
-	return { entities, aspects, attributes, dependencies };
-}
-
-/** Log when any graph query hit its row cap — signals incomplete data. */
-function warnIfTruncated(
-	graph: ReturnType<typeof fetchEntityGraph>,
-	limits: { entities?: number; aspects?: number; attributes?: number; dependencies?: number },
-): void {
-	const truncated: string[] = [];
-	if (graph.entities.length >= (limits.entities ?? 2000)) truncated.push(`entities(${graph.entities.length})`);
-	if (graph.aspects.length >= (limits.aspects ?? 10_000)) truncated.push(`aspects(${graph.aspects.length})`);
-	if (graph.attributes.length >= (limits.attributes ?? 50_000))
-		truncated.push(`attributes(${graph.attributes.length})`);
-	if (graph.dependencies.length >= (limits.dependencies ?? 10_000))
-		truncated.push(`dependencies(${graph.dependencies.length})`);
-	if (truncated.length > 0) {
-		logger.warn("dreaming", "Entity graph truncated by row limits — dreaming pass will operate on a partial snapshot", {
-			truncated,
-		});
-	}
+	cursor: EpisodicCursor | null,
+): readonly EpisodicSourceRecord[] {
+	const sources = readRecentEpisodicSources(db, agentId, limit, undefined, since, "oldest", cursor);
+	if (!cursor?.fragmentOffset || cursor.kind === null) return sources;
+	const resumed = readEpisodicSource(db, { agentId, from: `${cursor.kind}:${cursor.id}` });
+	if (!resumed) return sources;
+	return [resumed, ...sources.filter((source) => source.kind !== resumed.kind || source.id !== resumed.id)].slice(
+		0,
+		limit,
+	);
 }
 
 // ---------------------------------------------------------------------------
 // Prompt construction
 // ---------------------------------------------------------------------------
 
-function readIdentityFile(dir: string, entry: IdentityContextFileEntry): string {
+interface RenderedIdentityBlock {
+	readonly content: string;
+	readonly unreadablePaths: readonly string[];
+}
+
+function readIdentityFile(
+	dir: string,
+	entry: IdentityContextFileEntry,
+): { readonly content: string; readonly unreadable: boolean } {
+	const path = join(dir, entry.path);
+	// Identity files are optional context. A missing file is ordinary, not a
+	// degraded pass or a reason to fill the daemon logs every five minutes.
+	if (!existsSync(path)) return { content: "", unreadable: false };
 	try {
-		const raw = readFileSync(join(dir, entry.path), "utf-8").trim();
-		if (!raw) return "";
+		const raw = readFileSync(path, "utf-8").trim();
+		if (!raw) return { content: "", unreadable: false };
 		const budget = entry.budget ?? 4_000;
-		return raw.length <= budget ? raw : `${raw.slice(0, budget)}\n[truncated]`;
+		return {
+			content: raw.length <= budget ? raw : `${raw.slice(0, budget)}\n[truncated]`,
+			unreadable: false,
+		};
 	} catch (err) {
 		logger.warn("dreaming", "Could not read identity file", { name: entry.path, error: String(err) });
-		return "";
+		return { content: "", unreadable: true };
 	}
 }
-
-function renderIdentityBlock(dir: string, entries: readonly IdentityContextFileEntry[]): string {
-	return entries
-		.map((entry) => {
-			const content = readIdentityFile(dir, entry);
-			return content ? `## ${entry.role ?? entry.path}\n\n${content}` : "";
-		})
-		.filter((s) => s.length > 0)
-		.join("\n\n---\n\n");
-}
-
-function buildDreamingPrompt(
-	mode: DreamingMode,
-	summaries: readonly SessionSummaryRow[],
-	graph: ReturnType<typeof fetchEntityGraph>,
-	agentsDir: string,
-	maxTokens: number,
-): string {
-	const startupEntries = resolveStartupIdentityFiles(agentsDir);
-	const startupMemoryEntry = startupEntries.find((entry) => entry.path.split(/[\\/]/).pop() === "MEMORY.md");
-	const identity = renderIdentityBlock(
-		agentsDir,
-		startupEntries.filter((entry) => entry !== startupMemoryEntry),
-	);
-	const dreamingPrompt = renderIdentityBlock(agentsDir, resolveSpecialIdentityFiles(agentsDir, "dreaming"));
-	const memoryMd = startupMemoryEntry ? readIdentityFile(agentsDir, startupMemoryEntry) : "";
-
-	// Build graph snapshot
-	const entityMap = new Map(graph.entities.map((e) => [e.id, e]));
-	const aspectsByEntity = new Map<string, AspectRow[]>();
-	for (const a of graph.aspects) {
-		const list = aspectsByEntity.get(a.entityId) ?? [];
-		list.push(a);
-		aspectsByEntity.set(a.entityId, list);
-	}
-	const attrsByAspect = new Map<string, AttributeRow[]>();
-	for (const a of graph.attributes) {
-		const list = attrsByAspect.get(a.aspectId) ?? [];
-		list.push(a);
-		attrsByAspect.set(a.aspectId, list);
-	}
-
-	let graphText = "";
-	// Character budget for graph section: ~30% of token budget (~4 chars/token)
-	const graphBudget = Math.floor(maxTokens * 0.3 * 4);
-	for (const entity of graph.entities) {
-		const entityHeader = `\n## ${entity.name} (${entity.entityType})${entity.description ? `\n${entity.description}` : ""}`;
-		if (graphText.length + entityHeader.length > graphBudget) break;
-		graphText += entityHeader;
-		const aspects = aspectsByEntity.get(entity.id) ?? [];
-		for (const aspect of aspects) {
-			const aspectLine = `\n### ${aspect.name} (weight: ${aspect.weight.toFixed(2)})`;
-			if (graphText.length + aspectLine.length > graphBudget) break;
-			graphText += aspectLine;
-			const attrs = attrsByAspect.get(aspect.id) ?? [];
-			for (const attr of attrs) {
-				const tag = attr.kind === "constraint" ? " [CONSTRAINT]" : "";
-				const attrLine = `\n- ${attr.content}${tag}`;
-				if (graphText.length + attrLine.length > graphBudget) break;
-				graphText += attrLine;
-			}
-		}
-		graphText += "\n";
-	}
-
-	let depText = "";
-	const depBudget = Math.floor(maxTokens * 0.05 * 4); // ~5% for dependencies
-	for (const dep of graph.dependencies) {
-		const src = entityMap.get(dep.sourceEntityId)?.name ?? dep.sourceEntityId;
-		const tgt = entityMap.get(dep.targetEntityId)?.name ?? dep.targetEntityId;
-		const line = `\n- ${src} --[${dep.dependencyType}]--> ${tgt} (strength: ${dep.strength.toFixed(2)}, confidence: ${dep.confidence.toFixed(2)})`;
-		if (depText.length + line.length > depBudget) break;
-		depText += line;
-	}
-
-	let summaryText = "";
-	// Rough token budget: reserve ~30% for graph, ~10% for identity/instructions
-	const summaryBudget = Math.floor(maxTokens * 0.6 * 4); // chars (~4 chars/token)
-	let usedChars = 0;
-	for (const s of summaries) {
-		if (usedChars + s.content.length > summaryBudget) break;
-		summaryText += `\n### Session (${s.latestAt})${s.project ? ` — ${s.project}` : ""}\n${s.content}\n`;
-		usedChars += s.content.length;
-	}
-
-	const modeInstructions =
-		mode === "compact"
-			? `You are running in COMPACTION mode. Focus on cleaning up the existing graph:
-- Merge duplicate and near-duplicate entities (possessive forms, markdown artifacts, abbreviations of the same thing)
-- Delete junk entities (fragments, markdown artifacts, truncated names)
-- Prune meaningless or broken attributes
-- Collapse redundant aspects
-- Strengthen the graph structure by consolidating where possible`
-			: `You are running in INCREMENTAL mode. Focus on integrating new session learnings:
-- Create new entities for significant concepts, people, or projects mentioned in the sessions
-- Update existing entity attributes with new information
-- Merge any duplicates you notice
-- Supersede outdated attributes with newer facts
-- Delete attributes that are clearly wrong or outdated
-- Add meaningful relationships between entities`;
-
-	return `<identity>
-${identity}
-</identity>
-
-<working_memory>
-${memoryMd}
-</working_memory>
-
-${dreamingPrompt ? `<dreaming_prompt>\n${dreamingPrompt}\n</dreaming_prompt>\n\n` : ""}<task>
-You are taking time to reflect on ${mode === "compact" ? "your knowledge graph" : "your recent sessions"} and consolidate your memory.
-
-${modeInstructions}
-
-Guidelines:
-- Constraints (attributes marked [CONSTRAINT]) are important decisions — do NOT delete them unless they are genuinely wrong
-- Prefer merging over deleting when entities represent the same concept
-- Keep entity names clean and consistent (no markdown formatting, no possessive forms as separate entities)
-- When merging, pick the best canonical name as the target
-- Provide clear reasons for all deletions and merges
-- Be conservative — only change what you're confident about
-- "update_aspect" is ADDITIVE — it adds new attributes to an aspect without removing existing ones. To replace a stale attribute, use "supersede_attribute" instead
-- "delete_attribute" soft-deletes a single attribute (auditable, recoverable). "delete_aspect" hard-deletes the entire aspect and all its attributes permanently — use only when the whole aspect is no longer meaningful
-</task>
-
-${summaryText ? `<recent_sessions>\n${summaryText}\n</recent_sessions>` : ""}
-
-<knowledge_graph>
-${graphText}
-
-### Entity Relationships
-${depText || "(no relationships yet)"}
-</knowledge_graph>
-
-Respond with ONLY a JSON object in this exact format (no markdown code fences, no other text):
-
-{
-  "mutations": [
-    { "op": "create_entity", "name": "...", "type": "person|project|system|tool|concept|skill|task", "aspects": [{"name": "...", "attributes": ["..."]}] },
-    { "op": "merge_entities", "source": ["entity name 1", "entity name 2"], "target": "canonical name", "reason": "..." },
-    { "op": "delete_entity", "name": "...", "reason": "..." },
-    { "op": "update_aspect", "entity": "...", "aspect": "...", "attributes": ["attribute to add 1", "attribute to add 2"] },
-    { "op": "delete_aspect", "entity": "...", "aspect": "...", "reason": "..." },
-    { "op": "supersede_attribute", "entity": "...", "aspect": "...", "old": "old content", "new": "new content" },
-    { "op": "create_attribute", "entity": "...", "aspect": "...", "content": "..." },
-    { "op": "delete_attribute", "entity": "...", "aspect": "...", "content": "...", "reason": "..." }
-  ],
-  "summary": "Brief description of what you changed and why"
-}`;
-}
-
-// ---------------------------------------------------------------------------
-// Mutation validation — narrows unknown LLM output to typed DreamingMutation
-// ---------------------------------------------------------------------------
-
-const MUTATION_OPS = new Set([
-	"create_entity",
-	"merge_entities",
-	"delete_entity",
-	"update_aspect",
-	"delete_aspect",
-	"supersede_attribute",
-	"create_attribute",
-	"delete_attribute",
-] as const);
-
-function isValidMutation(v: unknown): v is DreamingMutation {
-	if (typeof v !== "object" || v === null) return false;
-	const obj = v as Record<string, unknown>;
-	if (typeof obj.op !== "string" || !MUTATION_OPS.has(obj.op as DreamingMutation["op"])) return false;
-	switch (obj.op) {
-		case "create_entity":
-			return typeof obj.name === "string";
-		case "merge_entities":
-			return Array.isArray(obj.source) && typeof obj.target === "string";
-		case "delete_entity":
-			return typeof obj.name === "string";
-		case "update_aspect":
-			return typeof obj.entity === "string" && typeof obj.aspect === "string" && Array.isArray(obj.attributes);
-		case "delete_aspect":
-			return typeof obj.entity === "string" && typeof obj.aspect === "string";
-		case "supersede_attribute":
-			return (
-				typeof obj.entity === "string" &&
-				typeof obj.aspect === "string" &&
-				typeof obj.old === "string" &&
-				typeof obj.new === "string"
-			);
-		case "create_attribute":
-			return typeof obj.entity === "string" && typeof obj.aspect === "string" && typeof obj.content === "string";
-		case "delete_attribute":
-			return typeof obj.entity === "string" && typeof obj.aspect === "string" && typeof obj.content === "string";
-		default:
-			return false;
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Mutation execution
-// ---------------------------------------------------------------------------
 
 /**
- * Insert a single attribute row under `aspectId`, deduplicating by
- * `normalizedContent`.  Shared by all mutation handlers that create
- * attributes so the column list only lives in one place.
+ * The Dreaming agent's complete fixed prompt. No identity files, no working
+ * memory, no injected evidence window: the agent drives everything through the
+ * tool surface (attention_list, search_evidence, runbook_read) following this
+ * process contract. Hardcoded so users cannot accidentally mutate the process.
  */
-function insertAttr(
-	db: WriteDb,
-	aspectId: string,
-	agentId: string,
-	content: string,
-	normalized: string,
-	kind = "attribute",
-	confidence = 0.8,
-	importance = 0.5,
-): string {
-	const id = randomUUID();
-	db.prepare(
-		`INSERT INTO entity_attributes
-		 (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
-	).run(id, aspectId, agentId, kind, content, normalized, confidence, importance);
-	return id;
+export const DREAMING_AGENT_PROMPT = `You are a bounded Signet maintenance agent. Your task is to maintain durable, evidence-cited semantic understanding as the relevant entities, relationships, and claims change over time. Attach each claim to its entity and aspect rather than allowing it to exist as standalone.
+
+## Process
+
+Purpose: maintain durable, evidence-cited semantic understanding in the knowledge graph. The graph is a derived structure; every write carries provenance (an attention id for hygiene, an exact quote from episodic evidence for content). Use the pass log (runbook_read) as the dedup source: the previous pass's viewed sources and changes are the cutoff.
+
+An install may have several agent scopes (listed in <agent_scopes> when there is more than one): the scoped tools take an agentId, so address any scope you need — each write is attributed to the agent you name. attention_list without an agentId lists the whole install's hygiene queue, with each record carrying its owning agentId.
+
+### State targets
+
+- Hygiene queue: dreaming_attention pending records (kind=hygiene)
+- Graph: entities, aspects, claims, links (active/archived/pinned)
+- Evidence: episodic store (memories, artifacts, transcripts, summaries)
+- Pass log: dreaming_passes + runbook notes (what changed, what was viewed)
+
+### Per-pass process
+
+1. Read the pass log (runbook_read). Establish cutoff: sources viewed, changes applied, deferred items.
+2. Query the attention queue (attention_list, kind=hygiene, status=pending). Process ALL pending hygiene records first, before any content work:
+   - Inspect the flagged target (get_entity — check aspects, claims, pinned).
+   - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
+   - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
+3. Only when the hygiene queue is clear: find new evidence since the cutoff. First LIST recent sources with search_evidence — pass since and omit the query so it returns the newest sources; only after seeing what is there, narrow with a query if the list is large. For each new source:
+   - search_entities for subjects it establishes.
+   - Extract/update claims with exact-quote evidence from that source. The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
+   - create_entity only for durable subjects clearly established by the source.
+   - Validate before writing (validate_proposal).
+4. Write the pass log (runbook_write): what changed, which sources were viewed, anything deferred with exact names.
+
+### Safe
+
+- Archive attention-flagged entities that are non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps).
+- Merge exact-canonical duplicates (same canonical name, same scope).
+- Add/set/supersede claims with exact quotes from an episodic source.
+- Create entities for durable subjects the source clearly establishes.
+- Rename/update entities only with evidence.
+
+### Unsafe
+
+- Archive any entity with active aspects/claims.
+- Merge entities across agent scopes.
+- Any write without provenance: hygiene ops need an attention id; content ops need an exact quote.
+- Claims without exact quotes, or relationships the source does not state.
+- Touch pinned entities, source-root entities, or topology entities.
+- Rewrite existing claims without evidence that supersedes them.
+
+### Verification (before finishing)
+
+- Every write in the batch has valid provenance.
+- Hygiene queue is drained, or remaining records are explicitly deferred with reasons in the pass log.
+- Pass log written with sources viewed + changes applied (this is the next pass's dedup).
+- No flag left unresolved for a target you archived.
+- No writes attempted against pinned or source-root entities.
+`;
+
+/**
+ * The fixed prompt for a hygiene-only pass (#1098): the attention-queue
+ * runbook (combined-process steps 1-2 + 4). Content maintenance is out of
+ * scope — content passes own it, so a hygiene pass spends its whole budget
+ * on the queue instead of running out before step 3.
+ */
+export const DREAMING_HYGIENE_AGENT_PROMPT = `You are a bounded Signet maintenance agent. Your task is to maintain durable, evidence-cited semantic understanding as the relevant entities, relationships, and claims change over time. Attach each claim to its entity and aspect rather than allowing it to exist as standalone.
+
+## Process
+
+Purpose: maintain durable, evidence-cited semantic understanding in the knowledge graph. This is a HYGIENE pass: process the attention queue — inspect flagged targets and archive or merge them with attention provenance, minting flags for junk the queue missed. Content maintenance (claims, entities) belongs to content passes, which cite exact quotes from episodic evidence. Use the pass log (runbook_read) as the dedup source: the previous pass's changes are the cutoff.
+
+An install may have several agent scopes (listed in <agent_scopes> when there is more than one): the scoped tools take an agentId, so address any scope you need — each write is attributed to the agent you name. attention_list without an agentId lists the whole install's hygiene queue, with each record carrying its owning agentId.
+
+### State targets
+
+- Hygiene queue: dreaming_attention pending records (kind=hygiene)
+- Graph: entities, aspects, claims, links (active/archived/pinned)
+- Pass log: dreaming_passes + runbook notes (what changed, what was viewed)
+
+### Per-pass process
+
+1. Read the pass log (runbook_read). Establish cutoff: sources viewed, changes applied, deferred items.
+2. Query the attention queue (attention_list, kind=hygiene, status=pending). Process ALL pending hygiene records:
+   - Inspect the flagged target (get_entity — check aspects, claims, pinned).
+   - Archive or merge it, citing its attention id (provenance: "attention:<uuid>", or attention:$<index> for a flag you minted in the same batch).
+   - If you discover junk the queue did not flag, mint a flag op and archive in the same batch.
+3. Write the pass log (runbook_write): what changed, any flags left for a later pass, anything deferred with exact names.
+
+### Safe
+
+- Archive attention-flagged entities that are non-concrete (zero active aspects/claims, non-concrete type, legacy-only deps).
+- Merge exact-canonical duplicates (same canonical name, same scope).
+
+### Unsafe
+
+- Archive any entity with active aspects/claims.
+- Merge entities across agent scopes.
+- Any write without provenance: hygiene ops need an attention id.
+- Content writes: claims and entities need exact-quote citations from episodic evidence and belong to content passes.
+- Touch pinned entities, source-root entities, or topology entities.
+
+### Verification (before finishing)
+
+- Every write in the batch carries attention provenance.
+- Hygiene queue is drained, or remaining records are explicitly deferred with reasons in the pass log.
+- Pass log written with changes applied (this is the next pass's dedup).
+- No flag left unresolved for a target you archived.
+- No writes attempted against pinned or source-root entities.
+`;
+
+/**
+ * The fixed prompt for a content-only pass (#1098): the evidence runbook
+ * (combined-process steps 1, 3, 4). Hygiene archives are out of scope —
+ * hygiene passes own the attention queue, so a content pass spends its
+ * whole budget ingesting new evidence instead of being crowded out.
+ */
+export const DREAMING_CONTENT_AGENT_PROMPT = `You are a bounded Signet maintenance agent. Your task is to maintain durable, evidence-cited semantic understanding as the relevant entities, relationships, and claims change over time. Attach each claim to its entity and aspect rather than allowing it to exist as standalone.
+
+## Process
+
+Purpose: maintain durable, evidence-cited semantic understanding in the knowledge graph. This is a CONTENT pass: find new evidence since the cutoff and extract/update claims with exact-quote citations, creating entities for durable subjects. Hygiene archives/merges belong to hygiene passes, which process the attention queue. Use the pass log (runbook_read) as the dedup source: the previous pass's viewed sources and changes are the cutoff.
+
+An install may have several agent scopes (listed in <agent_scopes> when there is more than one): the scoped tools take an agentId, so address any scope you need — each write is attributed to the agent you name. attention_list without an agentId lists the whole install's hygiene queue, with each record carrying its owning agentId.
+
+### State targets
+
+- Graph: entities, aspects, claims, links (active/archived/pinned)
+- Evidence: episodic store (memories, artifacts, transcripts, summaries)
+- Pass log: dreaming_passes + runbook notes (what changed, what was viewed)
+
+### Per-pass process
+
+1. Read the pass log (runbook_read). Establish cutoff: sources viewed, changes applied, deferred items.
+2. Find new evidence since the cutoff. First LIST recent sources with search_evidence — pass since and omit the query so it returns the newest sources; only after seeing what is there, narrow with a query if the list is large. For each new source:
+   - search_entities for subjects it establishes.
+   - Extract/update claims with exact-quote evidence from that source. The evidence source and the graph target must use the same agent scope: search evidence with the agentId of the entity you will update, then pass that same agentId to apply_ontology_ops. A source found in another scope cannot support a write here.
+   - create_entity only for durable subjects clearly established by the source.
+   - Validate before writing (validate_proposal).
+3. Write the pass log (runbook_write): what changed, which sources were viewed, anything deferred with exact names.
+
+### Safe
+
+- Add/set/supersede claims with exact quotes from an episodic source.
+- Create entities for durable subjects the source clearly establishes.
+- Rename/update entities only with evidence.
+
+### Unsafe
+
+- Any write without provenance: content ops need an exact quote.
+- Claims without exact quotes, or relationships the source does not state.
+- Hygiene archives/merges: they need attention records, which hygiene passes process.
+- Touch pinned entities, source-root entities, or topology entities.
+- Rewrite existing claims without evidence that supersedes them.
+
+### Verification (before finishing)
+
+- Every write in the batch cites an exact quote from episodic evidence in the same agent scope as the graph target.
+- Pass log written with sources viewed + changes applied (this is the next pass's dedup).
+- No claims without exact quotes, no relationships the source does not state.
+- No writes attempted against pinned or source-root entities.
+`;
+
+/** The fixed prompt contract for a pass mode: focused modes get their runbook, combined modes keep the full one. */
+export function dreamingPromptForMode(mode: DreamingMode): string {
+	if (mode === "incremental-hygiene") return DREAMING_HYGIENE_AGENT_PROMPT;
+	if (mode === "incremental-content") return DREAMING_CONTENT_AGENT_PROMPT;
+	return DREAMING_AGENT_PROMPT;
 }
 
-function parseDreamingResult(raw: string): DreamingResult {
-	const cleaned = raw.trim();
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(cleaned);
-	} catch (rawParseError) {
-		for (const candidate of extractBalancedJsonObjects(cleaned)) {
-			try {
-				parsed = JSON.parse(candidate);
-				break;
-			} catch {
-				// Keep scanning: prose may contain braces before the response object.
-			}
-		}
-		if (parsed === undefined) throw rawParseError;
+/** The focused runbook a pass mode follows, or null for the combined modes. */
+export function dreamingFocusOfMode(mode: DreamingMode): DreamingPassFocus | null {
+	if (mode === "incremental-hygiene") return "hygiene";
+	if (mode === "incremental-content") return "content";
+	return null;
+}
+
+/**
+ * Whether a pass mode consumes episodic evidence. A hygiene pass processes
+ * only the attention queue, so it must not advance the evidence watermark;
+ * every other mode reads evidence and resets the queue to pass start.
+ */
+function dreamingModeAdvancesEvidence(mode: DreamingMode): boolean {
+	return mode !== "incremental-hygiene";
+}
+
+/**
+ * The early-exit contract for a pass mode (#1098): a pass exits without
+ * invoking the agent when its own work is empty — hygiene on an empty
+ * attention queue, content on an empty episodic backlog. Combined modes
+ * exit only when both are empty; compact never early-exits.
+ */
+export function dreamingEarlyExitSummary(
+	mode: DreamingMode,
+	hasPendingAttention: boolean,
+	totalBacklog: number,
+): string | null {
+	if (mode === "incremental-hygiene") return hasPendingAttention ? null : "No hygiene attention to process";
+	if (mode === "incremental-content") return totalBacklog === 0 ? "No new episodic evidence to process" : null;
+	if (mode === "incremental") {
+		return !hasPendingAttention && totalBacklog === 0
+			? "No new episodic evidence or semantic attention to process"
+			: null;
 	}
+	return null; // compact never early-exits
+}
 
-	const result = parsed as {
-		mutations?: unknown[];
-		summary?: string;
-	};
-	const all = Array.isArray(result.mutations) ? result.mutations : [];
-	const mutations = all.filter(isValidMutation);
-	const invalidMutations = all.length - mutations.length;
-	if (invalidMutations > 0) {
-		logger.warn("dreaming", "LLM response contained invalid mutations — discarded", {
-			count: invalidMutations,
-			sample: all
-				.filter((m) => !isValidMutation(m))
-				.slice(0, 3)
-				.map((m) => JSON.stringify(m).slice(0, 120)),
-		});
+/**
+ * Which runbook the next scheduled pass gets. When both hygiene and content
+ * work are pending, the worker alternates (hygiene → content → hygiene → …)
+ * so content gets a guaranteed turn even while the hygiene queue refills
+ * faster than passes drain it (#1098). When only one kind of work is
+ * pending, run that kind directly so no pass is spent on an empty runbook.
+ */
+export function selectDreamingPassMode(
+	lastScheduled: DreamingPassFocus | null,
+	hasPendingAttention: boolean,
+	hasBacklog: boolean,
+): DreamingMode {
+	if (hasPendingAttention && hasBacklog) {
+		// Tie: alternate so content gets a guaranteed turn even while the
+		// hygiene queue stays full, starting the cycle at hygiene.
+		return lastScheduled === "hygiene" ? "incremental-content" : "incremental-hygiene";
 	}
-	return {
-		mutations,
-		summary: typeof result.summary === "string" ? result.summary : "No summary provided",
-		tokensConsumed: countTokens(raw),
-		invalidMutations,
-	};
-}
-
-function applyMutations(
-	db: WriteDb,
-	agentId: string,
-	mutations: readonly DreamingMutation[],
-): { applied: number; skipped: number; failed: number; errors: readonly string[] } {
-	let applied = 0;
-	let skipped = 0;
-	let failed = 0;
-	const errors: string[] = [];
-
-	for (const mut of mutations) {
-		try {
-			// merge_entities returns a rich { applied, skipped } object because
-			// a single mutation can have mixed pinned/non-pinned sources — both
-			// counters must be updated to reflect the full picture.
-			if (mut.op === "merge_entities") {
-				const r = applyMergeEntities(db, agentId, mut);
-				applied += r.applied;
-				skipped += r.skipped;
-				continue;
-			}
-			const result = (() => {
-				switch (mut.op) {
-					case "create_entity":
-						return applyCreateEntity(db, agentId, mut);
-					case "delete_entity":
-						return applyDeleteEntity(db, agentId, mut);
-					case "update_aspect":
-						return applyUpdateAspect(db, agentId, mut);
-					case "delete_aspect":
-						return applyDeleteAspect(db, agentId, mut);
-					case "supersede_attribute":
-						return applySupersede(db, agentId, mut);
-					case "create_attribute":
-						return applyCreateAttribute(db, agentId, mut);
-					case "delete_attribute":
-						return applyDeleteAttribute(db, agentId, mut);
-					default: {
-						const _exhaustive: never = mut;
-						void _exhaustive;
-						errors.push("Unknown mutation op");
-						failed++;
-						return undefined;
-					}
-				}
-			})();
-			if (result === undefined) continue;
-			if (result === "skipped") {
-				skipped++;
-			} else {
-				applied++;
-			}
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			errors.push(`${mut.op} failed: ${msg}`);
-			failed++;
-		}
-	}
-
-	return { applied, skipped, failed, errors };
-}
-
-function resolveEntity(db: WriteDb | ReadDb, agentId: string, name: string): string | null {
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	const row = db
-		.prepare(
-			`SELECT id FROM entities
-			 WHERE agent_id = ?
-			   AND (COALESCE(canonical_name, LOWER(name)) = ? OR LOWER(name) = ?)
-			 LIMIT 1`,
-		)
-		.get(agentId, canonical, canonical) as { id: string } | undefined;
-	return row?.id ?? null;
-}
-
-function resolveOrCreateEntity(db: WriteDb, agentId: string, name: string, type = "unknown"): string {
-	const existing = resolveEntity(db, agentId, name);
-	if (existing) return existing;
-	const id = randomUUID();
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	db.prepare(
-		`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))`,
-	).run(id, name.trim(), canonical, type, agentId);
-	return id;
-}
-
-function resolveAspect(db: WriteDb | ReadDb, entityId: string, agentId: string, name: string): string | null {
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	const row = db
-		.prepare(
-			`SELECT id FROM entity_aspects
-			 WHERE entity_id = ? AND agent_id = ? AND canonical_name = ?
-			 LIMIT 1`,
-		)
-		.get(entityId, agentId, canonical) as { id: string } | undefined;
-	return row?.id ?? null;
-}
-
-function resolveOrCreateAspect(db: WriteDb, entityId: string, agentId: string, name: string): string {
-	const existing = resolveAspect(db, entityId, agentId, name);
-	if (existing) return existing;
-	const id = randomUUID();
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	db.prepare(
-		`INSERT INTO entity_aspects (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 0.5, datetime('now'), datetime('now'))`,
-	).run(id, entityId, agentId, name.trim(), canonical);
-	return id;
-}
-
-function applyCreateEntity(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "create_entity" },
-): "applied" | "skipped" {
-	if (!mut.name) return "skipped";
-	const entityId = resolveOrCreateEntity(db, agentId, mut.name, mut.type ?? "unknown");
-	if (!mut.aspects) return "applied";
-	for (const aspect of mut.aspects) {
-		const aspectId = resolveOrCreateAspect(db, entityId, agentId, aspect.name);
-		for (const content of aspect.attributes ?? []) {
-			if (!content || content.trim().length < 5) continue;
-			const normalized = content.trim().toLowerCase();
-			const exists = db
-				.prepare(
-					`SELECT 1 FROM entity_attributes
-					 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ?`,
-				)
-				.get(aspectId, agentId, normalized);
-			if (!exists) {
-				insertAttr(db, aspectId, agentId, content.trim(), normalized);
-			}
-		}
-	}
-	return "applied";
-}
-
-function applyMergeEntities(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "merge_entities" },
-): { applied: number; skipped: number } {
-	if (!mut.source || !mut.target || mut.source.length === 0) return { applied: 0, skipped: 1 };
-
-	// Resolve target — do NOT create; if the target doesn't exist, skip
-	const targetId = resolveEntity(db, agentId, mut.target);
-	if (!targetId) {
-		logger.warn("dreaming", `Merge target "${mut.target}" not found, skipping`);
-		return { applied: 0, skipped: 1 };
-	}
-
-	let merged = 0;
-	let pinnedSkipped = 0;
-	for (const src of mut.source) {
-		const srcId = resolveEntity(db, agentId, src);
-		if (!srcId || srcId === targetId) continue;
-
-		// Don't consume a pinned entity as a merge source — same invariant as delete
-		const srcRow = db.prepare("SELECT pinned FROM entities WHERE id = ? AND agent_id = ?").get(srcId, agentId) as
-			| { pinned: number }
-			| undefined;
-		if (srcRow?.pinned === 1) {
-			logger.warn("dreaming", `Merge source "${src}" is pinned, skipping`);
-			pinnedSkipped++;
-			continue;
-		}
-		merged++;
-
-		// Move non-colliding aspects to target
-		db.prepare(
-			`UPDATE entity_aspects SET entity_id = ?, updated_at = datetime('now')
-			 WHERE entity_id = ? AND agent_id = ?
-			   AND canonical_name NOT IN (
-			     SELECT canonical_name FROM entity_aspects WHERE entity_id = ? AND agent_id = ?
-			   )`,
-		).run(targetId, srcId, agentId, targetId, agentId);
-
-		// For colliding aspects (same canonical_name on both entities),
-		// copy active attributes from the source aspect into the target aspect
-		// so they aren't lost in the cascade delete below.
-		const collidingSourceAspects = db
-			.prepare(
-				`SELECT sa.id AS srcAspectId, ta.id AS tgtAspectId
-				 FROM entity_aspects sa
-				 JOIN entity_aspects ta
-				   ON ta.entity_id = ? AND ta.agent_id = ? AND ta.canonical_name = sa.canonical_name
-				 WHERE sa.entity_id = ? AND sa.agent_id = ?`,
-			)
-			.all(targetId, agentId, srcId, agentId) as Array<{ srcAspectId: string; tgtAspectId: string }>;
-
-		for (const { srcAspectId, tgtAspectId } of collidingSourceAspects) {
-			// Copy active attributes that don't already exist on the target aspect
-			const srcAttrs = db
-				.prepare(
-					`SELECT content, normalized_content, kind, confidence, importance
-					 FROM entity_attributes
-					 WHERE aspect_id = ? AND agent_id = ? AND status = 'active'`,
-				)
-				.all(srcAspectId, agentId) as Array<{
-				content: string;
-				normalized_content: string;
-				kind: string;
-				confidence: number;
-				importance: number;
-			}>;
-			for (const attr of srcAttrs) {
-				const exists = db
-					.prepare(
-						`SELECT 1 FROM entity_attributes
-						 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ?`,
-					)
-					.get(tgtAspectId, agentId, attr.normalized_content);
-				if (!exists) {
-					insertAttr(
-						db,
-						tgtAspectId,
-						agentId,
-						attr.content,
-						attr.normalized_content,
-						attr.kind,
-						attr.confidence,
-						attr.importance,
-					);
-				}
-			}
-		}
-		// OR IGNORE handles collision when T→X already exists (S→X can't become T→X)
-		// Check ahead of time whether S→T exists so we know if a self-loop will be
-		// created below (S→T becomes T→T after the rewrite).
-		const hadSrcToTarget = !!db
-			.prepare(
-				`SELECT 1 FROM entity_dependencies
-				 WHERE source_entity_id = ? AND target_entity_id = ? AND agent_id = ?`,
-			)
-			.get(srcId, targetId, agentId);
-		const hadTargetSelfLoop = !!db
-			.prepare(
-				`SELECT 1 FROM entity_dependencies
-				 WHERE source_entity_id = ? AND target_entity_id = ? AND agent_id = ?`,
-			)
-			.get(targetId, targetId, agentId);
-		db.prepare(
-			`UPDATE OR IGNORE entity_dependencies SET source_entity_id = ?, updated_at = datetime('now')
-			 WHERE source_entity_id = ? AND agent_id = ?`,
-		).run(targetId, srcId, agentId);
-		// Clean up colliding duplicates that OR IGNORE couldn't move
-		db.prepare("DELETE FROM entity_dependencies WHERE source_entity_id = ? AND agent_id = ?").run(srcId, agentId);
-
-		// Move dependencies (target side)
-		db.prepare(
-			`UPDATE OR IGNORE entity_dependencies SET target_entity_id = ?, updated_at = datetime('now')
-			 WHERE target_entity_id = ? AND agent_id = ?`,
-		).run(targetId, srcId, agentId);
-		// Clean up colliding duplicates that OR IGNORE couldn't move
-		db.prepare("DELETE FROM entity_dependencies WHERE target_entity_id = ? AND agent_id = ?").run(srcId, agentId);
-
-		// If S→T was rewritten to T→T and no self-loop existed beforehand, remove it.
-		// Preserves any intentional pre-existing T→T edge.
-		if (hadSrcToTarget && !hadTargetSelfLoop) {
-			db.prepare(
-				`DELETE FROM entity_dependencies
-				 WHERE source_entity_id = ? AND target_entity_id = ? AND agent_id = ?`,
-			).run(targetId, targetId, agentId);
-		}
-
-		// Move memory mentions (OR IGNORE skips duplicates).
-		// memory_entity_mentions has no agent_id column — scope implicitly
-		// through the entities table since entity UUIDs are agent-unique.
-		db.prepare(
-			`UPDATE OR IGNORE memory_entity_mentions SET entity_id = ?
-			 WHERE entity_id = ?
-			   AND entity_id IN (SELECT id FROM entities WHERE agent_id = ?)`,
-		).run(targetId, srcId, agentId);
-		// Clean up any remaining source mentions (duplicates skipped above)
-		db.prepare(
-			`DELETE FROM memory_entity_mentions
-			 WHERE entity_id = ?
-			   AND entity_id IN (SELECT id FROM entities WHERE agent_id = ?)`,
-		).run(srcId, agentId);
-
-		// Transfer mention count
-		db.prepare(
-			`UPDATE entities SET mentions = mentions + COALESCE(
-			   (SELECT mentions FROM entities WHERE id = ?), 0
-			 ), updated_at = datetime('now')
-			 WHERE id = ?`,
-		).run(srcId, targetId);
-
-		// Delete remaining aspects/attributes on source (cascade)
-		// and the source entity itself
-		db.prepare(
-			`DELETE FROM entity_attributes WHERE agent_id = ? AND aspect_id IN (
-			   SELECT id FROM entity_aspects WHERE entity_id = ? AND agent_id = ?
-			 )`,
-		).run(agentId, srcId, agentId);
-		db.prepare("DELETE FROM entity_aspects WHERE entity_id = ? AND agent_id = ?").run(srcId, agentId);
-		db.prepare("DELETE FROM entities WHERE id = ? AND agent_id = ?").run(srcId, agentId);
-	}
-	return { applied: merged > 0 ? 1 : 0, skipped: (merged === 0 ? 1 : 0) + pinnedSkipped };
-}
-
-function applyDeleteEntity(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "delete_entity" },
-): "applied" | "skipped" {
-	if (!mut.name) return "skipped";
-	const entityId = resolveEntity(db, agentId, mut.name);
-	if (!entityId) return "skipped";
-
-	// Don't delete pinned entities
-	const pinned = db.prepare("SELECT pinned FROM entities WHERE id = ? AND agent_id = ?").get(entityId, agentId) as
-		| { pinned: number }
-		| undefined;
-	if (pinned?.pinned === 1) return "skipped";
-
-	// Don't delete entities that own active constraint attributes (invariant 5)
-	const hasConstraints = db
-		.prepare(
-			`SELECT 1 FROM entity_attributes ea
-			 JOIN entity_aspects asp ON ea.aspect_id = asp.id
-			 WHERE asp.entity_id = ? AND asp.agent_id = ?
-			   AND ea.kind = 'constraint' AND ea.status = 'active'`,
-		)
-		.get(entityId, agentId);
-	if (hasConstraints) return "skipped";
-
-	db.prepare(
-		`DELETE FROM entity_attributes WHERE agent_id = ? AND aspect_id IN (
-		   SELECT id FROM entity_aspects WHERE entity_id = ? AND agent_id = ?
-		 )`,
-	).run(agentId, entityId, agentId);
-	db.prepare("DELETE FROM entity_aspects WHERE entity_id = ? AND agent_id = ?").run(entityId, agentId);
-	db.prepare(
-		"DELETE FROM entity_dependencies WHERE (source_entity_id = ? OR target_entity_id = ?) AND agent_id = ?",
-	).run(entityId, entityId, agentId);
-	db.prepare(
-		`DELETE FROM memory_entity_mentions
-		 WHERE entity_id = ?
-		   AND entity_id IN (SELECT id FROM entities WHERE agent_id = ?)`,
-	).run(entityId, agentId);
-	db.prepare("DELETE FROM entities WHERE id = ? AND agent_id = ?").run(entityId, agentId);
-	return "applied";
-}
-
-/** Additive: inserts new attributes into an aspect. Does NOT replace existing ones.
- *  For replacement semantics, the LLM should use supersede_attribute instead. */
-function applyUpdateAspect(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "update_aspect" },
-): "applied" | "skipped" {
-	if (!mut.entity || !mut.aspect || !mut.attributes) return "skipped";
-
-	const entityId = resolveEntity(db, agentId, mut.entity);
-	if (!entityId) return "skipped";
-
-	// Pre-filter: drop attributes that are too short before touching the DB.
-	// This prevents creating an empty aspect row as a side effect.
-	const candidates = mut.attributes
-		.filter((a) => a && a.trim().length >= 5)
-		.map((a) => ({ content: a.trim(), normalized: a.trim().toLowerCase() }));
-	if (candidates.length === 0) return "skipped";
-
-	// If the aspect already exists, filter out attributes that are already present.
-	// Only create the aspect if at least one new attribute will actually be inserted.
-	const existingAspectId = resolveAspect(db, entityId, agentId, mut.aspect);
-	const toInsert = existingAspectId
-		? candidates.filter(({ normalized }) => {
-				const exists = db
-					.prepare(
-						`SELECT 1 FROM entity_attributes
-					 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ?`,
-					)
-					.get(existingAspectId, agentId, normalized);
-				return !exists;
-			})
-		: candidates;
-
-	if (toInsert.length === 0) return "skipped";
-
-	const aspectId = resolveOrCreateAspect(db, entityId, agentId, mut.aspect);
-	for (const { content, normalized } of toInsert) {
-		insertAttr(db, aspectId, agentId, content, normalized);
-	}
-	return "applied";
-}
-
-function applyDeleteAspect(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "delete_aspect" },
-): "applied" | "skipped" {
-	if (!mut.entity || !mut.aspect) return "skipped";
-
-	const entityId = resolveEntity(db, agentId, mut.entity);
-	if (!entityId) return "skipped";
-	const aspectId = resolveAspect(db, entityId, agentId, mut.aspect);
-	if (!aspectId) return "skipped";
-
-	// Don't delete aspects containing constraints
-	const constraints = db
-		.prepare(
-			`SELECT 1 FROM entity_attributes
-			 WHERE aspect_id = ? AND agent_id = ? AND kind = 'constraint' AND status = 'active'`,
-		)
-		.get(aspectId, agentId);
-	if (constraints) return "skipped";
-
-	// Hard-delete attributes then the aspect itself. Using hard-delete
-	// throughout (not soft-delete) to stay consistent: keeping soft-deleted
-	// attributes whose parent aspect row no longer exists would break any
-	// recovery path that tries to re-attach them.
-	db.prepare("DELETE FROM entity_attributes WHERE aspect_id = ? AND agent_id = ?").run(aspectId, agentId);
-	db.prepare("DELETE FROM entity_aspects WHERE id = ? AND agent_id = ?").run(aspectId, agentId);
-	return "applied";
-}
-
-function applySupersede(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "supersede_attribute" },
-): "applied" | "skipped" {
-	if (!mut.entity || !mut.aspect || !mut.old || !mut.new) return "skipped";
-
-	const entityId = resolveEntity(db, agentId, mut.entity);
-	if (!entityId) return "skipped";
-	const aspectId = resolveAspect(db, entityId, agentId, mut.aspect);
-	if (!aspectId) return "skipped";
-
-	// Find old attribute
-	const normalizedOld = mut.old.trim().toLowerCase();
-	const oldAttr = db
-		.prepare(
-			`SELECT id, kind FROM entity_attributes
-			 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ? AND status = 'active'`,
-		)
-		.get(aspectId, agentId, normalizedOld) as { id: string; kind: string } | undefined;
-
-	// Don't supersede constraints
-	if (oldAttr?.kind === "constraint") return "skipped";
-	// Old attribute must exist — don't create orphan replacements
-	if (!oldAttr) return "skipped";
-
-	// Create new attribute
-	const normalizedNew = mut.new.trim().toLowerCase();
-	const newId = insertAttr(db, aspectId, agentId, mut.new.trim(), normalizedNew);
-
-	// Mark old as superseded
-	db.prepare(
-		`UPDATE entity_attributes
-		 SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
-		 WHERE id = ?`,
-	).run(newId, oldAttr.id);
-	return "applied";
-}
-
-function applyCreateAttribute(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "create_attribute" },
-): "applied" | "skipped" {
-	if (!mut.entity || !mut.aspect || !mut.content || mut.content.trim().length < 5) return "skipped";
-
-	const entityId = resolveEntity(db, agentId, mut.entity);
-	if (!entityId) return "skipped";
-	const aspectId = resolveOrCreateAspect(db, entityId, agentId, mut.aspect);
-
-	const normalized = mut.content.trim().toLowerCase();
-	const exists = db
-		.prepare(
-			`SELECT 1 FROM entity_attributes
-			 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ?`,
-		)
-		.get(aspectId, agentId, normalized);
-	if (exists) return "skipped";
-
-	insertAttr(db, aspectId, agentId, mut.content.trim(), normalized);
-	return "applied";
-}
-
-function applyDeleteAttribute(
-	db: WriteDb,
-	agentId: string,
-	mut: DreamingMutation & { op: "delete_attribute" },
-): "applied" | "skipped" {
-	if (!mut.entity || !mut.aspect || !mut.content) return "skipped";
-
-	const entityId = resolveEntity(db, agentId, mut.entity);
-	if (!entityId) return "skipped";
-	const aspectId = resolveAspect(db, entityId, agentId, mut.aspect);
-	if (!aspectId) return "skipped";
-
-	const normalized = mut.content.trim().toLowerCase();
-	// Don't delete constraints
-	const attr = db
-		.prepare(
-			`SELECT id, kind FROM entity_attributes
-			 WHERE aspect_id = ? AND agent_id = ? AND normalized_content = ? AND status = 'active'`,
-		)
-		.get(aspectId, agentId, normalized) as { id: string; kind: string } | undefined;
-	if (!attr || attr.kind === "constraint") return "skipped";
-
-	db.prepare(
-		`UPDATE entity_attributes SET status = 'deleted', updated_at = datetime('now')
-		 WHERE id = ?`,
-	).run(attr.id);
-	return "applied";
+	if (hasPendingAttention) return "incremental-hygiene";
+	if (hasBacklog) return "incremental-content";
+	// Unreachable through shouldTriggerDreaming (it fires only when attention
+	// or a backlog exists); the combined mode's early-exit gate is the
+	// defensive fallback.
+	return "incremental";
 }
 
 // ---------------------------------------------------------------------------
 // Main dreaming orchestrator
 // ---------------------------------------------------------------------------
 
-export async function runDreamingPass(
+/**
+ * Bounded tool-loop Dreaming pass. The daemon owns evidence selection,
+ * exclusion/cursor bookkeeping, tool construction, and audited writes.
+ */
+export async function runDreamingAgentPass(
 	accessor: DbAccessor,
-	generate: LlmGenerateFn,
+	executor: DreamingAgentExecutor,
 	cfg: DreamingConfig,
 	agentsDir: string,
 	agentId: string,
+	scopes: readonly string[],
 	mode: DreamingMode,
 	existingPassId?: string,
 ): Promise<{ passId: string; applied: number; skipped: number; failed: number; summary: string }> {
 	const passId = existingPassId ?? createDreamingPass(accessor, agentId, mode);
-
+	const passStartedAt = new Date().toISOString();
 	try {
-		// Fetch data
-		const state = getDreamingState(accessor, agentId);
-		// Derive row limits from token budget — ~40% for graph, ~20 tokens per entity,
-		// ~10 per aspect, ~25 per attribute, ~20 per dependency
-		const graphTokenBudget = Math.floor(cfg.maxInputTokens * 0.4);
-		const graphLimits = {
-			entities: Math.max(100, Math.floor(graphTokenBudget / 20)),
-			aspects: Math.max(200, Math.floor(graphTokenBudget / 10)),
-			attributes: Math.max(500, Math.floor(graphTokenBudget / 25)),
-			dependencies: Math.max(200, Math.floor(graphTokenBudget / 20)),
-		};
+		const prompt =
+			scopes.length > 1
+				? `${dreamingPromptForMode(mode)}\n\n<agent_scopes>\n${scopes.join("\n")}\n</agent_scopes>`
+				: dreamingPromptForMode(mode);
 
-		const { summaries, graph } = accessor.withReadDb((db) => {
-			const summaries = fetchUnprocessedSummaries(db, agentId, mode === "compact" ? null : state.lastPassAt, 200);
-			const graph = fetchEntityGraph(db, agentId, graphLimits);
-			return { summaries, graph };
-		});
+		// SQLite-format watermark so string comparisons against stored source
+		// dates stay consistent (ISO timestamps would mis-order).
+		const cutoff = accessor.withReadDb(
+			(db) => (db.prepare("SELECT datetime('now') AS now").get() as { now: string }).now,
+		);
 
-		warnIfTruncated(graph, graphLimits);
-
-		if (mode === "incremental" && summaries.length === 0 && graph.entities.length === 0) {
+		// One Dreaming pass covers the whole install: it only runs when some
+		// scope has pending attention or an episodic backlog. Scheduled checks
+		// are already gated by shouldTriggerDreaming; this protects manual
+		// triggers and compact runs from spending tokens on nothing.
+		const hasPendingAttention = scopes.some((scope) =>
+			accessor.withReadDb((db) => getDreamingAttentionInDb(db, scope, 1).length > 0),
+		);
+		const totalBacklog = scopes.reduce((total, scope) => total + getDreamingEpisodicTokenBacklog(accessor, scope), 0);
+		const earlyExitSummary = dreamingEarlyExitSummary(mode, hasPendingAttention, totalBacklog);
+		if (earlyExitSummary !== null) {
 			accessor.withWriteTx((db) => {
 				db.prepare(
-					`UPDATE dreaming_passes
-					 SET status = 'completed',
-					     completed_at = datetime('now'),
-					     tokens_consumed = 0,
-					     mutations_applied = 0,
-					     mutations_skipped = 0,
-					     mutations_failed = 0,
-					     summary = ?
-					 WHERE id = ?`,
-				).run("No new summaries or entities to process", passId);
-				resetDreamingTokens(db, agentId, passId, mode);
+					`UPDATE dreaming_passes SET status = 'completed', completed_at = datetime('now'),
+					 tokens_consumed = 0, mutations_applied = 0, mutations_skipped = 0,
+					 mutations_failed = 0, summary = ? WHERE id = ?`,
+				).run(earlyExitSummary, passId);
+				// The evidence watermark only advances when nothing new
+				// remains: a focused pass that exits while the other mode's
+				// work is pending must not skip it for the next pass (#1098).
+				if (totalBacklog === 0) {
+					for (const scope of scopes) resetDreamingTokens(db, scope, passId, mode, null, cutoff);
+				}
 			});
-			return { passId, applied: 0, skipped: 0, failed: 0, summary: "No new summaries or entities to process" };
+			return { passId, applied: 0, skipped: 0, failed: 0, summary: earlyExitSummary };
 		}
 
-		// Build prompt and call LLM
-		const prompt = buildDreamingPrompt(mode, summaries, graph, agentsDir, cfg.maxInputTokens);
-
-		logger.info("dreaming", "Starting dreaming pass", {
+		let applied = 0;
+		let failed = 0;
+		let toolCallSequence = 0;
+		let applyCallbackReported = false;
+		const rejectedEvidence: EpisodicSourceRecord[] = [];
+		const tools = createDreamingAgentTools({
+			accessor,
+			agentId,
+			actor: "dreaming",
+			passId,
+			onOperationsApplied(result, operations) {
+				applyCallbackReported = true;
+				applied += result.items.filter((item) => item.ok).length;
+				failed += result.items.filter((item) => !item.ok).length;
+				if (!result.ok && result.items.length === 0) failed++;
+				rejectedEvidence.push(...rejectedAgentEvidence(result, operations, []));
+			},
+			onToolCall(trace) {
+				recordDreamingToolCall(accessor, agentId, passId, ++toolCallSequence, trace);
+				if (trace.tool === "apply_ontology_ops") {
+					if (!trace.output.ok && !applyCallbackReported) {
+						rejectedEvidence.push(
+							...rejectedAgentEvidence({ ok: false, items: [] }, operationEvidenceFromToolInput(trace.input), []),
+						);
+						failed++;
+					}
+					applyCallbackReported = false;
+				}
+			},
+		});
+		logger.info("dreaming", "Starting agentic dreaming pass", {
 			mode,
-			summaries: summaries.length,
-			entities: graph.entities.length,
 			promptChars: prompt.length,
 		});
-
-		const raw = await generate(prompt, {
+		const outcome = await executor.run({
+			passId,
+			prompt,
+			tools,
 			timeoutMs: cfg.timeout,
 			maxTokens: cfg.maxOutputTokens,
 		});
-
-		// Parse response — count actual tokens for both prompt and output
-		const result = parseDreamingResult(raw);
-		const promptTokens = countTokens(prompt);
-		const totalTokens = promptTokens + result.tokensConsumed;
-
-		logger.info("dreaming", "Dreaming pass produced mutations", {
-			count: result.mutations.length,
-			promptTokens,
-			outputTokens: result.tokensConsumed,
-			summary: result.summary.slice(0, 200),
-		});
-
-		// Apply mutations and complete pass in a single atomic transaction.
-		// This prevents a crash between mutation apply and pass completion
-		// from leaving the graph mutated with the pass still in 'running'
-		// state and the token counter unreset (which would re-trigger).
-		const { applied, skipped, failed, errors } = accessor.withWriteTx((db) => {
-			const result2 = applyMutations(db, agentId, result.mutations);
-
-			// Post-mutation integrity check: detect orphaned aspects (entity
-			// deleted but aspects left behind) which signals a partial merge/
-			// delete failure within a multi-statement handler.
-			const orphanedAspects = db
-				.prepare(
-					`SELECT COUNT(*) AS cnt FROM entity_aspects ea
-					 WHERE ea.agent_id = ?
-					   AND NOT EXISTS (SELECT 1 FROM entities e WHERE e.id = ea.entity_id)`,
-				)
-				.get(agentId) as { cnt: number };
-			if (orphanedAspects.cnt > 0) {
-				logger.warn("dreaming", "Post-mutation integrity: found orphaned aspects with no parent entity", {
-					count: orphanedAspects.cnt,
-				});
-			}
-
-			// Complete pass record + reset token counter in same tx.
-			// invalidMutations are counted as failed — they were not applied
-			// because the LLM returned a structurally invalid object.
+		const summary = `${outcome.summary?.trim() || "Agentic Dreaming pass completed"}`;
+		const tokensConsumed = countTokens(prompt);
+		accessor.withWriteTx((db) => {
 			db.prepare(
-				`UPDATE dreaming_passes
-				 SET status = 'completed',
-				     completed_at = datetime('now'),
-				     tokens_consumed = ?,
-				     mutations_applied = ?,
-				     mutations_skipped = ?,
-				     mutations_failed = ?,
-				     summary = ?
-				 WHERE id = ?`,
-			).run(
-				totalTokens,
-				result2.applied,
-				result2.skipped,
-				result2.failed + result.invalidMutations,
-				result.summary,
-				passId,
-			);
-			resetDreamingTokens(db, agentId, passId, mode);
-
-			return result2;
+				`UPDATE dreaming_passes SET status = 'completed', completed_at = datetime('now'),
+				 tokens_consumed = ?, mutations_applied = ?, mutations_skipped = ?,
+				 mutations_failed = ?, summary = ? WHERE id = ?`,
+			).run(tokensConsumed, applied, 0, failed, summary, passId);
+			recordDreamingEvidenceExclusionsInTx(db, agentId, passId, rejectedEvidence, "semantic_operation_rejected");
+			// The evidence queue resets to the pass watermark for EVERY scope
+			// the pass consumed evidence for: the next pass's backlog counts
+			// only sources captured after this pass began. A hygiene pass
+			// consumes no evidence, so it must not advance the watermark —
+			// advancing it would hide the unprocessed backlog from the next
+			// content pass and starve content again (#1098).
+			if (dreamingModeAdvancesEvidence(mode)) {
+				for (const scope of scopes) resetDreamingTokens(db, scope, passId, mode, null, cutoff);
+			}
 		});
-
-		if (errors.length > 0) {
-			logger.warn("dreaming", "Some mutations failed", { errors: errors.slice(0, 10) });
-		}
-
-		logger.info("dreaming", "Dreaming pass complete", {
-			applied,
-			skipped,
-			failed,
-			summary: result.summary.slice(0, 200),
-		});
-
-		return { passId, applied, skipped, failed, summary: result.summary };
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		logger.error("dreaming", "Dreaming pass failed", undefined, { error: msg });
-		failDreamingPass(accessor, passId, msg);
-		throw e;
+		return { passId, applied, skipped: 0, failed, summary };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logger.error("dreaming", "Agentic dreaming pass failed", undefined, { error: message });
+		failDreamingPass(accessor, passId, message);
+		throw error;
 	}
 }
 
@@ -1352,33 +966,89 @@ export async function runDreamingPass(
 // Threshold check
 // ---------------------------------------------------------------------------
 
-// Max backoff: 5min * 2^6 = ~5.3 hours
+// Max backoff: 5min * 2^6 = ~5.3 hours.
 const MAX_FAILURE_BACKOFF_MULTIPLIER = 6;
+const FAILURE_BACKOFF_BASE_MS = 5 * 60 * 1000;
 
-export function shouldTriggerDreaming(accessor: DbAccessor, cfg: DreamingConfig, agentId: string): boolean {
-	if (!cfg.enabled) return false;
+// A scope that fails this many consecutive passes is halted: automatic
+// scheduling stops for the cooldown below instead of retrying forever on
+// the backoff ceiling (~5.3h per attempt). Explicit triggers bypass the
+// gate, and any successful pass resets the counter, so a halt self-heals
+// on the next forced or post-cooldown pass (#1059).
+export const DREAMING_FAILURE_HALT_THRESHOLD = 5;
+export const DREAMING_HALT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+export function isDreamingScopeHalted(state: DreamingState, nowMs = Date.now()): boolean {
+	if (state.consecutiveFailures < DREAMING_FAILURE_HALT_THRESHOLD) return false;
+	const failedAt = state.lastFailureAt === null ? Number.NaN : Date.parse(state.lastFailureAt);
+	return Number.isFinite(failedAt) && nowMs - failedAt < DREAMING_HALT_COOLDOWN_MS;
+}
+
+/** Cheap sweep pre-check: one indexed dreaming_state row, no attention scan. */
+export function isDreamingHaltActive(accessor: DbAccessor, agentId: string, nowMs = Date.now()): boolean {
+	return isDreamingScopeHalted(getDreamingState(accessor, agentId), nowMs);
+}
+
+/**
+ * The worker's backlog is the episodic evidence it has not yet reasoned over,
+ * not a separately maintained token counter. This keeps the trigger aligned
+ * with every supported input source.
+ */
+export function getDreamingEpisodicTokenBacklog(accessor: DbAccessor, agentId: string): number {
+	return accessor.withReadDb((db) => getDreamingEpisodicTokenBacklogInDb(db, agentId));
+}
+
+export function getDreamingEpisodicTokenBacklogInDb(db: ReadDb, agentId: string): number {
+	const state = readDreamingState(db, agentId);
+	const queued = readRecentEpisodicSources(
+		db,
+		agentId,
+		500,
+		undefined,
+		state.evidenceCursor ? null : state.lastPassAt,
+		"newest",
+		state.evidenceCursor,
+	);
+	const resumed =
+		state.evidenceCursor?.fragmentOffset && state.evidenceCursor.kind !== null
+			? readEpisodicSource(db, { agentId, from: `${state.evidenceCursor.kind}:${state.evidenceCursor.id}` })
+			: null;
+	const remaining = resumed ? renderDreamingEvidence(resumed).slice(state.evidenceCursor?.fragmentOffset) : "";
+	return (
+		queued.reduce((total, source) => total + countTokens(renderDreamingEvidence(source)), 0) + countTokens(remaining)
+	);
+}
+
+export function shouldTriggerDreaming(
+	accessor: DbAccessor,
+	cfg: DreamingConfig,
+	agentId: string,
+	nowMs = Date.now(),
+	episodicTokens = getDreamingEpisodicTokenBacklog(accessor, agentId),
+): boolean {
 	const state = getDreamingState(accessor, agentId);
+	const hasAttention = accessor.withReadDb((db) => getDreamingAttentionInDb(db, agentId, 1).length > 0);
 
-	// Exponential backoff on consecutive failures: require tokens to
-	// exceed threshold * 2^failures before retrying. The worker runs
-	// every 5 min; this naturally delays retries (5min, 10min, 20min,
-	// 40min, 80min, 160min, capped at ~5h).
+	// Hard halt after repeated consecutive failures: no automatic scheduling
+	// for the cooldown window. Explicit operator triggers bypass this gate.
+	if (isDreamingScopeHalted(state, nowMs)) return false;
+
+	// Back off by wall clock, not by evidence volume. A transient provider outage
+	// must not require exponentially more incoming evidence before recovery.
 	if (state.consecutiveFailures > 0) {
 		const exp = Math.min(state.consecutiveFailures, MAX_FAILURE_BACKOFF_MULTIPLIER);
-		const backoffChecks = 2 ** exp;
-
-		// For first-run failures with backfill, require at least
-		// tokenThreshold accumulated before retrying (instead of
-		// triggering unconditionally with 0 tokens)
-		if (state.lastPassAt === null && cfg.backfillOnFirstRun) {
-			return state.tokensSinceLastPass >= cfg.tokenThreshold;
-		}
-
-		// For all other cases, multiply the threshold by the backoff factor
-		return state.tokensSinceLastPass >= cfg.tokenThreshold * backoffChecks;
+		const failedAt = state.lastFailureAt === null ? Number.NaN : Date.parse(state.lastFailureAt);
+		if (!Number.isFinite(failedAt) || nowMs - failedAt < FAILURE_BACKOFF_BASE_MS * 2 ** exp) return false;
 	}
 
-	// First run with backfill always triggers (no failures)
-	if (cfg.backfillOnFirstRun && state.lastPassAt === null) return true;
-	return state.tokensSinceLastPass >= cfg.tokenThreshold;
+	// First run only backfills actual episodic evidence, except for explicit
+	// scoped attention that has been queued for a Dreaming review.
+	if (cfg.backfillOnFirstRun && state.lastPassAt === null) return episodicTokens > 0 || hasAttention;
+	if (hasAttention || episodicTokens >= cfg.tokenThreshold) return true;
+
+	// A low-volume stream must not wait indefinitely for the batch ceiling.
+	// This is deliberately a maximum wait rather than an unconditional cron:
+	// empty ledgers never trigger a pass.
+	const lastPassMs = state.lastPassAt === null ? Number.NaN : Date.parse(state.lastPassAt);
+	return episodicTokens > 0 && Number.isFinite(lastPassMs) && nowMs - lastPassMs >= cfg.maxInterval;
 }

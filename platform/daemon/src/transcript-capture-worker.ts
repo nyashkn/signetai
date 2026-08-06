@@ -47,6 +47,12 @@ export interface TranscriptCaptureStatusSummary {
 	readonly lastError: string | null;
 }
 
+export interface TranscriptCaptureJobReceipt {
+	readonly id: string;
+	readonly status: TranscriptCaptureJobStatus;
+	readonly error: string | null;
+}
+
 const DEFAULT_MAX_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 30_000;
 
@@ -408,5 +414,28 @@ export function getTranscriptCaptureStatus(
 			if (row.oldest_pending) summary.oldestPendingAt = row.oldest_pending;
 		}
 		return summary;
+	});
+}
+
+/** Read one agent-scoped capture receipt without exposing transcript content. */
+export function getTranscriptCaptureJobStatus(
+	dbAccessor: DbAccessor,
+	agentId: string,
+	id: string,
+): TranscriptCaptureJobReceipt | null {
+	return dbAccessor.withReadDb((db) => {
+		const row = db
+			.prepare(
+				`SELECT id, status, error
+				 FROM transcript_capture_jobs
+				 WHERE id = ? AND agent_id = ?`,
+			)
+			.get(id, agentId) as { id?: unknown; status?: unknown; error?: unknown } | undefined;
+		if (typeof row?.id !== "string" || typeof row.status !== "string") return null;
+		return {
+			id: row.id,
+			status: row.status as TranscriptCaptureJobStatus,
+			error: typeof row.error === "string" ? row.error : null,
+		};
 	});
 }

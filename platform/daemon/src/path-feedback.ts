@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DependencyType } from "@signet/core";
 import type { DbAccessor, WriteDb } from "./db-accessor";
+import { applyOntologyOperationBatchInTx } from "./ontology-proposals";
 import { recordAgentFeedbackInner } from "./session-memories";
 
 export interface FeedbackPath {
@@ -245,6 +246,8 @@ function updateAspects(
 	ts: string,
 ): void {
 	if (rating === 0 || path.aspectIds.length === 0) return;
+	// Aspect weights rank retrieval paths. They do not alter the semantic
+	// conclusion represented by an aspect, attribute, or dependency.
 	const delta = cfg.aspectDelta * Math.abs(rating) * (rating > 0 ? 1 : -1);
 	const stmt = db.prepare(
 		`UPDATE entity_aspects
@@ -264,7 +267,7 @@ function updateDependencies(
 	path: FeedbackPath,
 	rating: number,
 	cfg: PathFeedbackConfig,
-	ts: string,
+	feedback: { readonly memoryId: string; readonly sessionKey: string },
 ): number {
 	if (rating === 0 || path.dependencyIds.length === 0) return 0;
 	const select = db.prepare(
@@ -274,15 +277,6 @@ function updateDependencies(
 		 WHERE id = ?
 		   AND agent_id = ?
 		 LIMIT 1`,
-	);
-	const update = db.prepare(
-		`UPDATE entity_dependencies
-		 SET strength = ?,
-		     confidence = ?,
-		     reason = ?,
-		     updated_at = ?
-		 WHERE id = ?
-		   AND agent_id = ?`,
 	);
 	let count = 0;
 	for (const depId of path.dependencyIds) {
@@ -309,7 +303,27 @@ function updateDependencies(
 			rating > 0
 				? clamp(Math.max(row.confidence + cfg.confidenceDelta * mag, base), cfg.minConfidence, 1)
 				: clamp(Math.min(row.confidence - cfg.confidenceDelta * mag, base), cfg.minConfidence, 1);
-		update.run(strength, confidence, next, ts, depId, agentId);
+		applyOntologyOperationBatchInTx(db, {
+			agentId,
+			actor: "path-feedback",
+			operations: [
+				{
+					operation: "update_link",
+					payload: { id: depId, strength, confidence, reason: next },
+					reason: `Retrieval feedback updated this relationship in session ${feedback.sessionKey}.`,
+					evidence: [
+						{
+							memory_id: feedback.memoryId,
+							source_kind: "memory",
+							source_id: feedback.memoryId,
+							session_key: feedback.sessionKey,
+						},
+					],
+					sourceKind: "memory",
+					sourceId: feedback.memoryId,
+				},
+			],
+		});
 		count++;
 	}
 	return count;
@@ -446,7 +460,7 @@ function maybePromoteDirected(
 	edgeTarget: string,
 	total: number,
 	cfg: PathFeedbackConfig,
-	ts: string,
+	feedback: { readonly memoryIds: readonly string[]; readonly sessionKey: string },
 ): boolean {
 	if (total <= 1) return false;
 	const pair = db
@@ -498,26 +512,58 @@ function maybePromoteDirected(
 		)
 		.get(agentId, edgeSource, edgeTarget) as { id: string; strength: number; confidence: number } | undefined;
 	const strength = clamp(0.3 + npmi * 0.5, 0.3, 0.9);
+	const primaryMemoryId = feedback.memoryIds[0];
+	if (!primaryMemoryId) return false;
+	const evidence = feedback.memoryIds.map((memoryId) => ({
+		memory_id: memoryId,
+		source_kind: "memory",
+		source_id: memoryId,
+		session_key: feedback.sessionKey,
+	}));
 	if (!existing) {
 		if (countAutoEdges(db, agentId, edgeSource) >= cfg.autoEdgeCap) return false;
-		const id = crypto.randomUUID();
-		db.prepare(
-			`INSERT INTO entity_dependencies
-			 (id, source_entity_id, target_entity_id, agent_id, aspect_id,
-			  dependency_type, strength, confidence, reason, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, NULL, 'related_to', ?, 0.5, 'pattern-matched', ?, ?)`,
-		).run(id, edgeSource, edgeTarget, agentId, strength, ts, ts);
+		applyOntologyOperationBatchInTx(db, {
+			agentId,
+			actor: "path-feedback",
+			operations: [
+				{
+					operation: "create_link",
+					payload: {
+						source_entity_id: edgeSource,
+						target_entity_id: edgeTarget,
+						link_type: "related_to",
+						strength,
+						confidence: 0.5,
+						reason: "pattern-matched",
+					},
+					reason: `Positive retrieval feedback repeatedly co-occurred in session ${feedback.sessionKey}.`,
+					evidence,
+					sourceKind: "memory",
+					sourceId: primaryMemoryId,
+				},
+			],
+		});
 		return true;
 	}
-	db.prepare(
-		`UPDATE entity_dependencies
-		 SET strength = ?,
-		     confidence = ?,
-		     reason = 'pattern-matched',
-		     updated_at = ?
-		 WHERE id = ?
-		   AND agent_id = ?`,
-	).run(Math.max(existing.strength, strength), Math.max(existing.confidence, 0.5), ts, existing.id, agentId);
+	applyOntologyOperationBatchInTx(db, {
+		agentId,
+		actor: "path-feedback",
+		operations: [
+			{
+				operation: "update_link",
+				payload: {
+					id: existing.id,
+					strength: Math.max(existing.strength, strength),
+					confidence: Math.max(existing.confidence, 0.5),
+					reason: "pattern-matched",
+				},
+				reason: `Positive retrieval feedback repeatedly co-occurred in session ${feedback.sessionKey}.`,
+				evidence,
+				sourceKind: "memory",
+				sourceId: primaryMemoryId,
+			},
+		],
+	});
 	return true;
 }
 
@@ -528,14 +574,14 @@ function maybePromotePair(
 	target: string,
 	total: number,
 	cfg: PathFeedbackConfig,
-	ts: string,
+	feedback: { readonly memoryIds: readonly string[]; readonly sessionKey: string },
 ): number {
 	const [pairSource, pairTarget] = canonicalPair(source, target);
 	let count = 0;
-	if (maybePromoteDirected(db, agentId, pairSource, pairTarget, source, target, total, cfg, ts)) {
+	if (maybePromoteDirected(db, agentId, pairSource, pairTarget, source, target, total, cfg, feedback)) {
 		count++;
 	}
-	if (maybePromoteDirected(db, agentId, pairSource, pairTarget, target, source, total, cfg, ts)) {
+	if (maybePromoteDirected(db, agentId, pairSource, pairTarget, target, source, total, cfg, feedback)) {
 		count++;
 	}
 	return count;
@@ -577,6 +623,7 @@ export function recordPathFeedback(
 		let propagated = 0;
 		let dependenciesUpdated = 0;
 		const entitySet = new Set<string>();
+		const positiveMemoryIds: string[] = [];
 
 		for (const [memoryId, ratingRaw] of Object.entries(input.ratings)) {
 			if (!sessionIds.has(memoryId)) continue;
@@ -615,10 +662,14 @@ export function recordPathFeedback(
 			);
 			upsertPathStats(db, input.agentId, hash, path, rating, score, cfg, ts);
 			updateAspects(db, input.agentId, path, rating, cfg, ts);
-			dependenciesUpdated += updateDependencies(db, input.agentId, path, rating, cfg, ts);
+			dependenciesUpdated += updateDependencies(db, input.agentId, path, rating, cfg, {
+				memoryId,
+				sessionKey: input.sessionKey,
+			});
 			propagated++;
 
 			if (rating > 0) {
+				positiveMemoryIds.push(memoryId);
 				for (const entityId of path.entityIds) entitySet.add(entityId);
 			}
 		}
@@ -642,7 +693,10 @@ export function recordPathFeedback(
 		const total = sessionCount(db, input.agentId);
 		let cooccurrenceUpdated = 0;
 		for (const [source, target] of pairs) {
-			const promoted = maybePromotePair(db, input.agentId, source, target, total, cfg, ts);
+			const promoted = maybePromotePair(db, input.agentId, source, target, total, cfg, {
+				memoryIds: positiveMemoryIds,
+				sessionKey: input.sessionKey,
+			});
 			if (promoted > 0) {
 				cooccurrenceUpdated++;
 				dependenciesUpdated += promoted;

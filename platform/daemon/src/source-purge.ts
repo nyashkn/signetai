@@ -1,6 +1,7 @@
 import { SOURCE_CHUNK_SOURCE_TYPE } from "@signet/core";
 import { getDbAccessor } from "./db-accessor";
 import { countChanges, syncVecDeleteByEmbeddingIds } from "./db-helpers";
+import { purgeAttributeMemoryProjectionsInTx } from "./semantic-memory-projection";
 
 interface PurgeSourceOwnedRowsInput {
 	readonly sourceId: string;
@@ -56,6 +57,8 @@ export function purgeSourceOwnedRows(input: PurgeSourceOwnedRowsInput): number {
 			const stmt = db.prepare("DELETE FROM entity_aspects WHERE entity_id = ?");
 			for (const row of entityRows) purged += countChanges(stmt.run(row.id));
 		}
+
+		purged += purgeAttributeMemoryProjectionsInTx(db, { sourceId, agentId: input.agentId });
 
 		for (const table of SOURCE_OWNED_GRAPH_TABLES) {
 			if (!tableHasColumn(db, table, "source_id")) continue;

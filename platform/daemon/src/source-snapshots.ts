@@ -3,7 +3,7 @@ import { SOURCE_CHUNK_SOURCE_TYPE, type SignetSourceEntry } from "@signet/core";
 import { getDbAccessor } from "./db-accessor";
 import type { WriteDb } from "./db-accessor";
 import { syncVecDeleteByEmbeddingIds } from "./db-helpers";
-import { hashNormalizedBody } from "./memory-lineage";
+import { hashNormalizedBody, upsertMemoryArtifactInTx } from "./memory-lineage";
 import { indexSourceArtifactStructureInTx } from "./source-artifact-graph";
 
 export const SOURCE_SNAPSHOT_VERSION = 1;
@@ -180,68 +180,36 @@ export function importSourceSnapshot(options: ImportSourceSnapshotOptions): Impo
 			purgeImportScopeGraph(writeDb, options.source.id, options.agentId, options.source.root, includeLocalDiscord);
 			deleteImportScope(writeDb, options.source.id, options.agentId, includeLocalDiscord);
 			purgeImportScopeChunks(writeDb, options.source.id, options.agentId, includeLocalDiscord);
-			const stmt = writeDb.prepare(
-				`INSERT INTO memory_artifacts (
-				agent_id, source_path, source_sha256, source_kind, session_id,
-				session_key, session_token, project, harness, captured_at,
-				started_at, ended_at, manifest_path, source_node_id,
-				memory_sentence, memory_sentence_quality, content, updated_at,
-				source_mtime_ms, source_id, source_root, source_external_id,
-				source_parent_path, source_meta_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(agent_id, source_path) DO UPDATE SET
-				source_sha256 = excluded.source_sha256,
-				source_kind = excluded.source_kind,
-				session_id = excluded.session_id,
-				session_key = excluded.session_key,
-				session_token = excluded.session_token,
-				project = excluded.project,
-				harness = excluded.harness,
-				captured_at = excluded.captured_at,
-				started_at = excluded.started_at,
-				ended_at = excluded.ended_at,
-				manifest_path = excluded.manifest_path,
-				source_node_id = excluded.source_node_id,
-				memory_sentence = excluded.memory_sentence,
-				memory_sentence_quality = excluded.memory_sentence_quality,
-				content = excluded.content,
-				updated_at = excluded.updated_at,
-				source_mtime_ms = excluded.source_mtime_ms,
-				source_id = excluded.source_id,
-				source_root = excluded.source_root,
-				source_external_id = excluded.source_external_id,
-				source_parent_path = excluded.source_parent_path,
-				source_meta_json = excluded.source_meta_json,
-				is_deleted = 0,
-				deleted_at = NULL
-			WHERE memory_artifacts.source_id = excluded.source_id`,
-			);
 			for (const artifact of artifacts) {
-				stmt.run(
-					options.agentId,
-					artifact.sourcePath,
-					artifact.sourceSha256,
-					artifact.sourceKind,
-					artifact.sessionId,
-					artifact.sessionKey,
-					artifact.sessionToken,
-					artifact.project,
-					artifact.harness,
-					artifact.capturedAt,
-					artifact.startedAt,
-					artifact.endedAt,
-					artifact.manifestPath,
-					artifact.sourceNodeId,
-					artifact.memorySentence,
-					artifact.memorySentenceQuality,
-					artifact.content,
-					artifact.updatedAt,
-					artifact.sourceMtimeMs,
-					artifact.sourceId,
-					artifact.sourceRoot,
-					artifact.sourceExternalId,
-					artifact.sourceParentPath,
-					artifact.sourceMetaJson,
+				upsertMemoryArtifactInTx(
+					writeDb,
+					{
+						agentId: options.agentId,
+						sourcePath: artifact.sourcePath,
+						sourceSha256: artifact.sourceSha256,
+						sourceKind: artifact.sourceKind,
+						sessionId: artifact.sessionId,
+						sessionKey: artifact.sessionKey,
+						sessionToken: artifact.sessionToken,
+						project: artifact.project,
+						harness: artifact.harness,
+						capturedAt: artifact.capturedAt,
+						startedAt: artifact.startedAt,
+						endedAt: artifact.endedAt,
+						manifestPath: artifact.manifestPath,
+						sourceNodeId: artifact.sourceNodeId,
+						memorySentence: artifact.memorySentence,
+						memorySentenceQuality: artifact.memorySentenceQuality,
+						content: artifact.content,
+						updatedAt: artifact.updatedAt,
+						sourceMtimeMs: artifact.sourceMtimeMs,
+						sourceId: artifact.sourceId,
+						sourceRoot: artifact.sourceRoot,
+						sourceExternalId: artifact.sourceExternalId,
+						sourceParentPath: artifact.sourceParentPath,
+						sourceMetaJson: artifact.sourceMetaJson,
+					},
+					{ conflictGuardSourceId: true },
 				);
 				if (indexesSnapshotArtifactGraph(artifact)) {
 					indexSourceArtifactStructureInTx(

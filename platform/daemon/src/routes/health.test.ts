@@ -152,9 +152,9 @@ describe("GET /health/ready", () => {
 
 	test("returns a structured 503 (not a 500) when loadMemoryConfig throws on a misconfigured agent.yaml", async () => {
 		// Regression guard: checkInference calls loadMemoryConfig on every probe.
-		// A misconfigured pipeline (extraction.provider='command' with no command
-		// block) throws PipelineConfigValidationError; without a try/catch this
-		// turned /health/ready into an unhandled 500. It must stay a structured 503.
+		// A retired command extraction configuration throws
+		// PipelineConfigValidationError; without a try/catch this turned
+		// /health/ready into an unhandled 500. It must stay a structured 503.
 		writeFileSync(
 			join(dir, "agent.yaml"),
 			"memory:\n  pipelineV2:\n    enabled: true\n    extraction:\n      provider: command\n",
@@ -194,5 +194,29 @@ describe("GET /health (back-compat)", () => {
 		expect(typeof resources.heapUsed).toBe("number");
 		expect(resources.physicalFootprint === null || typeof resources.physicalFootprint === "number").toBe(true);
 		expect(resources.peakPhysicalFootprint === null || typeof resources.peakPhysicalFootprint === "number").toBe(true);
+	});
+});
+
+describe("GET /api/mode", () => {
+	test("reports the local mode auth contract without any token (issue #1001)", async () => {
+		const app = makeApp();
+		const res = await app.request("/api/mode");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { mode: string; requiresAuth: boolean };
+		expect(body.mode).toBe("local");
+		expect(body.requiresAuth).toBe(false);
+	});
+
+	test("is reachable without an Authorization header (auth-open)", async () => {
+		const app = makeApp();
+		const res = await app.request("/api/mode", { headers: {} });
+		expect(res.status).toBe(200);
+	});
+
+	test("does not expose daemon internals beyond the documented shape", async () => {
+		const app = makeApp();
+		const res = await app.request("/api/mode");
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(Object.keys(body).sort()).toEqual(["mode", "requiresAuth"]);
 	});
 });

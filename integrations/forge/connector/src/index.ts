@@ -10,18 +10,23 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import {
 	BaseConnector,
 	type InstallResult,
 	type UninstallResult,
 	atomicWriteJson,
+	buildSignetRuntimeEnv,
+	isChildOf,
+	isJsonObject,
 	isSignetGeneratedFile,
+	readTrimmedEnv,
+	resolveRemoteDaemonUrl,
 	resolveSignetApiKey,
 	resolveSignetMcpCommand,
 	resolveSignetWorkspacePath,
 } from "@signet/connector-base";
-import { expandHome, hasValidIdentity, loadIdentityMode, resolveSignetDaemonUrl } from "@signet/core";
+import { expandHome, hasValidIdentity, loadIdentityMode } from "@signet/core";
 
 const SIGNET_FORGE_MARKER = "Managed by Signet (@signet/connector-forge)";
 
@@ -39,17 +44,6 @@ interface ForgeMcpHttpServer {
 }
 
 type ForgeMcpServer = ForgeMcpStdioServer | ForgeMcpHttpServer;
-
-function isJsonObject(value: unknown): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readTrimmedEnv(name: string): string | undefined {
-	const value = process.env[name];
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim().replace(/[\r\n]+/g, "");
-	return trimmed.length > 0 ? trimmed : undefined;
-}
 
 function getHomeDir(): string {
 	const home = readTrimmedEnv("HOME");
@@ -71,21 +65,6 @@ function readMcpServers(config: JsonObject): JsonObject {
 	throw new Error("Forge MCP config field 'mcpServers' must be an object");
 }
 
-function signetRuntimeEnv(basePath: string): Record<string, string> {
-	const env: Record<string, string> = { SIGNET_PATH: basePath };
-	const daemonUrl = readTrimmedEnv("SIGNET_DAEMON_URL");
-	const apiKey = readTrimmedEnv("SIGNET_API_KEY") ?? readTrimmedEnv("SIGNET_TOKEN");
-	const agentId = readTrimmedEnv("SIGNET_AGENT_ID");
-	if (daemonUrl) env.SIGNET_DAEMON_URL = daemonUrl;
-	if (apiKey) env.SIGNET_API_KEY = apiKey;
-	if (agentId) env.SIGNET_AGENT_ID = agentId;
-	return env;
-}
-
-function resolveRemoteDaemonUrl(): string | null {
-	return readTrimmedEnv("SIGNET_DAEMON_URL") ? resolveSignetDaemonUrl() : null;
-}
-
 function buildMcpServer(basePath: string): ForgeMcpServer {
 	const remoteDaemonUrl = resolveRemoteDaemonUrl();
 	if (remoteDaemonUrl) {
@@ -99,13 +78,8 @@ function buildMcpServer(basePath: string): ForgeMcpServer {
 	return {
 		command: mcp.command,
 		...(mcp.args && mcp.args.length > 0 ? { args: mcp.args } : {}),
-		env: signetRuntimeEnv(basePath),
+		env: buildSignetRuntimeEnv({ basePath }),
 	};
-}
-
-function isChildOf(candidate: string, parent: string): boolean {
-	const rel = relative(parent, candidate);
-	return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 export class ForgeConnector extends BaseConnector {

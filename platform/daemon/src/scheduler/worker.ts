@@ -1,7 +1,7 @@
 /**
  * Scheduler worker — polls for due scheduled tasks and spawns CLI processes.
  *
- * Follows the WorkerHandle pattern from pipeline/worker.ts.
+ * Follows the WorkerHandle polling pattern.
  * Polls every 15 seconds (cron granularity is minutes).
  */
 

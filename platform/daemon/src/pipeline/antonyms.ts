@@ -1,8 +1,8 @@
 /**
  * Shared antonym pairs for contradiction detection.
  *
- * Used by both the pipeline worker (prospective contradiction risk)
- * and the supersession module (retroactive attribute contradiction).
+ * Used by the contradiction detection module (semantic attribute
+ * contradiction).
  */
 
 export const NEGATION_TOKENS = new Set([
@@ -113,4 +113,29 @@ export function hasAntonymConflict(
 		}
 	}
 	return false;
+}
+
+/**
+ * Conservative lexical contradiction check shared by prospective guard callers.
+ * It intentionally reports only high-signal negation and toggle conflicts;
+ * semantic contradiction remains a reasoning task, not a false-positive-prone
+ * string heuristic.
+ */
+export function detectProspectiveContradictionRisk(
+	candidate: string,
+	existing: string,
+): { readonly detected: boolean; readonly lexicalOverlap: number; readonly reason: "negation_mismatch" | "antonym_conflict" | null } {
+	const candidateTokens = tokenize(candidate);
+	const existingTokens = tokenize(existing);
+	const lexicalOverlap = overlapCount(candidateTokens, existingTokens);
+	if (candidateTokens.length === 0 || existingTokens.length === 0 || lexicalOverlap < 2) {
+		return { detected: false, lexicalOverlap, reason: null };
+	}
+	if (hasNegation(candidateTokens) !== hasNegation(existingTokens)) {
+		return { detected: true, lexicalOverlap, reason: "negation_mismatch" };
+	}
+	if (hasAntonymConflict(new Set(candidateTokens), new Set(existingTokens), PROSPECTIVE_ANTONYM_PAIRS)) {
+		return { detected: true, lexicalOverlap, reason: "antonym_conflict" };
+	}
+	return { detected: false, lexicalOverlap, reason: null };
 }

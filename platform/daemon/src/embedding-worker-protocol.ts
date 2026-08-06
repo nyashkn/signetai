@@ -12,7 +12,7 @@
  *
  * Main thread spawns a node:worker_threads Worker with EmbeddingWorkerInit
  * as workerData. Communication uses postMessage only — no MessageChannel,
- * BroadcastChannel, or receiveMessageOnPort (mirrors extraction-thread-protocol.ts).
+ * BroadcastChannel, or receiveMessageOnPort.
  */
 
 // ---------------------------------------------------------------------------

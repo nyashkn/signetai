@@ -137,11 +137,29 @@ describe("recordPathFeedback", () => {
 			| undefined;
 		expect(aspect?.weight).toBeGreaterThan(0.5);
 
-		const dep = db.prepare("SELECT strength, reason FROM entity_dependencies WHERE id = 'dep-a'").get() as
-			| { strength: number; reason: string }
+		const dep = db
+			.prepare(
+				"SELECT strength, reason, proposal_id, source_kind, source_id FROM entity_dependencies WHERE id = 'dep-a'",
+			)
+			.get() as
+			| {
+					strength: number;
+					reason: string;
+					proposal_id: string | null;
+					source_kind: string | null;
+					source_id: string | null;
+			  }
 			| undefined;
 		expect(dep?.strength).toBeGreaterThan(0.5);
 		expect(dep?.reason).toBe("pattern-matched");
+		expect(dep?.source_kind).toBe("memory");
+		expect(dep?.source_id).toBe("mem-a");
+		expect(typeof dep?.proposal_id).toBe("string");
+		const proposal = db
+			.prepare("SELECT operation, status, created_by, evidence FROM ontology_proposals WHERE id = ?")
+			.get(dep?.proposal_id) as { operation: string; status: string; created_by: string; evidence: string } | undefined;
+		expect(proposal).toMatchObject({ operation: "update_link", status: "applied", created_by: "path-feedback" });
+		expect(proposal?.evidence).toContain('"memory_id":"mem-a"');
 
 		const hist = db
 			.prepare(
@@ -250,7 +268,7 @@ describe("recordPathFeedback", () => {
 
 		const forward = db
 			.prepare(
-				`SELECT reason, confidence
+				`SELECT reason, confidence, proposal_id, source_kind, source_id
 				 FROM entity_dependencies
 				 WHERE source_entity_id = 'ent-a'
 				   AND target_entity_id = 'ent-b'
@@ -258,10 +276,21 @@ describe("recordPathFeedback", () => {
 				 ORDER BY updated_at DESC
 				 LIMIT 1`,
 			)
-			.get() as { reason: string; confidence: number } | undefined;
+			.get() as
+			| {
+					reason: string;
+					confidence: number;
+					proposal_id: string | null;
+					source_kind: string | null;
+					source_id: string | null;
+			  }
+			| undefined;
 		expect(forward).toBeDefined();
 		expect(forward?.reason).toBe("pattern-matched");
 		expect(forward?.confidence).toBeGreaterThanOrEqual(0.5);
+		expect(forward?.source_kind).toBe("memory");
+		expect(forward?.source_id).toBe("mem-a");
+		expect(typeof forward?.proposal_id).toBe("string");
 
 		const forwardHist = db
 			.prepare(
@@ -278,7 +307,7 @@ describe("recordPathFeedback", () => {
 
 		const reverse = db
 			.prepare(
-				`SELECT reason, confidence
+				`SELECT reason, confidence, proposal_id, source_kind, source_id
 				 FROM entity_dependencies
 				 WHERE source_entity_id = 'ent-b'
 				   AND target_entity_id = 'ent-a'
@@ -286,9 +315,27 @@ describe("recordPathFeedback", () => {
 				 ORDER BY updated_at DESC
 				 LIMIT 1`,
 			)
-			.get() as { reason: string; confidence: number } | undefined;
+			.get() as
+			| {
+					reason: string;
+					confidence: number;
+					proposal_id: string | null;
+					source_kind: string | null;
+					source_id: string | null;
+			  }
+			| undefined;
 		expect(reverse).toBeDefined();
 		expect(reverse?.reason).toBe("pattern-matched");
 		expect(reverse?.confidence).toBeGreaterThanOrEqual(0.5);
+		expect(reverse?.source_kind).toBe("memory");
+		expect(reverse?.source_id).toBe("mem-a");
+		expect(typeof reverse?.proposal_id).toBe("string");
+		const reverseProposal = db
+			.prepare("SELECT operation, status, created_by, evidence FROM ontology_proposals WHERE id = ?")
+			.get(reverse?.proposal_id) as
+			| { operation: string; status: string; created_by: string; evidence: string }
+			| undefined;
+		expect(reverseProposal).toMatchObject({ operation: "create_link", status: "applied", created_by: "path-feedback" });
+		expect(reverseProposal?.evidence).toContain('"memory_id":"mem-a"');
 	});
 });

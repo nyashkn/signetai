@@ -4,7 +4,6 @@ import { type AuthConfig, requirePermission } from "../auth";
 import { type DbAccessor, getDbAccessor } from "../db-accessor.js";
 import { fetchEmbedding } from "../embedding-fetch.js";
 import { linkMemoryToEntities, previewMemoryEntityLinks } from "../inline-entity-linker.js";
-import { getLlmProvider } from "../llm.js";
 import { loadMemoryConfig } from "../memory-config.js";
 import { clusterEntities } from "../pipeline/community-detection.js";
 import { DEFAULT_RETENTION, runRetentionSweepOnce } from "../pipeline/retention-worker.js";
@@ -24,13 +23,11 @@ import {
 	pruneGenericEntities,
 	pruneSingletonExtractedEntities,
 	rebuildDerivedIndexes,
-	reclassifyEntities,
 	reembedMissingMemories,
 	reembedModelMigration,
 	releaseStaleLeases,
 	requeueDeadJobs,
 	resyncVectorIndex,
-	structuralBackfill,
 } from "../repair-actions.js";
 import { which } from "../which.js";
 import { AGENTS_DIR, authConfig, repairLimiter } from "./state.js";
@@ -256,31 +253,6 @@ export function registerRepairRoutes(
 		return c.json(result, repairHttpStatus(result));
 	});
 
-	app.post("/api/repair/reclassify-entities", async (c) => {
-		const cfg = loadMemoryConfig(AGENTS_DIR);
-		const ctx = resolveRepairContext(c);
-		let batchSize = 50;
-		let dryRun = false;
-		try {
-			const body = await c.req.json();
-			if (typeof body?.batchSize === "number") batchSize = body.batchSize;
-			if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
-		} catch {
-			// no body or invalid JSON — use defaults
-		}
-		let provider: import("@signet/core").LlmProvider | null = null;
-		try {
-			provider = getLlmProvider();
-		} catch {
-			// provider not initialized
-		}
-		const result = await reclassifyEntities(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, provider, {
-			batchSize,
-			dryRun,
-		});
-		return c.json(result, repairHttpStatus(result));
-	});
-
 	app.post("/api/repair/prune-chunk-groups", async (c) => {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
 		const ctx = resolveRepairContext(c);
@@ -340,25 +312,6 @@ export function registerRepairRoutes(
 			batchSize,
 			dryRun,
 			agentId,
-		});
-		return c.json(result, repairHttpStatus(result));
-	});
-
-	app.post("/api/repair/structural-backfill", async (c) => {
-		const cfg = loadMemoryConfig(AGENTS_DIR);
-		const ctx = resolveRepairContext(c);
-		let batchSize = 100;
-		let dryRun = false;
-		try {
-			const body = await c.req.json();
-			if (typeof body?.batchSize === "number") batchSize = body.batchSize;
-			if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
-		} catch {
-			// no body or invalid JSON — use defaults
-		}
-		const result = structuralBackfill(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, {
-			batchSize,
-			dryRun,
 		});
 		return c.json(result, repairHttpStatus(result));
 	});

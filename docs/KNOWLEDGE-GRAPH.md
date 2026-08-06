@@ -193,44 +193,17 @@ separate evidence/attribution layer.
 
 ## Write Paths
 
-### Structured Remember Payloads
+Semantic graph authorship (entities, aspects, attributes, dependencies) flows
+through the audited ontology apply path. The retired `txPersistStructured` /
+`txPersistEntities` transaction closures and the inline LLM extraction chain
+(`extractFactsAndEntities`) were removed under the Dreaming cutover (#946);
+remember and ingest no longer author graph structure directly.
 
-Source: `platform/daemon/src/pipeline/graph-transactions.ts`
-
-`txPersistStructured` writes caller-provided structured data from the remember
-API. It:
-
-1. persists extracted entity triples through `txPersistEntities`;
-2. upserts mentioned entities;
-3. upserts aspects by `(entity_id, canonical_name)`;
-4. inserts attributes with optional `groupKey` and `claimKey`;
-5. links rows to the source memory through `memory_id` and
-   `memory_entity_mentions`;
-6. supersedes likely conflicting sibling attributes in the same
-   `aspect_id + group_key + claim_key` slot;
-7. creates low-strength `related_to` dependencies between co-occurring
-   structured entities.
-
-If the source memory is decision-like, structured attributes are promoted to
-`kind = 'constraint'`; otherwise they are normal attributes.
-
-### Extracted Entity Mentions
-
-`txPersistEntities` persists extracted source/relationship/target triples into
-`entities`, the older `relations` table, and `memory_entity_mentions`.
-
-This path links memories to entities and maintains mention counts. It does not
-create aspect or attribute rows by itself.
-
-### Pipeline Graph Writes
-
-Background extraction graph writes are controlled by
-`memory.pipelineV2.graph.extractionWritesEnabled`, which defaults to `true`.
-Set it to `false` when graph traversal should stay enabled but the async
-extractor should not author ontology structure.
-When graph reads are enabled but extraction writes remain disabled, the daemon
-emits a startup warning and `/api/diagnostics` exposes the disabled write gate
-as `graph.extractionWritesEnabled: false`.
+The only retained write closure in
+`platform/daemon/src/pipeline/graph-transactions.ts` is
+`txDecrementEntityMentions`, used by the retention worker to decrement mention
+counts and delete orphaned entities (plus their dangling relations) after a
+memory purge.
 
 ### Ontology Operation Handlers
 
@@ -330,14 +303,21 @@ Aspect feedback is driven by session outcomes. FTS overlap can increase aspect
 weights when previously injected memories later match full-text searches.
 Aspect decay lowers stale weights toward a configured floor.
 
-Source: `platform/daemon/src/pipeline/supersession.ts`
+Source: `platform/daemon/src/pipeline/graph-transactions.ts`
 
-### Retroactive Supersession
+### Supersession
 
-Supersession detects and marks conflicting active sibling attributes. Structured
-remember does this at write time for matching claim slots. Maintenance can also
-catch older contradictions. Constraints are not automatically superseded by this
-heuristic.
+Conflicting sibling attributes in the same `aspect_id + group_key +
+claim_key` slot are superseded at write time by the audited structured
+apply path. The newer attribute wins when its content is
+a likely supersession of the older one; constraints are not
+auto-superseded by this write-time heuristic. Explicit, audited
+supersession flows through the `supersede_claim_value` ontology operation
+handler (see "Ontology Operation Handlers" above), which validates
+inputs, preserves provenance, updates version lineage, and leaves an
+audit row. The periodic retroactive supersession sweep was retired under
+the Dreaming cutover (#946); maintenance does not supersede semantic
+rows.
 
 Source: `platform/daemon/src/knowledge-graph-hygiene.ts`
 

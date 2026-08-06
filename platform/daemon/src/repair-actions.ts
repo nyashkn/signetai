@@ -6,12 +6,7 @@
  * All actions respect autonomousFrozen regardless of actor type.
  */
 
-import {
-	type LlmProvider,
-	memoriesFtsNeedsTokenizerRepair,
-	readMemoriesFtsSql,
-	recreateMemoriesFts,
-} from "@signet/core";
+import { memoriesFtsNeedsTokenizerRepair, readMemoriesFtsSql, recreateMemoriesFts } from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { toFtsSchemaQueryDb } from "./db-accessor";
@@ -222,6 +217,60 @@ const MAX_BATCH_HARD_CAP = 1000;
  * options compose, default behavior is preserved when `options` is
  * omitted (existing callers stay correct).
  */
+
+/**
+ * Allocate the bounded requeue budget across selected queues so a default
+ * both-queue repair makes progress in every non-empty queue (issue #1052).
+ *
+ * Each selected non-empty queue receives one reserved slot; the remaining
+ * capacity is split, and capacity a queue cannot use (fewer matches than its
+ * share) is refilled from the other queue. Single-table selections keep the
+ * full cap.
+ */
+function allocateRequeueBudgets(
+	memoryMatches: number,
+	summaryMatches: number,
+	maxBatch: number,
+	wantsMemory: boolean,
+	wantsSummary: boolean,
+): { memory: number; summary: number } {
+	if (!wantsMemory) {
+		return { memory: 0, summary: Math.min(summaryMatches, maxBatch) };
+	}
+	if (!wantsSummary) {
+		return { memory: Math.min(memoryMatches, maxBatch), summary: 0 };
+	}
+
+	if (memoryMatches <= 0) {
+		return { memory: 0, summary: Math.min(summaryMatches, maxBatch) };
+	}
+	if (summaryMatches <= 0) {
+		return { memory: Math.min(memoryMatches, maxBatch), summary: 0 };
+	}
+
+	// Both queues are non-empty: reserve one slot each, split the rest.
+	const reserved = 2;
+	if (maxBatch < reserved) {
+		// The batch is too small to reserve one slot per queue — give it all
+		// to memory (first queue). Summary still reports its match count
+		// even with a zero selection budget (issue #1052).
+		return { memory: Math.min(memoryMatches, maxBatch), summary: 0 };
+	}
+	const remainder = Math.max(0, maxBatch - reserved);
+	let memory = 1 + Math.ceil(remainder / 2);
+	let summary = 1 + Math.floor(remainder / 2);
+
+	// Refill unused capacity from the other queue.
+	const memoryUnused = Math.max(0, memory - memoryMatches);
+	const summaryUnused = Math.max(0, summary - summaryMatches);
+	memory = Math.min(memory, memoryMatches) + summaryUnused;
+	summary = Math.min(summary, summaryMatches) + memoryUnused;
+
+	return {
+		memory: Math.min(memory, memoryMatches),
+		summary: Math.min(summary, summaryMatches),
+	};
+}
 export function requeueDeadJobs(
 	accessor: DbAccessor,
 	cfg: PipelineV2Config,
@@ -252,17 +301,29 @@ export function requeueDeadJobs(
 		// --- memory_jobs ---
 		const wantsMemory = !options.tables || options.tables.includes("memory");
 		const wantsSummary = !options.tables || options.tables.includes("summary");
-		const memorySql = wantsMemory
-			? buildDeadRequeueSql(db, "memory_jobs", "memory_id", maxBatch, options)
-			: { sql: "", params: [], ids: [], totalMatching: 0 };
+		const memoryMatches = wantsMemory ? countDeadRequeueMatches(db, "memory_jobs", options) : 0;
+		const summaryMatches = wantsSummary ? countDeadRequeueMatches(db, "summary_jobs", options) : 0;
+		const { memory: memoryBudget, summary: summaryBudget } = allocateRequeueBudgets(
+			memoryMatches,
+			summaryMatches,
+			maxBatch,
+			wantsMemory,
+			wantsSummary,
+		);
+
+		const memorySql =
+			wantsMemory && memoryBudget > 0
+				? buildDeadRequeueSql(db, "memory_jobs", "memory_id", memoryBudget, options)
+				: { sql: "", params: [], ids: [], totalMatching: memoryMatches };
 		const memoryIds = memorySql.ids;
 
 		// Dry-run: collect without mutating.
 		if (dryRun) {
 			const memoryPreview: string[] = memoryIds.map((r) => r.id);
-			const summarySql = wantsSummary
-				? buildDeadRequeueSql(db, "summary_jobs", null, maxBatch - memoryPreview.length, options)
-				: { sql: "", params: [], ids: [], totalMatching: 0 };
+			const summarySql =
+				wantsSummary && summaryBudget > 0
+					? buildDeadRequeueSql(db, "summary_jobs", null, summaryBudget, options)
+					: { sql: "", params: [], ids: [], totalMatching: summaryMatches };
 			const summaryPreview: string[] = summarySql.ids.map((r) => r.id);
 			const previewIds = [...memoryPreview, ...summaryPreview].slice(0, PREVIEW_CAP);
 			const totalMatching = (memorySql.totalMatching ?? 0) + (summarySql.totalMatching ?? 0);
@@ -293,7 +354,6 @@ export function requeueDeadJobs(
 		}
 
 		// --- summary_jobs (issue #181) ---
-		const summaryBudget = maxBatch - memoryCount;
 		let summaryCount = 0;
 		if (wantsSummary && summaryBudget > 0 && tableExists(db, "summary_jobs")) {
 			const summarySql = buildDeadRequeueSql(db, "summary_jobs", null, summaryBudget, options);
@@ -318,7 +378,7 @@ export function requeueDeadJobs(
 			memoryCount,
 			summaryCount,
 			preview: undefined as readonly string[] | undefined,
-			totalMatching: undefined as number | undefined,
+			totalMatching: memoryMatches + summaryMatches,
 		};
 	});
 
@@ -1612,222 +1672,6 @@ async function findSemanticDuplicates(
 }
 
 // ---------------------------------------------------------------------------
-// Reclassify extracted entities via LLM
-// ---------------------------------------------------------------------------
-
-const VALID_ENTITY_TYPES = new Set([
-	"person",
-	"organization",
-	"project",
-	"product",
-	"system",
-	"tool",
-	"artifact",
-	"document",
-	"source",
-	"place",
-	"event",
-]);
-
-const DEFAULT_RECLASSIFY_BATCH = 20;
-const MIN_RECLASSIFY_BATCH = 5;
-const MAX_RECLASSIFY_BATCH = 30;
-
-interface ExtractedEntity {
-	readonly id: string;
-	readonly name: string;
-	readonly canonical_name: string | null;
-}
-
-interface ReclassifyEntry {
-	readonly i: number;
-	readonly type: string;
-}
-
-function tryParseJsonArray(raw: string): unknown {
-	// Strip markdown fences if present
-	const stripped = raw
-		.replace(/^```(?:json)?\s*/m, "")
-		.replace(/```\s*$/m, "")
-		.trim();
-	try {
-		return JSON.parse(stripped);
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Reclassify entities whose entity_type is 'extracted' by asking an
- * LLM to infer the actual type from the entity name.
- */
-export async function reclassifyEntities(
-	accessor: DbAccessor,
-	cfg: PipelineV2Config,
-	ctx: RepairContext,
-	limiter: RateLimiter,
-	provider: LlmProvider | null,
-	options?: { batchSize?: number; dryRun?: boolean },
-): Promise<RepairResult> {
-	const action = "reclassifyEntities";
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 300000, 5);
-
-	if (!gate.allowed) {
-		return {
-			action,
-			success: false,
-			affected: 0,
-			message: gate.reason ?? "denied by policy gate",
-		};
-	}
-
-	const batchSize =
-		typeof options?.batchSize === "number" && options.batchSize > 0
-			? Math.max(MIN_RECLASSIFY_BATCH, Math.min(Math.floor(options.batchSize), MAX_RECLASSIFY_BATCH))
-			: DEFAULT_RECLASSIFY_BATCH;
-
-	const dryRun = options?.dryRun ?? false;
-
-	const entities = accessor.withReadDb((db) => {
-		return db
-			.prepare(
-				`SELECT id, name, canonical_name
-				 FROM entities
-				 WHERE entity_type = 'extracted'
-				 LIMIT ?`,
-			)
-			.all(batchSize) as ExtractedEntity[];
-	});
-
-	if (entities.length === 0) {
-		limiter.record(action);
-		return {
-			action,
-			success: true,
-			affected: 0,
-			message: "no entities with type 'extracted' found",
-		};
-	}
-
-	if (!provider) {
-		return {
-			action,
-			success: false,
-			affected: 0,
-			message: "no LLM provider available",
-		};
-	}
-
-	const entityList = entities.map((e, idx) => `${idx + 1}. ${e.canonical_name ?? e.name}`).join("\n");
-
-	const prompt = `Classify each entity into one of these concrete identity-bearing types: person, organization, project, product, system, tool, artifact, document, source, place, event
-
-Entities:
-${entityList}
-
-Respond with ONLY a JSON array, no other text:
-[{"i": 1, "type": "person"}, {"i": 2, "type": "project"}, ...]
-/no_think`;
-
-	let responseText: string;
-	try {
-		responseText = await provider.generate(prompt, { timeoutMs: 30000 });
-	} catch (err: unknown) {
-		const errMsg = err instanceof Error ? err.message : String(err);
-		logger.warn("pipeline", "repair: reclassify LLM call failed", {
-			error: errMsg,
-			actor: ctx.actor,
-		});
-		return {
-			action,
-			success: false,
-			affected: 0,
-			message: `LLM call failed: ${errMsg}`,
-		};
-	}
-
-	const parsed = tryParseJsonArray(responseText);
-	if (!Array.isArray(parsed)) {
-		logger.warn("pipeline", "repair: reclassify LLM response not parseable", {
-			responsePreview: responseText.slice(0, 200),
-			actor: ctx.actor,
-		});
-		return {
-			action,
-			success: false,
-			affected: 0,
-			message: "LLM response was not a valid JSON array",
-		};
-	}
-
-	// Build a map of 1-based index -> validated type
-	const classifications = new Map<number, string>();
-	for (const entry of parsed) {
-		if (typeof entry === "object" && entry !== null && "i" in entry && "type" in entry) {
-			const rec = entry as Record<string, unknown>;
-			const idx = typeof rec.i === "number" ? rec.i : -1;
-			const entityType = typeof rec.type === "string" ? rec.type.toLowerCase().trim() : "";
-			if (idx >= 1 && idx <= entities.length && VALID_ENTITY_TYPES.has(entityType)) {
-				classifications.set(idx, entityType);
-			}
-		}
-	}
-
-	if (dryRun) {
-		limiter.record(action);
-		const preview = Array.from(classifications.entries())
-			.slice(0, 10)
-			.map(([idx, type]) => `${entities[idx - 1].name} -> ${type}`)
-			.join(", ");
-		return {
-			action,
-			success: true,
-			affected: 0,
-			message: `dry run: ${classifications.size} of ${entities.length} would be reclassified (${preview})`,
-		};
-	}
-
-	const affected = accessor.withWriteTx((db) => {
-		const now = new Date().toISOString();
-		let count = 0;
-
-		for (const [idx, entityType] of classifications) {
-			const entity = entities[idx - 1];
-			const result = db
-				.prepare(
-					`UPDATE entities SET entity_type = ?, updated_at = ?
-					 WHERE id = ? AND entity_type = 'extracted'`,
-				)
-				.run(entityType, now, entity.id);
-
-			if (countChanges(result) > 0) {
-				count++;
-			}
-		}
-
-		const msg = `reclassified ${count} entity/entities from 'extracted'`;
-		writeRepairAudit(db, action, ctx, count, msg);
-		return count;
-	});
-
-	limiter.record(action);
-	logger.info("pipeline", "repair: reclassified extracted entities", {
-		affected,
-		total: entities.length,
-		classified: classifications.size,
-		actor: ctx.actor,
-		reason: ctx.reason,
-	});
-
-	return {
-		action,
-		success: true,
-		affected,
-		message: `reclassified ${affected} entity/entities from 'extracted' (${entities.length} queried, ${classifications.size} valid classifications)`,
-	};
-}
-
-// ---------------------------------------------------------------------------
 // pruneChunkGroupEntities
 // ---------------------------------------------------------------------------
 
@@ -1923,7 +1767,7 @@ export function pruneSingletonExtractedEntities(
 				     WHERE asp.entity_id = e.id LIMIT 1
 				   )
 				   AND NOT EXISTS (
-				     -- Entity has no stub attributes (aspect_id IS NULL) written by structuralBackfill
+				     -- Entity has no stub attributes (aspect_id IS NULL)
 				     SELECT 1 FROM entity_attributes ea
 				     WHERE ea.aspect_id IS NULL
 				       AND ea.memory_id IN (
@@ -2102,130 +1946,6 @@ export function pruneGenericEntities(
 		actor: ctx.actor,
 	});
 	return { action, success: true, affected, message: `deleted ${affected} generic/non-concrete entities` };
-}
-
-// ---------------------------------------------------------------------------
-// structuralBackfill
-// ---------------------------------------------------------------------------
-
-/**
- * For memories that have entity links but no entity_attributes yet, create
- * stub attribute rows and enqueue structural_classify jobs so the
- * classification worker can annotate the clean entity set.
- */
-export function structuralBackfill(
-	accessor: DbAccessor,
-	cfg: PipelineV2Config,
-	ctx: RepairContext,
-	limiter: RateLimiter,
-	options?: { batchSize?: number; dryRun?: boolean },
-): RepairResult {
-	const action = "structuralBackfill";
-	if (!cfg.structural.enabled) {
-		return {
-			action,
-			success: true,
-			affected: 0,
-			message: "structural backfill disabled; use structured remember or an explicit normalization pass",
-		};
-	}
-
-	const gate = checkRepairGate(cfg, ctx, limiter, action, 60_000, 20);
-	if (!gate.allowed) {
-		return { action, success: false, affected: 0, message: gate.reason ?? "denied" };
-	}
-
-	const batchSize = options?.batchSize ?? 100;
-
-	const rows = accessor.withReadDb(
-		(db) =>
-			db
-				.prepare(
-					`SELECT m.id as memory_id, m.content,
-				        e.id as entity_id, e.entity_type, e.canonical_name, e.agent_id
-				 FROM memories m
-				 JOIN memory_entity_mentions mem ON mem.memory_id = m.id
-				 JOIN entities e ON e.id = mem.entity_id
-				 WHERE m.is_deleted = 0
-				   AND e.entity_type != 'chunk_group'
-				   AND NOT EXISTS (SELECT 1 FROM entity_attributes WHERE memory_id = m.id LIMIT 1)
-				 GROUP BY m.id
-				 LIMIT ?`,
-				)
-				.all(batchSize) as Array<{
-				memory_id: string;
-				content: string;
-				entity_id: string;
-				entity_type: string;
-				canonical_name: string;
-				agent_id: string;
-			}>,
-	);
-
-	if (rows.length === 0 || options?.dryRun) {
-		return {
-			action,
-			success: true,
-			affected: rows.length,
-			message: options?.dryRun
-				? `dry-run: would process ${rows.length} unassigned memories`
-				: "no unassigned memories with entity links found",
-		};
-	}
-
-	let attributesCreated = 0;
-	let classifyEnqueued = 0;
-
-	accessor.withWriteTx((db) => {
-		const now = new Date().toISOString();
-		for (const row of rows) {
-			const attrId = crypto.randomUUID();
-			db.prepare(
-				`INSERT INTO entity_attributes
-				 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content,
-				  confidence, importance, status, created_at, updated_at)
-				 VALUES (?, NULL, ?, ?, 'attribute', ?, ?, 0.5, 0.5, 'active', ?, ?)`,
-			).run(attrId, row.agent_id, row.memory_id, row.content, row.content, now, now);
-			attributesCreated++;
-
-			const payload = JSON.stringify({
-				memory_id: row.memory_id,
-				entity_id: row.entity_id,
-				entity_name: row.canonical_name,
-				entity_type: row.entity_type,
-				fact_content: row.content,
-				attribute_id: attrId,
-				agent_id: row.agent_id,
-			});
-			const jobId = crypto.randomUUID();
-			db.prepare(
-				`INSERT INTO memory_jobs
-				 (id, memory_id, job_type, status, payload, attempts, max_attempts, created_at, updated_at)
-				 VALUES (?, ?, 'structural_classify', 'pending', ?, 0, 3, ?, ?)`,
-			).run(jobId, row.memory_id, payload, now, now);
-			classifyEnqueued++;
-		}
-		writeRepairAudit(
-			db,
-			action,
-			ctx,
-			attributesCreated,
-			`created ${attributesCreated} stubs, enqueued ${classifyEnqueued} classify jobs`,
-		);
-	});
-
-	limiter.record(action);
-	logger.info("pipeline", "repair: structural backfill", {
-		attributesCreated,
-		classifyEnqueued,
-		actor: ctx.actor,
-	});
-	return {
-		action,
-		success: true,
-		affected: attributesCreated,
-		message: `created ${attributesCreated} stubs, enqueued ${classifyEnqueued} classify jobs`,
-	};
 }
 
 // ---------------------------------------------------------------------------
@@ -2521,22 +2241,23 @@ interface BuiltSql {
  * uniquely identifies the row inside the table — `memory_id` for
  * `memory_jobs`, `null` for `summary_jobs` whose primary key is `id`.
  */
-function buildDeadRequeueSql(
+function buildDeadRequeueWhere(
 	db: ReadDb,
 	table: "memory_jobs" | "summary_jobs",
-	_placeholderIdColumn: "memory_id" | null,
-	limit: number,
 	options: JobFilterOptions,
-): BuiltSql {
-	if (limit <= 0) {
-		return { sql: "", params: [], ids: [], totalMatching: 0 };
-	}
+): { where: string[]; params: unknown[] } | null {
 	if (!tableExists(db, table)) {
-		return { sql: "", params: [], ids: [], totalMatching: 0 };
+		return null;
 	}
 
 	const where: string[] = ["status = 'dead'"];
 	const params: unknown[] = [];
+	if (table === "memory_jobs") {
+		// The extraction worker is gone. Startup already promoted each legacy
+		// extract source to Dreaming before terminalizing its job, so requeueing
+		// it would create work with no consumer.
+		where.push("job_type <> 'extract'");
+	}
 
 	if (options.ids && options.ids.length > 0) {
 		const placeholders = options.ids.map(() => "?").join(", ");
@@ -2553,13 +2274,39 @@ function buildDeadRequeueSql(
 		params.push(`%${options.errorPattern}%`);
 	}
 
-	const baseWhere = `WHERE ${where.join(" AND ")}`;
-	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} ${baseWhere}`);
-	const totalMatching = (countStmt.get(...params) as { cnt: number } | undefined)?.cnt ?? 0;
+	return { where, params };
+}
 
+function countDeadRequeueMatches(db: ReadDb, table: "memory_jobs" | "summary_jobs", options: JobFilterOptions): number {
+	const built = buildDeadRequeueWhere(db, table, options);
+	if (!built) return 0;
+	const countStmt = db.prepare(`SELECT COUNT(*) AS cnt FROM ${table} WHERE ${built.where.join(" AND ")}`);
+	const row = countStmt.get(...built.params) as { cnt: number } | undefined;
+	return row?.cnt ?? 0;
+}
+
+function buildDeadRequeueSql(
+	db: ReadDb,
+	table: "memory_jobs" | "summary_jobs",
+	_placeholderIdColumn: "memory_id" | null,
+	limit: number,
+	options: JobFilterOptions,
+): BuiltSql {
+	// The match count is a property of the filter, not the selection budget:
+	// a zero budget must still report how many rows matched so dry-run totals
+	// never silently drop a backlog (issue #1052).
+	const totalMatching = countDeadRequeueMatches(db, table, options);
+	if (limit <= 0) {
+		return { sql: "", params: [], ids: [], totalMatching };
+	}
+	const built = buildDeadRequeueWhere(db, table, options);
+	if (!built) {
+		return { sql: "", params: [], ids: [], totalMatching };
+	}
+	const baseWhere = `WHERE ${built.where.join(" AND ")}`;
 	const stmt = db.prepare(`SELECT id FROM ${table} ${baseWhere} ORDER BY created_at ASC LIMIT ?`);
-	const ids = stmt.all(...params, limit) as unknown as DeadMatchRow[];
-	return { sql: "", params: [...params, limit], ids, totalMatching };
+	const ids = stmt.all(...built.params, limit) as unknown as DeadMatchRow[];
+	return { sql: "", params: [...built.params, limit], ids, totalMatching };
 }
 
 interface CancelPruneMatchRow {
@@ -2575,7 +2322,8 @@ interface CancelPruneBuilt {
 /**
  * Build a parameterized SELECT for `cancelObsoleteJobs` and
  * `pruneTerminalJobs`. Captures the full row as JSON so the action can
- * copy it to the audit/archive table inside the same write tx.
+ * copy it to the audit/archive table inside the same write tx. Unlike
+ * requeue, terminal cleanup deliberately includes retired `extract` rows.
  */
 function buildCancelPruneSql(
 	db: ReadDb,
@@ -2675,12 +2423,24 @@ export function cancelObsoleteJobs(
 			readonly rows: readonly CancelPruneMatchRow[];
 			readonly totalMatching: number;
 		}> = [];
+		// `--max-batch` is an aggregate cap across ALL selected tables, not a
+		// per-table cap. Select memory first, then hand only the remaining
+		// budget to summary so a both-queue operation can never exceed the
+		// requested blast radius (issue #1053).
+		let remaining = Math.min(selection.maxBatch ?? MAX_BATCH_HARD_CAP, MAX_BATCH_HARD_CAP);
 		if (wantsMemory) {
-			const r = buildCancelPruneSql(db, "memory_jobs", ["dead", "completed"], selection);
+			const r = buildCancelPruneSql(db, "memory_jobs", ["dead", "completed"], {
+				...selection,
+				maxBatch: remaining,
+			});
 			targets.push({ table: "memory_jobs", rows: r.rows, totalMatching: r.totalMatching });
+			remaining = Math.max(0, remaining - r.rows.length);
 		}
 		if (wantsSummary) {
-			const r = buildCancelPruneSql(db, "summary_jobs", ["dead", "completed"], selection);
+			const r = buildCancelPruneSql(db, "summary_jobs", ["dead", "completed"], {
+				...selection,
+				maxBatch: remaining,
+			});
 			targets.push({ table: "summary_jobs", rows: r.rows, totalMatching: r.totalMatching });
 		}
 
@@ -2818,15 +2578,20 @@ export function pruneTerminalJobs(
 			readonly totalMatching: number;
 		}> = [];
 		let totalMatching = 0;
+		// `--max-batch` is an aggregate cap across ALL selected tables; the
+		// remaining budget carries across tables so a both-queue prune can
+		// never exceed the requested blast radius (issue #1053).
+		let remaining = Math.min(options.maxBatch ?? MAX_BATCH_HARD_CAP, MAX_BATCH_HARD_CAP);
 		for (const t of targets) {
 			const selection: JobFilterOptions = {
 				...options,
 				olderThanMs: t.cutoff,
-				maxBatch: options.maxBatch ?? MAX_BATCH_HARD_CAP,
+				maxBatch: remaining,
 			};
 			const r = buildCancelPruneSql(db, t.table, t.statusList, selection);
 			perTable.push({ rows: r.rows, totalMatching: r.totalMatching });
 			totalMatching += r.totalMatching;
+			remaining = Math.max(0, remaining - r.rows.length);
 		}
 
 		if (dryRun) {

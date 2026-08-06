@@ -90,8 +90,8 @@ These are the areas most likely to be touched in non-trivial contributions.
 Familiarize yourself with them before diving in.
 
 **`platform/daemon/src/pipeline/`** is the LLM-based memory extraction
-pipeline. It runs in stages: extraction (`extraction.ts`, uses Ollama by
-default with `qwen3:4b`) → decision (`decision.ts`, write/update/skip) →
+pipeline. It runs in stages: extraction (`extraction.ts`, shared JSON
+recovery/parsing helpers) → decision (`decision.ts`, write/update/skip) →
 optional graph operations → retention decay. The entrypoint is `worker.ts`;
 `provider.ts` wires up the stages. Config modes like `shadowMode` and
 `mutationsFrozen` are respected here. For live prompt checks against local

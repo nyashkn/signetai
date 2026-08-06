@@ -419,7 +419,8 @@ The default `signet` provider uses the public Signet daemon HTTP API:
 - search: `POST /api/memory/recall` with `expand: true`
 - health: `GET /health`
 
-During ingest, the provider performs MemoryBench-side structured extraction
+The default `rules` profile is retained as a historical structured-ingest
+baseline. During ingest it performs MemoryBench-side structured extraction
 from each session, then calls the full remember endpoint with:
 
 - extracted memory content
@@ -429,13 +430,45 @@ from each session, then calls the full remember endpoint with:
 - source metadata and per-question scope
 - the lossless source transcript
 
-The isolated daemon does not run background extraction or synthesis workers for
-benchmark ingestion. Those stages stay disabled so the benchmark is not racing
-async background work or depending on local daemon timing. Graph and traversal
-are enabled only so recall can use the structured data that was explicitly sent
-to `/api/memory/remember`; `graph.extractionWritesEnabled` stays `false` so the
-async extractor cannot create benchmark graph structure. Recall treats active
-structured rows as a first-class candidate source by searching entity names,
+The `dreaming` profile is the cutover-quality path: it saves only lossless raw
+episodic sessions, waits until the full selected corpus is durable, then
+triggers exactly one bounded daemon Dreaming pass before retrieval. Its agent
+model is explicit (`SIGNET_BENCH_DREAMING_MODEL`) and travels through the same
+daemon router as production. It is the profile used for absolute Dreaming
+quality measurements; `rules` is not a substitute for it.
+
+### Retrieval uplift ablation
+
+`--graph off` disables both graph boost and graph traversal while leaving
+episodic inputs and ordinary recall unchanged. For a controlled ablation, keep
+one workspace and run id: first ingest, Dream, and retrieve with the graph on;
+then restart from the `search` phase with the graph off. This preserves the
+exact same episodic and semantic state for both retrieval surfaces.
+
+```bash
+export RUN_ID="dreaming-uplift-$(date -u +%Y%m%dT%H%M%SZ)"
+export WORKSPACE=".bench/workspaces/dreaming-uplift"
+
+# Capture the graph-on report before reusing the run checkpoint.
+SIGNET_BENCH_RUN_ID="$RUN_ID" \
+bun scripts/bench-memory.ts --profile dreaming --graph on --workspace "$WORKSPACE" --full
+cp "memorybench/data/runs/$RUN_ID/report.json" "memorybench/data/runs/$RUN_ID/report-graph-on.json"
+
+# Re-run only search → answer → evaluate → report against the unchanged DB.
+SIGNET_BENCH_RUN_ID="$RUN_ID" \
+bun scripts/bench-memory.ts --profile dreaming --graph off --workspace "$WORKSPACE" --resume -r "$RUN_ID" -f search
+cp "memorybench/data/runs/$RUN_ID/report.json" "memorybench/data/runs/$RUN_ID/report-graph-off.json"
+```
+
+Compare LongMemEval retrieval aggregates (`hit@k`, recall, MRR, NDCG), not
+answer-model scores alone.
+
+The isolated daemon does not run legacy extraction or structural workers for
+benchmark ingestion. Graph and traversal are enabled only so recall can use
+the semantic state created by the selected profile. In the baseline that state
+comes from the explicit structured payload; in `dreaming`, it comes only from
+the post-ingest Dreaming pass. Recall treats active structured rows as a
+first-class candidate source by searching entity names,
 aspects, group keys, claim keys, attribute kinds, and attribute content before
 SEC reranking. This is deliberately generic: bridges may connect broad query
 classes like music, service, brand, or currentness to nearby vocabulary, but the
@@ -448,9 +481,8 @@ requested. Those snippets are returned by the recall API and capped so they
 cannot outrank real memory evidence; the benchmark harness does not append raw
 transcripts on its own.
 
-The isolated daemon also disables structural backfill/classification. Benchmark
-graph state must come from the explicit structured remember payload, not from
-daemon repair jobs that infer entities after the fact.
+The isolated daemon also disables structural backfill/classification. No daemon
+repair job may infer benchmark graph state after the fact.
 
 ## Structured remembering contract
 
@@ -515,7 +547,8 @@ changes to MemoryBench scoring logic.
 SIGNET_BENCH_FULL=1                 Run the full benchmark by default.
 SIGNET_BENCH_SKIP_BUILD=1           Skip `bun run build`.
 SIGNET_BENCH_KEEP_WORKSPACE=1       Keep the isolated workspace after the run.
-SIGNET_BENCH_PROFILE=<profile>      rules or supermemory-parity, default rules.
+SIGNET_BENCH_PROFILE=<profile>      rules, dreaming, or supermemory-parity; default rules.
+SIGNET_BENCH_GRAPH=on|off           Enable graph boost/traversal for the benchmark, default on.
 SIGNET_BENCH_RUN_ID=<id>            Override the MemoryBench run id.
 SIGNET_BENCH_JUDGE=<model>          Default judge model, default gpt-4o.
 SIGNET_BENCH_ANSWERING_MODEL=<m>    Default answering model, default gpt-4o.
@@ -530,6 +563,14 @@ SIGNET_BENCH_SESSION_CONCURRENCY=<n> Per-question session ingest concurrency, de
 SIGNET_BENCH_INGEST_OPENROUTER=1    Use OpenRouter defaults for bench:ingest.
 SIGNET_BENCH_OPENROUTER_MODEL=<m>   OpenRouter extraction model, default inception/mercury-2.
 SIGNET_BENCH_OPENROUTER_BASE_URL=<u> OpenRouter-compatible base URL override.
+SIGNET_BENCH_DREAMING_MODEL=<id>    Required routed model id for the dreaming profile.
+SIGNET_BENCH_DREAMING_ENDPOINT=<u>  Optional OpenAI-compatible base endpoint (for example LM Studio); a pasted `/v1/chat/completions` URL is normalized to its base. Bypasses OpenRouter.
+SIGNET_BENCH_DREAMING_API_KEY=<key> Credential for a remote Dreaming endpoint; stays in the runner environment.
+SIGNET_BENCH_DREAMING_CREDENTIAL_REF=<name> Optional isolated-workspace credential env name; defaults to SIGNET_BENCH_DREAMING_API_KEY.
+SIGNET_BENCH_DREAMING_PROVIDER_FAMILY=<name> Optional Pi catalog provider family for a compatible endpoint. Use `opencode-go` with OpenCode Zen Go so Pi preserves model-specific tool/thinking protocol metadata.
+SIGNET_BENCH_DREAMING_WAIT_SECS=<n> Max time to await its bounded Dreaming pass, default 720.
+SIGNET_BENCH_DREAMING_TIMEOUT_MS=<n> Per-pass routed inference timeout, default 600000. Raise it with the wait budget for slower agentic models.
+SIGNET_BENCH_DREAMING_MAX_OUTPUT_TOKENS=<n> Per-turn Dreaming output cap, default 32000. Keep it high enough for an agentic pass to finish rather than terminate mid-tool-loop.
 MEMORYBENCH_EXTRACTION_MODEL=<m>    Structured extraction model, default gpt-4o.
 MEMORYBENCH_EXTRACTION_MAX_TOKENS=<n> Markdown extraction cap, default 1200.
 MEMORYBENCH_STRUCTURED_EXTRACTION_MAX_TOKENS=<n> Structured JSON extraction cap, default 1800.

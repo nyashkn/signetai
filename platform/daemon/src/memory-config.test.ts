@@ -9,9 +9,10 @@ import {
 	MAX_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
 	MIN_LLAMACPP_MAX_INPUT_TOKENS,
 	MIN_PROMPT_SUBMIT_EMBEDDING_TIMEOUT_MS,
+	detectLocalTimeZone,
+	loadDreamingConfig,
 	loadMemoryConfig,
 	loadPipelineConfig,
-	shouldWarnGraphExtractionWritesDisabled,
 } from "./memory-config";
 
 const tmpDirs: string[] = [];
@@ -24,10 +25,28 @@ afterEach(() => {
 	}
 });
 
+describe("loadDreamingConfig", () => {
+	it("defaults and bounds the low-volume backlog maximum wait", () => {
+		expect(loadDreamingConfig({}).maxInterval).toBe(6 * 60 * 60 * 1_000);
+		expect(loadDreamingConfig({ memory: { dreaming: { maxInterval: 1 } } }).maxInterval).toBe(5 * 60 * 1_000);
+		expect(loadDreamingConfig({ memory: { dreaming: { maxInterval: 9 * 24 * 60 * 60 * 1_000 } } }).maxInterval).toBe(
+			7 * 24 * 60 * 60 * 1_000,
+		);
+	});
+});
+
 function makeTempAgentsDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "signet-daemon-config-"));
 	tmpDirs.push(dir);
 	return dir;
+}
+
+function restoreWarmNativeEnv(value: string | undefined): void {
+	if (value === undefined) {
+		Reflect.deleteProperty(process.env, "SIGNET_EMBEDDING_WARM_NATIVE");
+		return;
+	}
+	process.env.SIGNET_EMBEDDING_WARM_NATIVE = value;
 }
 
 describe("loadMemoryConfig", () => {
@@ -54,6 +73,64 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.embedding.provider).toBe("ollama");
 		expect(cfg.embedding.model).toBe("all-minilm");
 		expect(cfg.embedding.dimensions).toBe(384);
+	});
+
+	it("parses embedding.warmNative: false as the native kill-switch (#1073)", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`embedding:
+  provider: native
+  warmNative: false
+`,
+		);
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.embedding.warmNative).toBe(false);
+	});
+
+	it("parses warmNative without requiring an explicit provider (#1073)", () => {
+		const agentsDir = makeTempAgentsDir();
+		const previous = process.env.SIGNET_EMBEDDING_WARM_NATIVE;
+		try {
+			Reflect.deleteProperty(process.env, "SIGNET_EMBEDDING_WARM_NATIVE");
+			writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  warmNative: false\n");
+			expect(loadMemoryConfig(agentsDir).embedding.warmNative).toBe(false);
+		} finally {
+			restoreWarmNativeEnv(previous);
+		}
+	});
+
+	it("defaults warmNative to true when unset (#1073)", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  provider: native\n");
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.embedding.warmNative).toBe(true);
+	});
+
+	it("lets SIGNET_EMBEDDING_WARM_NATIVE override the yaml value (#1073)", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  provider: native\n  warmNative: true\n");
+		const previous = process.env.SIGNET_EMBEDDING_WARM_NATIVE;
+		try {
+			process.env.SIGNET_EMBEDDING_WARM_NATIVE = "0";
+			const cfg = loadMemoryConfig(agentsDir);
+			expect(cfg.embedding.warmNative).toBe(false);
+		} finally {
+			restoreWarmNativeEnv(previous);
+		}
+	});
+
+	it("applies SIGNET_EMBEDDING_WARM_NATIVE when no config file exists (#1073)", () => {
+		const agentsDir = makeTempAgentsDir();
+		const previous = process.env.SIGNET_EMBEDDING_WARM_NATIVE;
+		try {
+			process.env.SIGNET_EMBEDDING_WARM_NATIVE = "0";
+			expect(loadMemoryConfig(agentsDir).embedding.warmNative).toBe(false);
+		} finally {
+			restoreWarmNativeEnv(previous);
+		}
 	});
 
 	it("falls back to AGENT.yaml memory.embeddings when agent.yaml is missing", () => {
@@ -132,56 +209,6 @@ describe("loadMemoryConfig", () => {
 		expect(second.pipelineV2.graph.enabled).toBe(true);
 	});
 
-	it("enables graph extraction writes by default", () => {
-		const agentsDir = makeTempAgentsDir();
-		const cfg = loadMemoryConfig(agentsDir);
-
-		expect(cfg.pipelineV2.graph.enabled).toBe(true);
-		expect(cfg.pipelineV2.graph.extractionWritesEnabled).toBe(true);
-		expect(shouldWarnGraphExtractionWritesDisabled(cfg)).toBe(false);
-	});
-
-	it("warns only when graph reads are enabled but extraction writes are explicitly disabled", () => {
-		const agentsDir = makeTempAgentsDir();
-		const cfg = loadMemoryConfig(agentsDir);
-
-		expect(
-			shouldWarnGraphExtractionWritesDisabled({
-				...cfg,
-				pipelineV2: { ...cfg.pipelineV2, graph: { ...cfg.pipelineV2.graph, extractionWritesEnabled: false } },
-			}),
-		).toBe(true);
-		expect(shouldWarnGraphExtractionWritesDisabled(cfg)).toBe(false);
-		expect(
-			shouldWarnGraphExtractionWritesDisabled({
-				...cfg,
-				pipelineV2: {
-					...cfg.pipelineV2,
-					graph: { ...cfg.pipelineV2.graph, enabled: false, extractionWritesEnabled: false },
-				},
-			}),
-		).toBe(false);
-		expect(
-			shouldWarnGraphExtractionWritesDisabled({
-				...cfg,
-				pipelineV2: {
-					...cfg.pipelineV2,
-					paused: true,
-					graph: { ...cfg.pipelineV2.graph, extractionWritesEnabled: false },
-				},
-			}),
-		).toBe(false);
-		expect(
-			shouldWarnGraphExtractionWritesDisabled({
-				...cfg,
-				pipelineV2: {
-					...cfg.pipelineV2,
-					enabled: false,
-					graph: { ...cfg.pipelineV2.graph, extractionWritesEnabled: false },
-				},
-			}),
-		).toBe(false);
-	});
 
 	it("loads embedding prompt-submit timeout from agent.yaml", () => {
 		const agentsDir = makeTempAgentsDir();
@@ -518,6 +545,14 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.pipelineV2.extraction.provider).toBe("none");
 		expect(cfg.pipelineV2.extraction.model).toBe("");
 	});
+
+	it("rejects retired command extraction rather than silently falling back", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: { pipelineV2: { extraction: { provider: "command" } } },
+			}),
+		).toThrow("command configuration is retired");
+	});
 });
 
 describe("loadPipelineConfig", () => {
@@ -578,6 +613,36 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 		expect(result.synthesis.endpoint).toBe("http://172.17.0.1:11434");
+	});
+
+	it("defaults reflections to 6am in the detected local timezone with 3 briefs", () => {
+		const result = loadPipelineConfig({});
+		expect(result.reflections.schedule).toBe("0 6 * * *");
+		expect(result.reflections.count).toBe(3);
+		expect(result.reflections.timezone).toBe(detectLocalTimeZone());
+	});
+
+	it("honors the reflections count and timezone and bounds invalid values", () => {
+		const clamped = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					reflections: {
+						count: 9,
+						timezone: "Not/AZone",
+						schedule: "0 9 * * *",
+					},
+				},
+			},
+		});
+		expect(clamped.reflections.count).toBe(6); // clamped to the route cap
+		expect(clamped.reflections.timezone).toBe(detectLocalTimeZone()); // invalid IANA falls back
+		expect(clamped.reflections.schedule).toBe("0 9 * * *");
+
+		const valid = loadPipelineConfig({
+			memory: { pipelineV2: { reflections: { timezone: "Europe/Berlin", count: 2 } } },
+		});
+		expect(valid.reflections.timezone).toBe("Europe/Berlin");
+		expect(valid.reflections.count).toBe(2);
 	});
 
 	it("accepts openrouter synthesis provider", () => {
@@ -839,178 +904,6 @@ describe("loadPipelineConfig", () => {
 		expect(result.extraction.model).toBe("gpt-5.3-codex");
 	});
 
-	it("accepts command extraction provider with argv-safe command config", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					extraction: {
-						provider: "command",
-						command: {
-							bin: "node",
-							args: ["script.mjs", "--transcript", "$TRANSCRIPT"],
-							cwd: "/tmp/signet",
-							env: {
-								SIGNET_MODE: "pipeline",
-								"NOT VALID": "skip-me",
-							},
-						},
-					},
-				},
-			},
-		});
-
-		expect(result.extraction.provider).toBe("command");
-		expect(result.extraction.command).toEqual({
-			bin: "node",
-			args: ["script.mjs", "--transcript", "$TRANSCRIPT"],
-			cwd: "/tmp/signet",
-			env: {
-				SIGNET_MODE: "pipeline",
-			},
-		});
-		// synthesis never accepts command provider; extraction command falls back to synthesis defaults
-		expect(result.synthesis.provider).toBe("ollama");
-		expect(result.synthesis.model).toBe("qwen3:4b");
-	});
-
-	it("falls back from command extraction when remote providers are locked", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					allowRemoteProviders: false,
-					extraction: {
-						provider: "command",
-						fallbackProvider: "ollama",
-					},
-				},
-			},
-		});
-
-		expect(result.extraction.provider).toBe("ollama");
-		expect(result.extraction.command).toBeUndefined();
-		expect(result.synthesis.provider).toBe("ollama");
-	});
-
-	it("parses legacy extraction.command string into argv", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					extractionProvider: "command",
-					extractionCommand: 'node ./extract.mjs --transcript "$TRANSCRIPT" --session "$SESSION_KEY"',
-				},
-			},
-		});
-
-		expect(result.extraction.provider).toBe("command");
-		expect(result.extraction.command).toEqual({
-			bin: "node",
-			args: ["./extract.mjs", "--transcript", "$TRANSCRIPT", "--session", "$SESSION_KEY"],
-		});
-	});
-
-	it("rejects synthesis.provider=command with a clear validation error", () => {
-		expect(() =>
-			loadPipelineConfig({
-				memory: {
-					pipelineV2: {
-						extraction: {
-							provider: "ollama",
-							model: "qwen3:4b",
-						},
-						synthesis: {
-							provider: "command",
-						},
-					},
-				},
-			}),
-		).toThrow("synthesis.provider='command' is not supported");
-	});
-
-	it("loadMemoryConfig fails fast when synthesis.provider=command is configured", () => {
-		const agentsDir = makeTempAgentsDir();
-		writeFileSync(
-			join(agentsDir, "agent.yaml"),
-			`memory:
-  pipelineV2:
-    extraction:
-      provider: ollama
-      model: qwen3:4b
-    synthesis:
-      provider: command
-`,
-			"utf8",
-		);
-
-		expect(() => loadMemoryConfig(agentsDir)).toThrow("synthesis.provider='command' is not supported");
-	});
-
-	it("rejects extraction.provider=command when extraction.command is missing", () => {
-		expect(() =>
-			loadPipelineConfig({
-				memory: {
-					pipelineV2: {
-						extraction: {
-							provider: "command",
-						},
-					},
-				},
-			}),
-		).toThrow("extraction.command is required when extraction.provider='command'");
-	});
-
-	it("rejects extraction.command object that omits bin", () => {
-		expect(() =>
-			loadPipelineConfig({
-				memory: {
-					pipelineV2: {
-						extraction: {
-							provider: "command",
-							command: {
-								command: "node",
-								args: ["script.mjs"],
-							},
-						},
-					},
-				},
-			}),
-		).toThrow("extraction.command is required when extraction.provider='command'");
-	});
-
-	it("rejects extraction.command args that contain non-strings", () => {
-		expect(() =>
-			loadPipelineConfig({
-				memory: {
-					pipelineV2: {
-						extraction: {
-							provider: "command",
-							command: {
-								bin: "node",
-								args: ["script.mjs", 123],
-							},
-						},
-					},
-				},
-			}),
-		).toThrow("extraction.command is required when extraction.provider='command'");
-	});
-
-	it("loadMemoryConfig fails fast when extraction.provider=command is missing command config", () => {
-		const agentsDir = makeTempAgentsDir();
-		writeFileSync(
-			join(agentsDir, "agent.yaml"),
-			`memory:
-  pipelineV2:
-    extraction:
-      provider: command
-`,
-			"utf8",
-		);
-
-		expect(() => loadMemoryConfig(agentsDir)).toThrow(
-			"extraction.command is required when extraction.provider='command'",
-		);
-	});
-
 	it("loads all flags correctly when all set to true (flat keys)", () => {
 		const result = loadPipelineConfig({
 			memory: {
@@ -1019,7 +912,6 @@ describe("loadPipelineConfig", () => {
 					shadowMode: true,
 					allowUpdateDelete: true,
 					graphEnabled: true,
-					graphExtractionWritesEnabled: true,
 					autonomousEnabled: true,
 					mutationsFrozen: true,
 					autonomousFrozen: true,
@@ -1031,7 +923,6 @@ describe("loadPipelineConfig", () => {
 		expect(result.shadowMode).toBe(true);
 		expect(result.autonomous.allowUpdateDelete).toBe(true);
 		expect(result.graph.enabled).toBe(true);
-		expect(result.graph.extractionWritesEnabled).toBe(true);
 		expect(result.autonomous.enabled).toBe(true);
 		expect(result.mutationsFrozen).toBe(true);
 		expect(result.autonomous.frozen).toBe(true);
@@ -1053,7 +944,6 @@ describe("loadPipelineConfig", () => {
 		expect(result.shadowMode).toBe(DEFAULT_PIPELINE_V2.shadowMode);
 		expect(result.autonomous.allowUpdateDelete).toBe(DEFAULT_PIPELINE_V2.autonomous.allowUpdateDelete);
 		expect(result.graph.enabled).toBe(DEFAULT_PIPELINE_V2.graph.enabled);
-		expect(result.graph.extractionWritesEnabled).toBe(DEFAULT_PIPELINE_V2.graph.extractionWritesEnabled);
 		expect(result.autonomous.enabled).toBe(DEFAULT_PIPELINE_V2.autonomous.enabled);
 		expect(result.autonomous.frozen).toBe(DEFAULT_PIPELINE_V2.autonomous.frozen);
 	});
@@ -1086,115 +976,6 @@ describe("loadPipelineConfig", () => {
 		expect(result.feedback.decayIntervalSessions).toBe(25);
 	});
 
-	it("loads dependency synthesis stall circuit breaker config", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					structural: {
-						synthesisMaxStallMs: 90_000,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(90_000);
-	});
-
-	it("keeps LLM-authored structural graph workers disabled by default", () => {
-		const result = loadPipelineConfig({});
-
-		expect(result.structural.enabled).toBe(false);
-		expect(result.structural.synthesisEnabled).toBe(false);
-		expect(result.structural.supersessionSemanticFallback).toBe(false);
-	});
-
-	it("preserves zero as the dependency synthesis stall disable value", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					structural: {
-						synthesisMaxStallMs: 0,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(0);
-	});
-
-	it("preserves zero through dependencySynthesis.maxStallMs alias", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					dependencySynthesis: {
-						maxStallMs: 0,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(0);
-	});
-
-	it("does not let negative dependency synthesis stall config disable the gate", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					structural: {
-						synthesisMaxStallMs: -1,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(DEFAULT_PIPELINE_V2.structural.synthesisMaxStallMs);
-	});
-
-	it("supports dependencySynthesis.maxStallMs as a config alias", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					dependencySynthesis: {
-						maxStallMs: 120_000,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(120_000);
-	});
-
-	it("supports dependencySynthesis.synthesisMaxStallMs as a config alias", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					dependencySynthesis: {
-						synthesisMaxStallMs: 120_000,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(120_000);
-	});
-
-	it("prefers structural.synthesisMaxStallMs over dependencySynthesis.maxStallMs", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					structural: {
-						synthesisMaxStallMs: 60_000,
-					},
-					dependencySynthesis: {
-						maxStallMs: 300_000,
-					},
-				},
-			},
-		});
-
-		expect(result.structural.synthesisMaxStallMs).toBe(60_000);
-	});
-
 	it("treats non-boolean truthy values as defaults (not coerced)", () => {
 		const result = loadPipelineConfig({
 			memory: {
@@ -1216,7 +997,6 @@ describe("loadPipelineConfig", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
-					workerPollMs: 0,
 					workerMaxRetries: -5,
 					extractionTimeout: 999999,
 					leaseTimeoutMs: 1,
@@ -1225,8 +1005,6 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 
-		// workerPollMs: min 100
-		expect(result.worker.pollMs).toBe(100);
 		// workerMaxRetries: min 1
 		expect(result.worker.maxRetries).toBe(1);
 		// extractionTimeout: max 300000
@@ -1241,7 +1019,6 @@ describe("loadPipelineConfig", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
-					workerPollMs: "fast",
 					workerMaxRetries: null,
 					extractionTimeout: undefined,
 					leaseTimeoutMs: true,
@@ -1250,7 +1027,6 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 
-		expect(result.worker.pollMs).toBe(DEFAULT_PIPELINE_V2.worker.pollMs);
 		expect(result.worker.maxRetries).toBe(DEFAULT_PIPELINE_V2.worker.maxRetries);
 		expect(result.extraction.timeout).toBe(DEFAULT_PIPELINE_V2.extraction.timeout);
 		expect(result.worker.leaseTimeoutMs).toBe(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs);
@@ -1261,7 +1037,6 @@ describe("loadPipelineConfig", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
-					workerPollMs: 5000,
 					workerMaxRetries: 5,
 					extractionTimeout: 60000,
 					leaseTimeoutMs: 120000,
@@ -1270,7 +1045,6 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 
-		expect(result.worker.pollMs).toBe(5000);
 		expect(result.worker.maxRetries).toBe(5);
 		expect(result.extraction.timeout).toBe(60000);
 		expect(result.worker.leaseTimeoutMs).toBe(120000);
@@ -1332,43 +1106,30 @@ describe("loadPipelineConfig", () => {
 		});
 	});
 
-	it("loads adaptive write-gate config from flat keys", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					writeGateEnabled: true,
-					writeGateThreshold: 0.45,
-					writeGateContinuityDiscount: 0.2,
-				},
-			},
-		});
-
-		expect(result.writeGate?.enabled).toBe(true);
-		expect(result.writeGate?.threshold).toBe(0.45);
-		expect(result.writeGate?.continuityDiscount).toBe(0.2);
+	it("rejects retired write-gate and durability configuration", () => {
+		for (const pipelineV2 of [
+			{ writeGate: { threshold: 0.45 } },
+			{ durability: { enabled: true } },
+			{ writeGateEnabled: true },
+		]) {
+			expect(() => loadPipelineConfig({ memory: { pipelineV2 } })).toThrow(
+				"writeGate and durability configuration is retired",
+			);
+		}
 	});
 
-	it("clamps adaptive write-gate numeric values", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					writeGate: {
-						threshold: 3,
-						continuityDiscount: -1,
-					},
-				},
-			},
-		});
-
-		expect(result.writeGate?.threshold).toBe(1);
-		expect(result.writeGate?.continuityDiscount).toBe(0);
+	it("rejects retired procedural enrichment configuration", () => {
+		for (const procedural of [{ enrichOnInstall: true }, { enrichMinDescription: 30 }]) {
+			expect(() => loadPipelineConfig({ memory: { pipelineV2: { procedural } } })).toThrow(
+				"procedural enrichment configuration is retired",
+			);
+		}
 	});
 
 	it("loads graph boost and reranker fields (flat keys)", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
-					graphExtractionWritesEnabled: true,
 					graphBoostWeight: 0.25,
 					graphBoostTimeoutMs: 300,
 					rerankerEnabled: true,
@@ -1379,7 +1140,6 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 
-		expect(result.graph.extractionWritesEnabled).toBe(true);
 		expect(result.graph.boostWeight).toBe(0.25);
 		expect(result.graph.boostTimeoutMs).toBe(300);
 		expect(result.reranker.enabled).toBe(true);
@@ -1395,7 +1155,6 @@ describe("loadPipelineConfig", () => {
 		});
 
 		expect(result.graph.boostWeight).toBe(DEFAULT_PIPELINE_V2.graph.boostWeight);
-		expect(result.graph.extractionWritesEnabled).toBe(DEFAULT_PIPELINE_V2.graph.extractionWritesEnabled);
 		expect(result.graph.boostTimeoutMs).toBe(DEFAULT_PIPELINE_V2.graph.boostTimeoutMs);
 		expect(result.reranker.enabled).toBe(DEFAULT_PIPELINE_V2.reranker.enabled);
 		expect(result.reranker.model).toBe(DEFAULT_PIPELINE_V2.reranker.model);
@@ -1426,61 +1185,39 @@ describe("loadPipelineConfig", () => {
 		expect(result.repair.requeueHourlyBudget).toBe(100);
 	});
 
-	it("loads worker load-shedding config fields", () => {
+	it("retired extraction-worker config fields are absent from the resolved config (#946)", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
 					worker: {
+						pollMs: 5000,
 						maxLoadPerCpu: 0.6,
 						overloadBackoffMs: 45000,
+						threadedExtraction: false,
+					},
+					extraction: {
+						escalation: {
+							maxNewEntitiesPerChunk: 7,
+							maxNewAttributesPerEntity: 9,
+							level2MaxEntities: 3,
+						},
 					},
 				},
 			},
 		});
 
-		expect(result.worker.maxLoadPerCpu).toBe(0.6);
-		expect(result.worker.overloadBackoffMs).toBe(45000);
-	});
-
-	it("loads worker load-shedding config fields from flat keys", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					workerMaxLoadPerCpu: 0.55,
-					workerOverloadBackoffMs: 42000,
-				},
-			},
-		});
-
-		expect(result.worker.maxLoadPerCpu).toBe(0.55);
-		expect(result.worker.overloadBackoffMs).toBe(42000);
-	});
-
-	it("prefers nested worker load-shedding config over flat keys", () => {
-		const result = loadPipelineConfig({
-			memory: {
-				pipelineV2: {
-					worker: {
-						maxLoadPerCpu: 0.7,
-						overloadBackoffMs: 38000,
-					},
-					workerMaxLoadPerCpu: 0.5,
-					workerOverloadBackoffMs: 60000,
-				},
-			},
-		});
-
-		expect(result.worker.maxLoadPerCpu).toBe(0.7);
-		expect(result.worker.overloadBackoffMs).toBe(38000);
-	});
-
-	it("uses worker load-shedding defaults when absent", () => {
-		const result = loadPipelineConfig({
-			memory: { pipelineV2: { enabled: true } },
-		});
-
-		expect(result.worker.maxLoadPerCpu).toBe(DEFAULT_PIPELINE_V2.worker.maxLoadPerCpu);
-		expect(result.worker.overloadBackoffMs).toBe(DEFAULT_PIPELINE_V2.worker.overloadBackoffMs);
+		// The standalone extraction worker was retired under the Dreaming cutover;
+		// its poll/load/thread/escalation knobs must not survive into the resolved
+		// config as inert compatibility settings.
+		expect(result.worker).not.toHaveProperty("pollMs");
+		expect(result.worker).not.toHaveProperty("maxLoadPerCpu");
+		expect(result.worker).not.toHaveProperty("overloadBackoffMs");
+		expect(result.worker).not.toHaveProperty("threadedExtraction");
+		expect(result.extraction).not.toHaveProperty("escalation");
+		// Retained worker knobs stay present.
+		expect(result.worker.maxRetries).toBe(DEFAULT_PIPELINE_V2.worker.maxRetries);
+		expect(result.worker.leaseTimeoutMs).toBe(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs);
+		expect(result.worker.maxLlmConcurrency).toBe(DEFAULT_PIPELINE_V2.worker.maxLlmConcurrency);
 	});
 
 	it("loads canonical worker maxLlmConcurrency with bounded defaults and env override", () => {
@@ -1507,15 +1244,9 @@ describe("loadPipelineConfig", () => {
 		}
 	});
 
-	it("defaults threadedExtraction to true when absent", () => {
-		const result = loadPipelineConfig({
-			memory: { pipelineV2: { enabled: true } },
-		});
-
-		expect(result.worker.threadedExtraction).toBe(true);
-	});
-
-	it("respects explicit threadedExtraction: false opt-out", () => {
+	// #946: threadedExtraction was a standalone-extraction-worker knob and is
+	// retired along with the worker. The parser must ignore legacy YAML values.
+	it("ignores retired threadedExtraction config", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
@@ -1525,7 +1256,7 @@ describe("loadPipelineConfig", () => {
 			},
 		});
 
-		expect(result.worker.threadedExtraction).toBe(false);
+		expect(result.worker).not.toHaveProperty("threadedExtraction");
 	});
 
 	it("uses defaults for maintenance config when absent", () => {
@@ -1610,7 +1341,7 @@ describe("loadPipelineConfig", () => {
 						timeout: 30000,
 						minConfidence: 0.8,
 					},
-					graph: { enabled: true, extractionWritesEnabled: true, boostWeight: 0.3 },
+					graph: { enabled: true, boostWeight: 0.3 },
 					reranker: { enabled: true, model: "my-reranker", useExtractionModel: true, topN: 10 },
 					autonomous: {
 						enabled: true,
@@ -1629,7 +1360,6 @@ describe("loadPipelineConfig", () => {
 		expect(result.extraction.timeout).toBe(30000);
 		expect(result.extraction.minConfidence).toBe(0.8);
 		expect(result.graph.enabled).toBe(true);
-		expect(result.graph.extractionWritesEnabled).toBe(true);
 		expect(result.graph.boostWeight).toBe(0.3);
 		expect(result.reranker.enabled).toBe(true);
 		expect(result.reranker.model).toBe("my-reranker");

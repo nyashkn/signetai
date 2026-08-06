@@ -53,32 +53,47 @@ interface Deps {
 	readonly sleep: (ms: number) => Promise<void>;
 	readonly startDaemon: (agentsDir?: string) => Promise<boolean>;
 	readonly stopDaemon: (agentsDir?: string) => Promise<boolean>;
+	readonly isLaunchdDaemonLoaded?: () => Promise<boolean>;
 	readonly confirmRestartSync?: () => Promise<boolean>;
 	readonly fetch?: FetchLike;
 	readonly isInteractive?: () => boolean;
 	readonly syncTemplates?: (basePath: string) => Promise<void>;
+	readonly openUrl?: (url: string) => Promise<unknown>;
 }
 
 export async function launchDashboard(options: PathOptions, deps: Deps): Promise<void> {
 	console.log(deps.signetLogo());
 	const basePath = readPath(options, deps);
-	const running = await deps.isDaemonRunning();
+	const before = await deps.getDaemonStatus();
 
-	if (!running) {
+	if (!before.running) {
 		console.log(chalk.yellow("  Daemon is not running. Starting..."));
 		const started = await deps.startDaemon(basePath);
-		if (!started) {
+		const after = await deps.getDaemonStatus();
+
+		if (!started || !after.running) {
 			console.error(chalk.red("  Failed to start daemon"));
 			process.exit(1);
 		}
-		console.log(chalk.green("  Daemon started"));
+
+		// The health probe can transiently false-negative (e.g. an event-loop
+		// block) while the daemon process itself was alive the whole time.
+		// startDaemon short-circuits to "already running" in that case, so the
+		// same PID before and after means we did not start anything — do not
+		// claim we did (issue #1045).
+		if (before.pid !== null && before.pid === after.pid) {
+			console.log(chalk.dim("  Daemon is running"));
+		} else {
+			console.log(chalk.green("  Daemon started"));
+		}
 	}
 
 	console.log();
 	console.log(`  ${chalk.cyan(`http://localhost:${deps.defaultPort}`)}`);
 	console.log();
 
-	await open(`http://localhost:${deps.defaultPort}`);
+	const openUrl = deps.openUrl ?? open;
+	await openUrl(`http://localhost:${deps.defaultPort}`);
 }
 
 export async function migrateSchema(options: PathOptions, deps: Deps): Promise<void> {
@@ -192,15 +207,11 @@ export async function doStart(options: PathOptions, deps: Deps): Promise<void> {
 	console.log(deps.signetLogo());
 	const basePath = readPath(options, deps);
 	const running = await deps.isDaemonRunning();
-	if (running) {
-		console.log(chalk.yellow("  Daemon is already running"));
-		return;
-	}
 
 	const spinner = ora("Starting daemon...").start();
 	const started = await deps.startDaemon(basePath);
 	if (started) {
-		spinner.succeed("Daemon started");
+		spinner.succeed(running ? "Daemon ready" : "Daemon started");
 		const status = await deps.getDaemonStatus();
 		for (const line of daemonAccessLines(deps.defaultPort, status)) {
 			console.log(chalk.dim(`  ${line}`));
@@ -217,15 +228,26 @@ export async function doStop(options: PathOptions, deps: Deps): Promise<void> {
 	const basePath = readPath(options, deps);
 	const running = await deps.isDaemonRunning();
 	const stale = running ? false : await deps.hasDaemonProcess(basePath);
-	if (!running && !stale) {
+	// Under launchd KeepAlive the daemon respawns on exit, so an unhealthy
+	// daemon still counts as managed: `stop` must boot the job out or the
+	// reported "stop" is silently undone moments later (#1074).
+	const launchdManaged = running ? false : await (deps.isLaunchdDaemonLoaded?.() ?? Promise.resolve(false));
+	if (!running && !stale && !launchdManaged) {
 		console.log(chalk.yellow("  Daemon is not running"));
 		return;
 	}
 
-	const spinner = ora("Stopping daemon...").start();
+	const spinner = ora(
+		launchdManaged ? "Stopping daemon (unloading launchd keepalive)..." : "Stopping daemon...",
+	).start();
 	const stopped = await deps.stopDaemon(basePath);
 	if (stopped) {
 		spinner.succeed("Daemon stopped");
+		if (launchdManaged) {
+			console.log(
+				chalk.dim("  launchd agent ai.signet.daemon unloaded; it will not respawn until `signet daemon start`."),
+			);
+		}
 		return;
 	}
 

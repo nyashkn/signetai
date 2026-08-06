@@ -1,3 +1,4 @@
+import { Database as SqliteDatabase } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,5 +44,27 @@ describe("Database memory CRUD", () => {
 			runtimePath: "memory/source.md",
 			idempotencyKey: "core-db-provenance-key",
 		});
+
+		const derivedId = db.addMemory({
+			type: "fact",
+			content: "Legacy extraction output stays derived.",
+			confidence: 0.94,
+			sourceType: "extract",
+			tags: [],
+			updatedBy: "database.test",
+			vectorClock: {},
+			manualOverride: false,
+		});
+		db.close();
+		db = null;
+		const raw = new SqliteDatabase(join(dir, "memories.db"), { readonly: true });
+		try {
+			expect(raw.prepare("SELECT memory_kind FROM memories WHERE id = ?").get(id)).toEqual({ memory_kind: "episodic" });
+			expect(raw.prepare("SELECT memory_kind FROM memories WHERE id = ?").get(derivedId)).toEqual({
+				memory_kind: null,
+			});
+		} finally {
+			raw.close();
+		}
 	});
 });

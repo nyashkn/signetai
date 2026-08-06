@@ -10,13 +10,16 @@ import {
 	didLaunchdDaemonStart,
 	didSystemdDaemonStart,
 	getDaemonStatus,
+	isLaunchdDaemonLoaded,
 	launchdDaemonPlistPath,
 	macOSLaunchAgentAttributionNotice,
 	readDaemonStartFailureDiagnostics,
 	readManagedDaemonPid,
+	rebindDaemonIfNeeded,
 	resolveDaemonLaunchCommand,
 	resolveDaemonPaths,
 	resolveDaemonRuntimeCommand,
+	shouldRebindDaemon,
 } from "./runtime.js";
 
 const originalFetch = globalThis.fetch;
@@ -29,6 +32,46 @@ describe("resolveDaemonPaths", () => {
 	it("keeps the JavaScript daemon bundle as the default when SIGNET_DIR is set", () => {
 		const paths = resolveDaemonPaths({ SIGNET_DIR: "/opt/signet" });
 		expect(paths[0]).toBe("/opt/signet/runtime/daemon-js/daemon.js");
+	});
+});
+
+describe("daemon installation ownership", () => {
+	it("rebinds an npm-launched daemon when the native CLI is now active", () => {
+		const nativeExecutable = "/Users/test/.local/bin/signet";
+		const npmExecutable = "/opt/homebrew/lib/node_modules/signetai/native/signet";
+
+		expect(shouldRebindDaemon(`${npmExecutable} daemon`, nativeExecutable)).toBe(true);
+		expect(shouldRebindDaemon(`${nativeExecutable} daemon`, nativeExecutable)).toBe(false);
+	});
+
+	it("restarts a mismatched healthy daemon instead of leaving the old install in charge", async () => {
+		const calls: string[] = [];
+		const result = await rebindDaemonIfNeeded("/Users/test/.local/bin/signet", {
+			getDaemonStatus: async () => ({ running: true, pid: 42 }),
+			readCommand: () => "/opt/homebrew/lib/node_modules/signetai/native/signet daemon",
+			stopDaemon: async (pid) => {
+				calls.push(`stop:${pid}`);
+				return true;
+			},
+		});
+
+		expect(result).toBe("restarted");
+		expect(calls).toEqual(["stop:42"]);
+	});
+
+	it("does not restart a daemon already using the current executable", async () => {
+		let stopped = false;
+		const result = await rebindDaemonIfNeeded("/Users/test/.local/bin/signet", {
+			getDaemonStatus: async () => ({ running: true, pid: 42 }),
+			readCommand: () => "/Users/test/.local/bin/signet daemon",
+			stopDaemon: async () => {
+				stopped = true;
+				return true;
+			},
+		});
+
+		expect(result).toBe("already-current");
+		expect(stopped).toBe(false);
 	});
 });
 
@@ -47,9 +90,7 @@ describe("resolveDaemonRuntimeCommand", () => {
 
 describe("resolveDaemonLaunchCommand", () => {
 	it("launches native daemon binaries directly", () => {
-		expect(resolveDaemonLaunchCommand("/opt/signet/bin/signet")).toEqual([
-			"/opt/signet/bin/signet",
-		]);
+		expect(resolveDaemonLaunchCommand("/opt/signet/bin/signet")).toEqual(["/opt/signet/bin/signet"]);
 	});
 
 	it("launches JavaScript daemon scripts through the runtime command", () => {
@@ -185,7 +226,6 @@ describe("buildLaunchdDaemonPlist", () => {
 			"/Users/user/Library/LaunchAgents/ai.signet.daemon.plist",
 		);
 	});
-
 
 	it("uses launchctl bootstrap against the current user launchd domain", () => {
 		const args = buildLaunchdDaemonStartArgs("/Users/user/Library/LaunchAgents/ai.signet.daemon.plist");
@@ -386,17 +426,7 @@ describe("getDaemonStatus", () => {
 							blockedReason: null,
 						},
 					},
-					pipeline: {
-						extraction: {
-							running: true,
-							overloaded: true,
-							loadPerCpu: 1.82,
-							maxLoadPerCpu: 0.8,
-							overloadBackoffMs: 30000,
-							overloadSince: "2026-03-26T00:00:02.000Z",
-							nextTickInMs: 28000,
-						},
-					},
+					pipeline: {},
 				});
 			}
 			return new Response("not found", { status: 404 });
@@ -423,15 +453,6 @@ describe("getDaemonStatus", () => {
 			ready: true,
 			blockedReason: null,
 			hasWorkloadState: true,
-		});
-		expect(status.extractionWorker).toEqual({
-			running: true,
-			overloaded: true,
-			loadPerCpu: 1.82,
-			maxLoadPerCpu: 0.8,
-			overloadBackoffMs: 30000,
-			overloadSince: "2026-03-26T00:00:02.000Z",
-			nextTickInMs: 28000,
 		});
 		expect(status.resources).toEqual({
 			rss: 169,
@@ -507,5 +528,36 @@ describe("getDaemonStatus", () => {
 		expect(status.probe.status).toBe("degraded");
 		expect(status.probe.readinessReasons).toEqual(["pending migrations"]);
 		expect(status.probe.detail).toContain("readiness degraded");
+	});
+});
+
+describe("isLaunchdDaemonLoaded", () => {
+	it("never probes launchctl off macOS", () => {
+		let spawned = false;
+		const loaded = isLaunchdDaemonLoaded({
+			platform: "linux",
+			spawnSync: (_command, _args, _options) => {
+				spawned = true;
+				return { status: 0 };
+			},
+		});
+		expect(loaded).toBe(false);
+		expect(spawned).toBe(false);
+	});
+
+	it("reports loaded when launchctl print succeeds", () => {
+		const loaded = isLaunchdDaemonLoaded({
+			platform: "darwin",
+			spawnSync: () => ({ status: 0 }),
+		});
+		expect(loaded).toBe(true);
+	});
+
+	it("reports not loaded when launchctl print fails (no such job)", () => {
+		const loaded = isLaunchdDaemonLoaded({
+			platform: "darwin",
+			spawnSync: () => ({ status: 3 }),
+		});
+		expect(loaded).toBe(false);
 	});
 });

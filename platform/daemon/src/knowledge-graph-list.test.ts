@@ -14,8 +14,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import {
-	archiveEntityAlias,
-	createEntityAlias,
 	getDependenciesFrom,
 	getDependenciesTo,
 	getKnowledgeEntityDetail,
@@ -24,6 +22,7 @@ import {
 	listEntityAliases,
 	listKnowledgeEntities,
 } from "./knowledge-graph";
+import { applyOntologyOperation } from "./ontology-proposals";
 
 function makeDbPath(): string {
 	const dir = join(tmpdir(), `signet-kg-list-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -322,27 +321,32 @@ describe("listKnowledgeEntities (issue #515)", () => {
 
 		seedEntity("e-signet", "Signet");
 		seedEntity("e-other", "Other");
-		const alias = createEntityAlias(getDbAccessor(), {
+		const created = applyOntologyOperation(getDbAccessor(), {
 			agentId: "default",
-			entityId: "e-signet",
-			alias: "SignetAI",
-			source: "test",
+			actor: "test",
+			operation: "create_entity_alias",
+			payload: { entity_id: "e-signet", alias: "SignetAI", source: "test" },
 		});
+		const aliasId = created.result?.aliasId as string;
+		expect(aliasId).toBeTruthy();
 
-		const wrongEntity = archiveEntityAlias(getDbAccessor(), {
-			agentId: "default",
-			entityId: "e-other",
-			aliasId: alias.id,
-		});
-		expect(wrongEntity).toBeNull();
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "default",
+				actor: "test",
+				operation: "archive_entity_alias",
+				payload: { entity_id: "e-other", alias_id: aliasId },
+			}),
+		).toThrow();
 		expect(listEntityAliases(getDbAccessor(), { agentId: "default", entityId: "e-signet" })).toHaveLength(1);
 
-		const archived = archiveEntityAlias(getDbAccessor(), {
+		const archived = applyOntologyOperation(getDbAccessor(), {
 			agentId: "default",
-			entityId: "e-signet",
-			aliasId: alias.id,
+			actor: "test",
+			operation: "archive_entity_alias",
+			payload: { entity_id: "e-signet", alias_id: aliasId },
 		});
-		expect(archived?.status).toBe("archived");
+		expect(archived.result?.archived).toBe(true);
 		expect(listEntityAliases(getDbAccessor(), { agentId: "default", entityId: "e-signet" })).toHaveLength(0);
 	});
 
@@ -425,13 +429,16 @@ describe("listKnowledgeEntities (issue #515)", () => {
 		seedEntity("e-leaf", "Leaf", { entityType: "person", mentions: 9 });
 		seedEntity("e-hidden", "Hidden", { entityType: "project", mentions: 0 });
 		seedEntity("e-topic", "Noisy Topic", { entityType: "topic", mentions: 99, pinned: true });
+		seedEntity("e-semantic", "Semantic Artifact", { entityType: "artifact", mentions: 0 });
 		seedAspect("asp-hub-a", "e-hub", "alpha");
 		seedAspect("asp-hub-b", "e-hub", "beta");
 		seedAspect("asp-hidden", "e-hidden", "hidden");
 		seedAspect("asp-topic", "e-topic", "topic");
+		seedAspect("asp-semantic", "e-semantic", "details");
 		seedAttribute("attr-hub-a-1", "asp-hub-a", { content: "important alpha", memoryId: "mem-a" });
 		seedAttribute("attr-hub-a-2", "asp-hub-a", { content: "less important alpha" });
 		seedAttribute("attr-hidden", "asp-hidden", { content: "hidden attr" });
+		seedAttribute("attr-semantic", "asp-semantic", { content: "derived from episodic evidence" });
 		seedDependency("dep-visible", "e-hub", "e-leaf", { strength: 0.9 });
 		seedDependency("dep-hidden", "e-hub", "e-hidden", { strength: 0.8 });
 		getDbAccessor().withWriteTx((db) => {
@@ -464,6 +471,34 @@ describe("listKnowledgeEntities (issue #515)", () => {
 				 VALUES (?, 'default', 'add_claim_value', 'applied', ?, 0.82, 'already applied', '[]',
 				         datetime('now'), datetime('now'), datetime('now'))`,
 			).run("proposal-recent-applied", JSON.stringify({ entity: "Hub" }));
+			db.exec(`
+				CREATE TABLE IF NOT EXISTS dreaming_state (
+					agent_id TEXT PRIMARY KEY,
+					tokens_since_last_pass INTEGER NOT NULL DEFAULT 0,
+					consecutive_failures INTEGER NOT NULL DEFAULT 0,
+					last_pass_at TEXT,
+					last_pass_id TEXT,
+					last_pass_mode TEXT
+				);
+				CREATE TABLE IF NOT EXISTS dreaming_passes (
+					id TEXT PRIMARY KEY,
+					agent_id TEXT NOT NULL,
+					mode TEXT NOT NULL,
+					status TEXT NOT NULL,
+					started_at TEXT NOT NULL,
+					completed_at TEXT,
+					mutations_applied INTEGER,
+					mutations_skipped INTEGER,
+					mutations_failed INTEGER,
+					created_at TEXT NOT NULL
+				);
+			`);
+			db.prepare(
+				`INSERT INTO memory_artifacts
+				 (agent_id, source_path, source_sha256, source_kind, session_id, session_token, captured_at, content, updated_at, is_deleted)
+				 VALUES ('default', 'sessions/dashboard.md', 'dashboard-sha', 'transcript', 'dashboard-session', 'dashboard-token',
+				         '2026-05-16T13:01:00Z', 'dashboard episodic evidence', '2026-05-16T13:01:00Z', 0)`,
+			).run();
 			db.prepare(
 				`INSERT INTO dreaming_state
 				 (agent_id, tokens_since_last_pass, consecutive_failures, last_pass_at, last_pass_id, last_pass_mode)
@@ -484,22 +519,37 @@ describe("listKnowledgeEntities (issue #515)", () => {
 			dependencyLimit: 10,
 		});
 
-		expect(graph.entities.map((entity) => entity.id)).toEqual(["e-hub", "e-leaf"]);
-		expect(graph.entities.map((entity) => entity.id)).not.toContain("e-topic");
-		expect(graph.entities[0].aspects.map((aspect) => aspect.id)).toEqual(["asp-hub-a"]);
-		expect(graph.entities[0].aspects[0].attributes.map((attr) => attr.id)).toEqual(["attr-hub-a-1"]);
-		expect(graph.entities[0].aspects[0].attributes[0].version).toBe(2);
-		expect(graph.entities[0].aspects[0].attributes[0].proposalId).toBe("proposal-applied-alpha");
-		expect(graph.entities[0].aspects[0].attributes[0].proposalEvidenceCount).toBe(1);
-		expect(graph.dependencies.map((dependency) => dependency.sourceEntityId)).toEqual(["e-hub"]);
-		expect(graph.dependencies.map((dependency) => dependency.targetEntityId)).toEqual(["e-leaf"]);
+		expect(graph.entities.map((entity) => entity.id)).toEqual(["e-topic", "e-hub"]);
+		expect(graph.entities[1].aspects.map((aspect) => aspect.id)).toEqual(["asp-hub-a"]);
+		expect(graph.entities[1].aspects[0].attributes.map((attr) => attr.id)).toEqual(["attr-hub-a-1"]);
+		expect(graph.entities[1].aspects[0].attributes[0].version).toBe(2);
+		expect(graph.entities[1].aspects[0].attributes[0].proposalId).toBe("proposal-applied-alpha");
+		expect(graph.entities[1].aspects[0].attributes[0].proposalEvidenceCount).toBe(1);
+		expect(graph.dependencies).toEqual([]);
 		expect(graph.proposals.map((proposal) => proposal.id)).toContain("proposal-pending-alpha");
 		expect(graph.proposals[0]?.targetEntityId).toBe("e-hub");
 		expect(graph.proposals[0]?.targetAspectName).toBe("alpha");
 		expect(graph.metadata.proposals.pending).toBe(1);
 		expect(graph.metadata.proposals.appliedRecent).toBe(1);
-		expect(graph.metadata.dreaming.tokensSinceLastPass).toBe(2400);
+		expect(graph.metadata.dreaming.episodicTokensPending).toBeGreaterThan(0);
 		expect(graph.metadata.dreaming.latestPass?.mutationsApplied).toBe(3);
+	});
+
+	test("includes zero-mention semantic entities regardless of their entity type", () => {
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+
+		seedEntity("e-artifact", "Research Report", { entityType: "artifact", mentions: 0 });
+		seedEntity("e-source", "Source note", { entityType: "source_document", mentions: 0 });
+		seedAspect("asp-artifact", "e-artifact", "findings");
+		seedAspect("asp-source", "e-source", "source metadata");
+		seedAttribute("attr-artifact", "asp-artifact", { content: "The report supports the current plan." });
+
+		const graph = getKnowledgeGraphForConstellation(getDbAccessor(), "default");
+
+		expect(graph.entities).toHaveLength(1);
+		expect(graph.entities[0]).toMatchObject({ id: "e-artifact", entityType: "artifact" });
+		expect(graph.entities[0]?.aspects[0]?.attributes[0]?.content).toBe("The report supports the current plan.");
 	});
 
 	test("constellation includes shared-agent graph rows for the current view", () => {

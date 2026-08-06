@@ -12,6 +12,7 @@ import { toFtsSchemaQueryDb } from "./db-accessor";
 import { DEFAULT_PIPELINE_V2 } from "./memory-config";
 import type { EmbeddingConfig, PipelineV2Config } from "./memory-config";
 import {
+	cancelObsoleteJobs,
 	checkFtsConsistency,
 	checkRepairGate,
 	cleanOrphanedEmbeddings,
@@ -20,12 +21,12 @@ import {
 	getDedupStats,
 	getEmbeddingGapStats,
 	pruneGenericEntities,
+	pruneTerminalJobs,
 	reembedMissingMemories,
 	reembedModelMigration,
 	releaseStaleLeases,
 	requeueDeadJobs,
 	resyncVectorIndex,
-	structuralBackfill,
 	triggerRetentionSweep,
 } from "./repair-actions";
 
@@ -112,10 +113,6 @@ const TEST_CFG: PipelineV2Config = {
 		maintenanceMode: "observe",
 	},
 	telemetryEnabled: false,
-	structural: {
-		...DEFAULT_PIPELINE_V2.structural,
-		enabled: false,
-	},
 };
 
 const TEST_EMBEDDING_CFG: EmbeddingConfig = {
@@ -153,13 +150,23 @@ function insertJob(
 	leasedAt?: string,
 	attempts = 0,
 	maxAttempts = 3,
+	jobType = "document_ingest",
 ): void {
 	const now = new Date().toISOString();
 	db.prepare(
 		`INSERT INTO memory_jobs
 		 (id, memory_id, job_type, status, attempts, max_attempts, leased_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	).run(id, memId, "extract", status, attempts, maxAttempts, leasedAt ?? null, now, now);
+	).run(id, memId, jobType, status, attempts, maxAttempts, leasedAt ?? null, now, now);
+}
+
+function insertSummaryJob(db: Database, id: string, status: string, createdAt?: string): void {
+	const now = createdAt ?? new Date().toISOString();
+	db.prepare(
+		`INSERT INTO summary_jobs
+		 (id, session_key, harness, project, transcript, status, attempts, max_attempts, created_at, error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(id, `session-${id}`, "test", "test-project", `transcript ${id}`, status, 0, 3, now, null);
 }
 
 function ensureVecTable(db: Database): void {
@@ -426,25 +433,6 @@ describe("pruneGenericEntities", () => {
 	});
 });
 
-describe("structuralBackfill", () => {
-	it("does not enqueue LLM structural jobs while structural workers are disabled", () => {
-		const db = new Database(":memory:");
-		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-		const accessor = asAccessor(db);
-		const limiter = createRateLimiter();
-
-		try {
-			const result = structuralBackfill(accessor, TEST_CFG, CTX_OPERATOR, limiter);
-
-			expect(result.success).toBe(true);
-			expect(result.affected).toBe(0);
-			expect(result.message).toContain("structural backfill disabled");
-		} finally {
-			db.close();
-		}
-	});
-});
-
 // ---------------------------------------------------------------------------
 // requeueDeadJobs
 // ---------------------------------------------------------------------------
@@ -494,6 +482,181 @@ describe("requeueDeadJobs", () => {
 
 		const remaining = db.prepare("SELECT COUNT(*) as n FROM memory_jobs WHERE status = 'dead'").get() as { n: number };
 		expect(remaining.n).toBe(2);
+	});
+
+	it("does not resurrect retired extraction jobs", () => {
+		insertMemory(db, "mem-retired");
+		insertJob(db, "job-retired", "mem-retired", "dead", undefined, 3, 3, "extract");
+
+		const result = requeueDeadJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter());
+
+		expect(result.success).toBe(true);
+		expect(result.affected).toBe(0);
+		expect(db.prepare("SELECT status FROM memory_jobs WHERE id = 'job-retired'").get()).toEqual({ status: "dead" });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// cancelObsoleteJobs / pruneTerminalJobs — aggregate --max-batch cap (#1053)
+// ---------------------------------------------------------------------------
+
+describe("repair --max-batch aggregate cap (#1053)", () => {
+	let db: Database;
+	let accessor: DbAccessor;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
+		accessor = asAccessor(db);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	function seedBothQueues(count: number): void {
+		const now = new Date().toISOString();
+		for (let i = 0; i < count; i += 1) {
+			const memId = `mem-batch-${i}`;
+			insertMemory(db, memId);
+			insertJob(db, `mem-job-${i}`, memId, "dead", undefined, 0, 3);
+			insertSummaryJob(db, `sum-job-${i}`, "dead", now);
+		}
+	}
+
+	function countMemoryByStatus(status: string): number {
+		const row = db.prepare("SELECT COUNT(*) as n FROM memory_jobs WHERE status = ?").get(status) as { n: number };
+		return row.n;
+	}
+
+	function countSummaryByStatus(status: string): number {
+		const row = db.prepare("SELECT COUNT(*) as n FROM summary_jobs WHERE status = ?").get(status) as { n: number };
+		return row.n;
+	}
+
+	describe("cancelObsoleteJobs", () => {
+		it("default both-queue apply affects at most 1000 total rows (not 2000)", () => {
+			seedBothQueues(1001);
+
+			const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				olderThanMs: 0,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBeLessThanOrEqual(1000);
+			// memory_jobs is selected first and consumes the whole budget.
+			expect(countMemoryByStatus("cancelled")).toBe(1000);
+			expect(countSummaryByStatus("cancelled")).toBe(0);
+		});
+
+		it("--max-batch 50 affects at most 50 total rows across both queues", () => {
+			seedBothQueues(1001);
+
+			const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				olderThanMs: 0,
+				maxBatch: 50,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBeLessThanOrEqual(50);
+			expect(countMemoryByStatus("cancelled")).toBe(50);
+			expect(countSummaryByStatus("cancelled")).toBe(0);
+		});
+
+		it("single-table selection still affects up to the requested cap from that table", () => {
+			seedBothQueues(1001);
+
+			const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				olderThanMs: 0,
+				maxBatch: 50,
+				tables: ["summary"],
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBe(50);
+			expect(countSummaryByStatus("cancelled")).toBe(50);
+		});
+
+		it("dry-run preview is selected from the same globally bounded set as apply", () => {
+			seedBothQueues(1001);
+
+			const result = cancelObsoleteJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				olderThanMs: 0,
+				maxBatch: 50,
+				dryRun: true,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBe(0);
+			expect(result.totalMatching).toBe(2002);
+			expect(result.preview?.length ?? 0).toBeLessThanOrEqual(50);
+			// Preview ids come only from the memory queue (the first table),
+			// matching the apply-time selection order.
+			expect(result.preview?.every((id) => id.startsWith("memory_jobs:mem-job-"))).toBe(true);
+			expect(countMemoryByStatus("cancelled")).toBe(0);
+			expect(countSummaryByStatus("cancelled")).toBe(0);
+		});
+	});
+
+	describe("pruneTerminalJobs", () => {
+		it("default both-queue apply affects at most 1000 total rows (not 2000)", () => {
+			seedBothQueues(1001);
+
+			const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				retentionMs: 0,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBeLessThanOrEqual(1000);
+			expect(countMemoryByStatus("dead")).toBe(1);
+			expect(countSummaryByStatus("dead")).toBe(1001);
+		});
+
+		it("--max-batch 50 affects at most 50 total rows across both queues", () => {
+			seedBothQueues(1001);
+
+			const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				retentionMs: 0,
+				maxBatch: 50,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBeLessThanOrEqual(50);
+			expect(countMemoryByStatus("dead")).toBe(951);
+			expect(countSummaryByStatus("dead")).toBe(1001);
+		});
+
+		it("single-table selection still affects up to the requested cap from that table", () => {
+			seedBothQueues(1001);
+
+			const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				retentionMs: 0,
+				maxBatch: 50,
+				tables: ["summary"],
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBe(50);
+			expect(countSummaryByStatus("dead")).toBe(951);
+		});
+
+		it("dry-run preview is selected from the same globally bounded set as apply", () => {
+			seedBothQueues(1001);
+
+			const result = pruneTerminalJobs(accessor, TEST_CFG, CTX_OPERATOR, createRateLimiter(), {
+				retentionMs: 0,
+				maxBatch: 50,
+				dryRun: true,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.affected).toBe(0);
+			expect(result.totalMatching).toBe(2002);
+			expect(result.preview?.length ?? 0).toBeLessThanOrEqual(50);
+			expect(result.preview?.every((id) => id.startsWith("memory_jobs:mem-job-"))).toBe(true);
+			expect(countMemoryByStatus("dead")).toBe(1001);
+			expect(countSummaryByStatus("dead")).toBe(1001);
+		});
 	});
 });
 

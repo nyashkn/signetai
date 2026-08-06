@@ -4,6 +4,7 @@ import type {
   IndexingProgressCallback,
   IngestOptions,
   IngestResult,
+  FinalizeIngestOptions,
   Provider,
   ProviderConfig,
   SearchOptions,
@@ -33,7 +34,7 @@ const MONTH_NAMES = [
   "December",
 ] as const
 
-export type SignetBenchmarkProfile = "structured" | "supermemory-parity"
+export type SignetBenchmarkProfile = "structured" | "dreaming" | "supermemory-parity"
 type StructuredPayload = Awaited<ReturnType<typeof extractStructuredMemories>>["structured"]
 
 interface SignetRecallResult {
@@ -55,6 +56,27 @@ interface SignetRememberResponse {
   chunked?: boolean
   embedded?: boolean
   error?: string
+}
+
+interface SignetSessionEndResponse {
+  transcriptCaptureJobId?: string
+  error?: string
+}
+
+interface TranscriptCaptureJobResponse {
+  status?: "pending" | "processing" | "completed" | "failed" | "dead"
+  error?: string | null
+}
+
+interface DreamingTriggerResponse {
+  passId?: string
+  error?: string
+}
+
+interface DreamingStatusResponse {
+  worker?: { running?: boolean }
+  passes?: Array<{ id?: string; status?: string; error?: string | null }>
+  episodicTokensPending?: number
 }
 
 function parseSessionDate(session: UnifiedSession): string | undefined {
@@ -236,7 +258,9 @@ export class SignetProvider implements Provider {
 
   constructor(profile: SignetBenchmarkProfile = "structured") {
     this.profile = profile
-    if (profile === "supermemory-parity") {
+    if (profile === "dreaming") {
+      this.name = "signet-dreaming"
+    } else if (profile === "supermemory-parity") {
       this.name = "signet-supermemory-parity"
       this.prompts = SIGNET_SUPERMEMORY_PARITY_PROMPTS
     }
@@ -284,6 +308,17 @@ export class SignetProvider implements Provider {
     const pending: string[] = []
 
     for (const session of sessions) {
+      if (this.profile === "dreaming") {
+        const capture = await this.captureDreamingSession(session, options)
+        if (!capture.transcriptCaptureJobId) {
+          throw new Error(
+            `Canonical transcript capture was not queued for session ${session.sessionId}`
+          )
+        }
+        ids.push(this.benchmarkSessionId(session, options.containerTag))
+        pending.push(capture.transcriptCaptureJobId)
+        continue
+      }
       if (this.profile === "supermemory-parity") {
         const result = await this.rememberSession(session, options, {
           content: formatSupermemoryParityContent(session),
@@ -322,7 +357,7 @@ export class SignetProvider implements Provider {
     }
 
     logger.debug(
-      `Ingested ${sessions.length} session(s) as ${ids.length} ${this.profile} Signet memories for ${options.containerTag}`
+      `Ingested ${sessions.length} session(s) as ${ids.length} ${this.profile} Signet inputs for ${options.containerTag}`
     )
     return { documentIds: ids, taskIds: pending.length > 0 ? pending : undefined }
   }
@@ -332,6 +367,10 @@ export class SignetProvider implements Provider {
     _containerTag: string,
     onProgress?: IndexingProgressCallback
   ): Promise<void> {
+    if (this.profile === "dreaming") {
+      await this.awaitTranscriptCapture(result, onProgress)
+      return
+    }
     if (!result.taskIds || result.taskIds.length === 0) {
       onProgress?.({
         completedIds: result.documentIds,
@@ -404,6 +443,151 @@ export class SignetProvider implements Provider {
     )
   }
 
+  /**
+   * Dream only after the whole benchmark source corpus is present. This keeps
+   * the benchmark honest: raw episodic inputs first, one canonical semantic
+   * derivation second, then retrieval.
+   */
+  async finalizeIngest(_options: FinalizeIngestOptions): Promise<void> {
+    if (this.profile !== "dreaming") return
+    const dreamStatusPath = `/api/dream/status?agentId=${encodeURIComponent(this.agentId)}`
+
+    // A daemon may be restarting its pipeline after embedding initialization
+    // while ingest finishes. Wait for the configured worker instead of turning
+    // that short lifecycle transition into a misleading benchmark result.
+    const readyDeadline = Date.now() + 60_000
+    let workerReady = false
+    while (Date.now() < readyDeadline) {
+      const status = await this.request<DreamingStatusResponse>(dreamStatusPath, {
+        method: "GET",
+      })
+      if (status.worker?.running) {
+        workerReady = true
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    }
+    if (!workerReady) throw new Error("Dreaming worker did not become ready after ingestion")
+    const deadline = Date.now() + readPositiveInt("SIGNET_BENCH_DREAMING_WAIT_SECS", 720) * 1000
+    const pollMs = Math.min(readPositiveInt("SIGNET_BENCH_DREAMING_POLL_SECS", 1), 5) * 1000
+    while (Date.now() < deadline) {
+      let accepted: DreamingTriggerResponse
+      try {
+        accepted = await this.request<DreamingTriggerResponse>("/api/dream/trigger", {
+          method: "POST",
+          body: JSON.stringify({ mode: "incremental", agentId: this.agentId }),
+        })
+      } catch (error) {
+        // The worker may begin its periodic pass in the small interval between
+        // our completed-pass poll and this trigger. Join that pass instead of
+        // treating an already-running error as a benchmark failure.
+        if (!(error instanceof Error) || !error.message.includes("/api/dream/trigger failed (409)")) throw error
+        const status = await this.request<DreamingStatusResponse>(dreamStatusPath, { method: "GET" })
+        const running = status.passes?.find((pass) => pass.status === "running" && pass.id)
+        if (!running?.id) throw error
+        accepted = { passId: running.id }
+      }
+      if (!accepted.passId)
+        throw new Error(`Dreaming trigger failed: ${accepted.error || "missing pass id"}`)
+
+      let completed = false
+      while (Date.now() < deadline) {
+        const status = await this.request<DreamingStatusResponse>(dreamStatusPath, {
+          method: "GET",
+        })
+        const pass = status.passes?.find((candidate) => candidate.id === accepted.passId)
+        if (pass && pass.status !== "running") {
+          if (pass.status !== "completed") {
+            throw new Error(
+              `Dreaming pass ${accepted.passId} ${pass.status || "failed"}: ${pass.error || "no detail"}`
+            )
+          }
+          if (typeof status.episodicTokensPending !== "number") {
+            throw new Error("Dreaming status did not report the episodic backlog")
+          }
+          if (status.episodicTokensPending === 0) return
+          completed = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollMs))
+      }
+      if (!completed) break
+    }
+    throw new Error("Timed out draining the Dreaming episodic backlog")
+  }
+
+  private benchmarkSessionId(session: UnifiedSession, containerTag: string): string {
+    return `memorybench:${containerTag}:${session.sessionId}`
+  }
+
+  private async captureDreamingSession(
+    session: UnifiedSession,
+    options: IngestOptions
+  ): Promise<SignetSessionEndResponse> {
+    const transcript = formatTranscript(session)
+    if (!hasUsableMemoryContent(transcript)) {
+      throw new Error(
+        `Canonical transcript capture skipped for ${session.sessionId}: transcript is empty`
+      )
+    }
+    const sessionId = this.benchmarkSessionId(session, options.containerTag)
+    const result = await this.request<SignetSessionEndResponse>("/api/hooks/session-end", {
+      method: "POST",
+      body: JSON.stringify({
+        harness: "memorybench",
+        sessionId,
+        sessionKey: sessionId,
+        agentId: this.agentId,
+        cwd: this.project,
+        transcript,
+        capturedAt: parseSessionDate(session),
+      }),
+    })
+    if (result.error) {
+      throw new Error(
+        `Canonical transcript capture failed for ${session.sessionId}: ${result.error}`
+      )
+    }
+    return result
+  }
+
+  private async awaitTranscriptCapture(
+    result: IngestResult,
+    onProgress?: IndexingProgressCallback
+  ): Promise<void> {
+    const pending = new Set(result.taskIds ?? [])
+    const completed: string[] = []
+    const failed: string[] = []
+    const deadline = Date.now() + this.timeoutMs
+    let delay = 100
+
+    while (pending.size > 0 && Date.now() < deadline) {
+      for (const id of [...pending]) {
+        const job = await this.request<TranscriptCaptureJobResponse>(
+          `/api/hooks/transcript-capture/${encodeURIComponent(id)}?agentId=${encodeURIComponent(this.agentId)}`,
+          { method: "GET" }
+        )
+        if (job.status === "completed") {
+          pending.delete(id)
+          completed.push(id)
+        } else if (job.status === "dead") {
+          pending.delete(id)
+          failed.push(id)
+          throw new Error(`Transcript capture ${id} ${job.status}: ${job.error || "no detail"}`)
+        }
+      }
+      onProgress?.({ completedIds: completed, failedIds: failed, total: result.documentIds.length })
+      if (pending.size > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        delay = Math.min(Math.ceil(delay * 1.5), 1_000)
+      }
+    }
+
+    if (pending.size > 0) {
+      throw new Error(`Timed out waiting for ${pending.size} canonical transcript capture job(s)`)
+    }
+  }
+
   private collectMemoryIds(result: SignetRememberResponse, ids: string[], pending: string[]): void {
     const embedded = result.embedded === true
     if (typeof result.id === "string") {
@@ -458,7 +642,7 @@ export class SignetProvider implements Provider {
     return result
   }
 
-  private async request<T>(path: string, init: RequestInit): Promise<T> {
+  protected async request<T>(path: string, init: RequestInit): Promise<T> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs)
 
@@ -489,6 +673,13 @@ export class SignetProvider implements Provider {
 export class SignetSupermemoryParityProvider extends SignetProvider {
   constructor() {
     super("supermemory-parity")
+  }
+}
+
+/** Raw episodic benchmark input followed by the daemon's bounded Dreaming pass. */
+export class SignetDreamingProvider extends SignetProvider {
+  constructor() {
+    super("dreaming")
   }
 }
 

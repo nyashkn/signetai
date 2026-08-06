@@ -1,15 +1,25 @@
 import { randomUUID } from "node:crypto";
-import {
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
-	type OAuthPrompt,
-	type OAuthSelectPrompt,
-	getOAuthApiKey,
-	getOAuthProvider,
-	getOAuthProviders,
-} from "@earendil-works/pi-ai/oauth";
+import type {
+	AuthInteraction,
+	OAuthAuth,
+	OAuthCredentials,
+	OAuthPrompt,
+	OAuthSelectPrompt,
+} from "@earendil-works/pi-ai";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { logger } from "./logger";
 import { deleteSecretFromActiveProvider, getSecret, putSecret } from "./secrets";
+
+// pi-ai 0.81+ loads its OAuth flows (anthropic, openai-codex, github-copilot,
+// xai, radius) through a variable-specifier dynamic import so browser bundlers
+// cannot follow it into Node-only flow code. In the compiled native binary
+// that runtime import resolves against the bundle root and fails with
+// "Cannot find module './anthropic.js'". Registering the statically bundled
+// flows routes every lazy OAuth load through the embedded module instead;
+// without it dashboard sign-in (and credential refresh) is broken on the
+// shipped binary.
+registerBunOAuthFlows();
 
 const OAUTH_SECRET_PREFIX = "SIGNET_OAUTH_";
 const OAUTH_SESSION_TTL_MS = 10 * 60_000;
@@ -47,6 +57,15 @@ interface PendingInteraction {
 	reject(error: Error): void;
 }
 
+type OAuthInteractionEvent =
+	| { readonly type: "prompt"; readonly message: string; readonly placeholder?: string }
+	| {
+			readonly type: "select";
+			readonly message: string;
+			readonly options: readonly { readonly id: string; readonly label: string }[];
+	  }
+	| { readonly type: "manual_code"; readonly message: string };
+
 interface OAuthLoginSession {
 	readonly id: string;
 	readonly providerId: string;
@@ -59,6 +78,31 @@ interface OAuthLoginSession {
 
 const activeSessions = new Map<string, OAuthLoginSession>();
 const refreshes = new Map<string, Promise<ResolvedOAuthCredential | null>>();
+
+interface OAuthProvider {
+	readonly id: string;
+	readonly name: string;
+	readonly oauth: OAuthAuth;
+}
+
+/** Pi's provider catalog is the production OAuth authority. Test registrations
+ * exercise the same OAuthAuth contract without mutating process-global Pi state. */
+const testProviders = new Map<string, OAuthProvider>();
+
+function oauthProviders(): readonly OAuthProvider[] {
+	const providers = new Map<string, OAuthProvider>();
+	for (const provider of builtinProviders()) {
+		if (provider.auth.oauth) {
+			providers.set(provider.id, { id: provider.id, name: provider.name, oauth: provider.auth.oauth });
+		}
+	}
+	for (const [id, provider] of testProviders) providers.set(id, provider);
+	return [...providers.values()];
+}
+
+function oauthProvider(providerId: string): OAuthProvider | undefined {
+	return oauthProviders().find((provider) => provider.id === providerId);
+}
 
 function validateProviderId(providerId: string): string {
 	const normalized = providerId.trim();
@@ -98,15 +142,15 @@ export function listOAuthProviderMetadata(): Array<{
 	readonly name: string;
 	readonly usesCallbackServer: boolean;
 }> {
-	return getOAuthProviders().map((provider) => ({
+	return oauthProviders().map((provider) => ({
 		id: provider.id,
 		name: provider.name,
-		usesCallbackServer: provider.usesCallbackServer === true,
+		usesCallbackServer: false,
 	}));
 }
 
 export function isOAuthProvider(providerId: string): boolean {
-	return getOAuthProvider(providerId) !== undefined;
+	return oauthProvider(providerId) !== undefined;
 }
 
 export async function loadOAuthCredentials(providerId: string): Promise<OAuthCredentials | null> {
@@ -132,13 +176,13 @@ export async function loadOAuthCredentials(providerId: string): Promise<OAuthCre
 }
 
 export async function storeOAuthCredentials(providerId: string, credentials: OAuthCredentials): Promise<void> {
-	if (!getOAuthProvider(validateProviderId(providerId))) throw new Error(`Unknown OAuth provider: ${providerId}`);
+	if (!oauthProvider(validateProviderId(providerId))) throw new Error(`Unknown OAuth provider: ${providerId}`);
 	if (!isOAuthCredentials(credentials)) throw new Error(`Invalid OAuth credentials for ${providerId}`);
 	await putSecret(secretName(providerId), JSON.stringify(credentials));
 }
 
 export async function disconnectOAuthProvider(providerId: string): Promise<boolean> {
-	if (!getOAuthProvider(validateProviderId(providerId))) throw new Error(`Unknown OAuth provider: ${providerId}`);
+	if (!oauthProvider(validateProviderId(providerId))) throw new Error(`Unknown OAuth provider: ${providerId}`);
 	return deleteSecretFromActiveProvider(secretName(providerId));
 }
 
@@ -154,24 +198,27 @@ export async function resolveOAuthCredential(providerId: string): Promise<Resolv
 	const pending = (async () => {
 		const credentials = await loadOAuthCredentials(normalized);
 		if (!credentials) return null;
-		let result: Awaited<ReturnType<typeof getOAuthApiKey>>;
+		const provider = oauthProvider(normalized);
+		if (!provider) return null;
+		let resolved = credentials;
 		try {
-			result = await getOAuthApiKey(normalized, { [normalized]: credentials });
-		} catch (error) {
-			if (!(error instanceof Error) || error.message !== `Failed to refresh OAuth token for ${normalized}`) {
-				throw error;
+			if (resolved.expires <= Date.now()) {
+				const refreshed = await provider.oauth.refresh({ ...resolved, type: "oauth" });
+				resolved = { refresh: refreshed.refresh, access: refreshed.access, expires: refreshed.expires };
 			}
+		} catch (error) {
 			logger.warn("inference", "OAuth credential refresh failed", {
 				providerId: normalized,
 				error: safeError(error),
 			});
 			return null;
 		}
-		if (!result) return null;
-		if (JSON.stringify(result.newCredentials) !== JSON.stringify(credentials)) {
-			await storeOAuthCredentials(normalized, result.newCredentials);
+		const auth = await provider.oauth.toAuth({ ...resolved, type: "oauth" });
+		if (!auth.apiKey) return null;
+		if (JSON.stringify(resolved) !== JSON.stringify(credentials)) {
+			await storeOAuthCredentials(normalized, resolved);
 		}
-		return { apiKey: result.apiKey, credentials: result.newCredentials };
+		return { apiKey: auth.apiKey, credentials: resolved };
 	})();
 	refreshes.set(normalized, pending);
 	try {
@@ -183,7 +230,7 @@ export async function resolveOAuthCredential(providerId: string): Promise<Resolv
 
 function createInteraction(
 	session: OAuthLoginSession,
-	event: Omit<Extract<OAuthLoginEvent, { type: "prompt" | "select" | "manual_code" }>, "responseId">,
+	event: OAuthInteractionEvent,
 	allowEmpty: boolean,
 	allowedValues?: ReadonlySet<string>,
 ): Promise<string | undefined> {
@@ -211,7 +258,7 @@ export function startOAuthLogin(
 	readonly stream: ReadableStream<Uint8Array>;
 } {
 	const normalized = validateProviderId(providerId);
-	const provider = getOAuthProvider(normalized);
+	const provider = oauthProvider(normalized);
 	if (!provider) throw new Error(`Unknown OAuth provider: ${normalized}`);
 	if (activeSessions.size >= MAX_ACTIVE_OAUTH_SESSIONS) throw new Error("Too many active OAuth login sessions");
 
@@ -249,33 +296,54 @@ export function startOAuthLogin(
 			const timeout = setTimeout(() => abortOAuthLogin(sessionId, "Login session expired"), OAUTH_SESSION_TTL_MS);
 			timeout.unref?.();
 
-			const callbacks: OAuthLoginCallbacks = {
-				onAuth: (info) => session.emit({ type: "auth", ...info }),
-				onDeviceCode: (info) => session.emit({ type: "device_code", ...info }),
-				onPrompt: async (prompt) =>
-					(await createInteraction(session, { type: "prompt", ...prompt }, prompt.allowEmpty === true)) ?? "",
-				onSelect: async (prompt) =>
-					createInteraction(
-						session,
-						{ type: "select", ...prompt },
-						false,
-						new Set(prompt.options.map((option) => option.id)),
-					),
-				onProgress: (message) => session.emit({ type: "progress", message }),
-				onManualCodeInput: async () =>
-					(await createInteraction(
-						session,
-						{ type: "manual_code", message: "Paste the final redirect URL or authorization code" },
-						false,
-					)) ?? "",
+			const callbacks: AuthInteraction = {
 				signal: abortController.signal,
+				notify: (event) => {
+					if (event.type === "auth_url")
+						session.emit({ type: "auth", url: event.url, instructions: event.instructions });
+					else if (event.type === "device_code")
+						session.emit({
+							type: "device_code",
+							userCode: event.userCode,
+							verificationUri: event.verificationUri,
+							intervalSeconds: event.intervalSeconds,
+							expiresInSeconds: event.expiresInSeconds,
+						});
+					else session.emit({ type: "progress", message: event.message });
+				},
+				prompt: async (prompt) => {
+					if (prompt.type === "select") {
+						return (
+							(await createInteraction(
+								session,
+								{ type: "select", message: prompt.message, options: prompt.options },
+								false,
+								new Set(prompt.options.map((option) => option.id)),
+							)) ?? ""
+						);
+					}
+					if (prompt.type === "manual_code") {
+						return (await createInteraction(session, { type: "manual_code", message: prompt.message }, false)) ?? "";
+					}
+					return (
+						(await createInteraction(
+							session,
+							{ type: "prompt", message: prompt.message, placeholder: prompt.placeholder },
+							false,
+						)) ?? ""
+					);
+				},
 			};
 
-			void provider
+			void provider.oauth
 				.login(callbacks)
 				.then(async (credentials) => {
 					if (abortController.signal.aborted) throw new Error("Login cancelled");
-					await storeOAuthCredentials(normalized, credentials);
+					await storeOAuthCredentials(normalized, {
+						refresh: credentials.refresh,
+						access: credentials.access,
+						expires: credentials.expires,
+					});
 					onCredentialsChanged?.();
 					session.emit({ type: "connected", providerId: normalized });
 					session.emit({ type: "done" });
@@ -323,4 +391,13 @@ export function abortOAuthLogin(sessionId: string, reason = "Login cancelled"): 
 export function resetOAuthStateForTests(): void {
 	for (const sessionId of activeSessions.keys()) abortOAuthLogin(sessionId, "Test reset");
 	refreshes.clear();
+	testProviders.clear();
+}
+
+export function registerOAuthProviderForTests(provider: {
+	readonly id: string;
+	readonly name: string;
+	readonly oauth: OAuthAuth;
+}): void {
+	testProviders.set(validateProviderId(provider.id), provider);
 }

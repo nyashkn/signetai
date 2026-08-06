@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { getKnowledgeHygieneReport } from "./knowledge-graph-hygiene";
+import {
+	ZERO_ACTIVE_ATTRIBUTE_ENTITIES_SQL,
+	getDreamingHygieneCandidatesInDb,
+	getKnowledgeHygieneReport,
+} from "./knowledge-graph-hygiene";
 
 function makeDbPath(): string {
 	const dir = join(tmpdir(), `signet-kg-hygiene-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -132,5 +136,82 @@ describe("knowledge graph hygiene report", () => {
 		});
 
 		expect(report.duplicateEntities.filter((group) => group.linkedBy === "alias")).toHaveLength(0);
+	test("finds bounded, source-topology-free cleanup candidates for Dreaming attention", () => {
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+		seedEntity("husk", "Legacy Husk", 5);
+		seedEntity("pinned-husk", "Pinned legacy husk", 5);
+		seedEntity("source-doc", "README", 0, "source_document");
+		seedEntity("linked", "Linked", 1);
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE entities SET pinned = 1 WHERE id = 'pinned-husk'").run();
+			db.prepare(
+				`INSERT INTO entity_aspects
+				 (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+				 VALUES ('generic-aspect', 'linked', 'default', 'General', 'general', 0.5, datetime('now'), datetime('now'))`,
+			).run();
+			db.prepare(
+				`INSERT INTO entity_attributes
+				 (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance,
+				  status, group_key, claim_key, version, created_at, updated_at)
+				 VALUES ('missing-key', 'generic-aspect', 'default', 'attribute', 'Linked has stale metadata.',
+				  'linked has stale metadata.', 0.8, 0.5, 'active', 'general', '', 1, datetime('now'), datetime('now'))`,
+			).run();
+			db.prepare(
+				`INSERT INTO entity_dependencies
+				 (id, source_entity_id, target_entity_id, agent_id, dependency_type, strength, reason, status, created_at, updated_at)
+				 VALUES ('generic-link', 'linked', 'husk', 'default', 'related_to', 0.2, 'legacy catch-all', 'active', datetime('now'), datetime('now'))`,
+			).run();
+		});
+
+		const candidates = getDbAccessor().withReadDb((db) =>
+			getDreamingHygieneCandidatesInDb(db, { agentId: "default", limit: 20 }),
+		);
+		expect(candidates).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					subjectRef: "entity:husk",
+					details: expect.objectContaining({ reason: "zero_active_attributes" }),
+				}),
+				expect.objectContaining({
+					subjectRef: "aspect:generic-aspect",
+					details: expect.objectContaining({ reason: "generic_aspect" }),
+				}),
+				expect.objectContaining({
+					subjectRef: "attribute:missing-key",
+					details: expect.objectContaining({ reason: "missing_claim_key" }),
+				}),
+				expect.objectContaining({
+					subjectRef: "link:generic-link",
+					details: expect.objectContaining({ reason: "generic_related_to" }),
+				}),
+			]),
+		);
+		expect(candidates.some((candidate) => candidate.subjectRef === "entity:source-doc")).toBe(false);
+		expect(candidates.some((candidate) => candidate.subjectRef === "entity:pinned-husk")).toBe(false);
+	});
+
+	test("zero-active-attribute detector probes per-entity aspects, not an agent-wide attribute scan (#1094)", () => {
+		// Regression: the detector's NOT EXISTS used a flat
+		// entity_aspects JOIN entity_attributes, which let the planner root
+		// the subquery in entity_attributes by agent_id alone. On a large
+		// install that made the dreaming worker's first check
+		// O(entities × attributes) — 200s+ on a 30k-entity/72k-attribute
+		// graph — blocking the daemon's event loop minutes after restart.
+		// The subquery must drive from entity_aspects (agent_id, entity_id)
+		// and probe attributes per aspect.
+		dbPath = makeDbPath();
+		initDbAccessor(dbPath);
+		seedEntity("husk", "Legacy Husk", 5);
+
+		const plan = getDbAccessor().withReadDb((db) => {
+			const rows = db.prepare(`EXPLAIN QUERY PLAN ${ZERO_ACTIVE_ATTRIBUTE_ENTITIES_SQL}`).all() as Array<{
+				detail: string;
+			}>;
+			return rows.map((row) => row.detail).join("\n");
+		});
+
+		expect(plan).toContain("SEARCH asp USING INDEX idx_entity_aspects_status (agent_id=? AND entity_id=?)");
+		expect(plan).not.toContain("SEARCH attr USING INDEX idx_entity_attributes_claim_version (agent_id=?)");
 	});
 });

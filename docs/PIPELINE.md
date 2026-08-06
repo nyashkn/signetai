@@ -245,32 +245,13 @@ graph rows.
 Structural Classification
 ---
 
-When explicitly enabled, after extraction writes facts to the database, the
-structural classification worker (`structural-classify.ts`) runs a second LLM
-pass to assign each extracted fact to its entity's aspect hierarchy. Jobs are
-enqueued as `structural_classify` entries in `memory_jobs` and processed by a
-separate polling worker that batches by `entity_id`, all facts for the same
-entity in one LLM call.
+The per-fact structural classify and structural dependency workers are retired.
+Dreaming owns all automatic semantic writes, so no runtime creates or leases
+`structural_classify`/`structural_dependency` jobs. The obsolete `structural`
+configuration block is ignored.
 
-The prompt presents the entity name, type, existing aspects, and suggested
-aspect names (from `ASPECT_SUGGESTIONS` keyed by entity type). The LLM
-returns a JSON array of `{i, aspect, kind, new}` objects. Each fact is
-assigned to a named aspect and classified as either `attribute` or
-`constraint`. Aspects are upserted into `entity_aspects` on
-`(entity_id, canonical_name)` conflict. The `entity_attributes` row written
-during extraction has its `aspect_id` and `kind` filled in.
-
-When an entity's type was not determinable during extraction (stored as
-`"extracted"`), the classify prompt also asks the LLM to infer the type.
-If a valid canonical type is returned (`person`, `project`, `system`,
-`tool`, `concept`, `skill`, `task`, or `unknown`), the `entities` row is
-updated in the same transaction.
-
-The worker configuration lives under `structural` in the pipeline config:
-`enabled` (default `false`), `pollIntervalMs` (how often to check for pending
-jobs), and `classifyBatchSize` (max facts per entity per LLM call). The default
-pipeline does not use a background LLM to author graph structure; structured
-remember is the normal semantic write path.
+The default pipeline does not use a background LLM to author graph structure;
+Dreaming emits audited operations from episodic evidence.
 
 For details on the knowledge graph persistence stage, see
 [KNOWLEDGE-GRAPH.md](./KNOWLEDGE-GRAPH.md).
@@ -280,21 +261,10 @@ Knowledge Graph
 ---
 
 When `graph.enabled` is true, graph reads, traversal, and recall boosting are
-available. Background extraction only persists extracted entity triples when
-`graph.extractionWritesEnabled` is also true. That write gate defaults to
-`true` so new installs populate the graph from extraction. Set it to `false`
-to keep graph navigation on without letting the async extractor author semantic
-graph structure.
-
-The daemon logs a startup warning when graph reads are enabled while extraction
-writes are disabled. `/api/diagnostics` also reports
-`graph.extractionWritesEnabled` and degrades graph health once enough active
-memories exist but the graph still has no entities.
-
-If extraction graph writes are explicitly enabled, they happen in a
-**separate** transaction immediately after the main write transaction commits.
-Graph persistence failure is non-fatal: it logs a warning but never reverts the
-fact extraction results.
+available. Dreaming is the only automatic graph author: it reasons over
+episodic evidence and submits audited operations through the daemon-owned apply
+path. Graph configuration controls reads and traversal, not a second semantic
+writer.
 
 Entities are stored in the `entities` table with `name` (original casing),
 `canonical_name` (lowercase, whitespace-normalized), `entity_type`, and
@@ -376,10 +346,20 @@ increment of `graphBoostWeight`.
 Worker Model
 ---
 
-The extraction pipeline runs as a polling worker loop. A single
-`startWorker` call starts a `setTimeout`-chain tick loop that leases one
-job per tick from the `memory_jobs` table, processes it, and reschedules
-itself. The use of `setTimeout` chains rather than `setInterval` allows
+The legacy extraction/decision/escalation worker runtime and its threaded
+variant are retired. Dreaming now owns all automatic semantic writes; no
+runtime creates or leases `memory_jobs` `extract` work. The cross-entity dependency-synthesis worker
+(`dependency-synthesis.ts`) was likewise retired — it wrote
+`entity_dependencies` rows directly via `upsertDependency`, bypassing the
+audited `create_link` path; Dreaming's audited `create_link` is now the
+sole semantic dependency writer. The non-semantic workers (document ingest,
+retention, maintenance, synthesis, prospective/hints) remain active. The
+description below is retained for historical reference.
+
+The extraction pipeline ran as a polling worker loop. A single
+`startWorker` call started a `setTimeout`-chain tick loop that leased one
+job per tick from the `memory_jobs` table, processed it, and rescheduled
+itself. The use of `setTimeout` chains rather than `setInterval` allowed
 dynamic delay adjustment via exponential backoff on failure.
 
 Job leasing is atomic. The tick calls `accessor.withWriteTx` to both select
@@ -394,14 +374,11 @@ during lease). If `attempts >= max_attempts` (default 3), the job is
 moved to status `dead`; otherwise it returns to `pending` for retry on the
 next tick. A dead job stays in the table for audit and cleanup purposes.
 
-Job deduplication is enforced at enqueue time: `enqueueExtractionJob` checks
-for any existing job for the same `memory_id` with status `pending` or
-`leased` before inserting a new one.
-
-A stale lease reaper runs on a fixed 60-second `setInterval`. Any job with
-`status = 'leased'` and `leased_at` older than `leaseTimeoutMs` (default
-300,000 ms / 5 minutes) is reset to `pending`. This handles worker crashes
-that leave jobs leased indefinitely.
+The retired extraction queue no longer accepts new work. Startup terminalizes
+each unfinished historical `extract` job so none is abandoned or left leased
+forever. It preserves the source's existing provenance and `memory_kind`: only
+already-episodic evidence is reachable by Dreaming, while derived rows remain
+derived and are not re-ingested as source material.
 
 Backoff state tracks consecutive failures. On zero failures, the tick
 interval is `workerPollMs` (default 2,000 ms). Each failure doubles the
@@ -413,8 +390,8 @@ Document Ingest
 ---
 
 The document worker processes `document_ingest` jobs from the same
-`memory_jobs` table. It runs as a fixed-interval polling loop separate from
-the extraction worker, defaulting to 10,000 ms between ticks.
+`memory_jobs` table. It runs as a fixed-interval polling loop,
+defaulting to 10,000 ms between ticks.
 
 A document ingest job carries a `document_id` rather than a `memory_id`.
 The referenced row in the `documents` table carries the source content and
@@ -451,9 +428,8 @@ The chunk-to-document relationship is recorded in `document_memories` with
 the chunk index. This table allows the document's chunks to be enumerated
 or deleted as a unit.
 
-The document worker uses the same `workerMaxRetries` limit as the
-extraction worker. On exhaustion, the document row status is set to
-`failed` with the error string recorded.
+The document worker honors the `workerMaxRetries` limit. On exhaustion, the
+document row status is set to `failed` with the error string recorded.
 
 
 Retention Worker
@@ -535,10 +511,10 @@ recommendations (i.e., health is good).
 
 ### Queue Health and Repair (issue #901)
 
-Two tables hold a backlog that the legacy `QueueHealth` aggregate never
-exposed: `summary_jobs` (the durable summary queue) and the `extraction`
-slice of `memory_jobs` (filtered by `job_type = 'extraction'`). Operators
-saw a green health score with thousands of dead rows beneath it.
+Two live tables hold backlog that the legacy `QueueHealth` aggregate never
+exposed: `memory_jobs` and `summary_jobs` (the durable summary queue).
+Operators can inspect and repair both queues without treating retired
+extraction jobs as active work.
 
 `/api/diagnostics/queue` returns a structured per-queue report:
 
@@ -547,19 +523,16 @@ saw a green health score with thousands of dead rows beneath it.
   "timestamp": "...",
   "queues": {
     "memory":     { "pending": 0, "leased": 0, "completed": 0, "failed": 0, "dead": 0, "oldestAgeSec": 0, "oldestDeadAgeSec": 0, "lastError": null },
-    "summary":    { "...": "..." },
-    "extraction": { "...": "..." }
+    "summary":    { "...": "..." }
   },
   "oldestDeadSummaryJob":    { "id": "...", "harness": "...", "sessionKey": "...", "createdAt": "...", "attempts": 0, "error": null },
   "oldestDeadMemoryJob":     { "...": "..." },
-  "oldestDeadExtractionJob": { "...": "..." },
   "thresholds": { "summaryDeadWarn": 50, "summaryDeadFail": 500, "summaryOldestPendingWarnSec": 300, "..." }
 }
 ```
 
-`signet status` renders the same queues as a `Pipeline queues` block
-below the extraction section, with each queue's `dead` and
-`oldest dead` highlighted when `dead > 0`.
+`signet status` renders the same live queues as a `Pipeline queues` block,
+with each queue's `dead` and `oldest dead` highlighted when `dead > 0`.
 
 Three repair commands cover the issue's "Suggested fix":
 
@@ -571,6 +544,8 @@ Three repair commands cover the issue's "Suggested fix":
 
 All three default to **dry-run** and require `--apply` to mutate. The
 preview includes the first 100 matching ids and the total match count.
+Requeue excludes retired `extract` jobs because Dreaming already consumed
+their sources; cancel and prune retain those terminal rows for audit cleanup.
 Provenance migrations: `089-job-cancellations`, `090-job-archive`.
 
 
@@ -701,11 +676,14 @@ controlled by `semanticContradictionTimeoutMs` (default 120 seconds, range
 5s-300s). On timeout or parse failure, the result defaults to "no
 contradiction" — the check is advisory and never blocks a proposal.
 
-These same detection primitives are reused by the retroactive supersession
-system (`supersession.ts`), which applies contradiction detection to sibling
-attributes on the same entity/aspect rather than to UPDATE/DELETE proposals.
-See the [retroactive supersession spec](./specs/planning/retroactive-supersession.md)
-and [KNOWLEDGE-GRAPH.md](./KNOWLEDGE-GRAPH.md#retroactive-supersession) for
+Under the Dreaming cutover (#946) the periodic retroactive supersession
+sweep and its `supersession.ts` module were retired; the contradiction
+primitives above are no longer consumed by a retroactive supersession path.
+Supersession now happens only at write time: the structured remember path
+supersedes conflicting sibling attributes in the same
+`aspect_id + group_key + claim_key` slot, and an explicit, audited
+`supersede_claim_value` ontology operation handles supersession through the
+mutation API. See [KNOWLEDGE-GRAPH.md](./KNOWLEDGE-GRAPH.md#supersession) for
 details.
 
 ```yaml
@@ -1054,29 +1032,6 @@ artifact and backfills the session manifest. Mid-session
 nodes into `session_summaries`.
 
 
-Decision Auto-Protection
----
-
-The shared decision detector (`isDecisionContent`) runs a 14-pattern regex
-battery on memory content. Structured graph writes use this detector when a
-caller does not specify a stronger kind, so decision language can become a
-`kind='constraint'` without requiring a background LLM.
-
-The patterns cover common decision-indicating phrases:
-
-- "chose/chosen to use X over Y", "decided to/on/against"
-- "switched from/to", "migrated from/to/away"
-- "picked X over Y", "went with", "sticking with"
-- "committed to", "settled on", "will use/go with/stick with"
-- "prefers X over/instead/rather", "adopted"
-- "architecture decision", "design decision"
-
-The detection function returns true if any pattern matches. This is a
-write-time classification, no LLM call is involved. The regex battery is fast
-and deterministic, consistent with the pipeline rule that default background
-work should be mechanical and predictable.
-
-
 Configuration Reference
 ---
 
@@ -1116,17 +1071,11 @@ Extraction safety note:
 
 ```yaml
 extraction:
-  provider: llama-cpp            # "none" | "llama-cpp" | "ollama" | "claude-code" | "codex" | "opencode" | "anthropic" | "openrouter" | "openai-compatible" | "command"
+  provider: llama-cpp            # legacy routing seed; canonical inference.workloads.memoryExtraction takes precedence
   model: qwen3:4b
   timeout: 90000                 # ms, range 5000–300000
   minConfidence: 0.7             # fraction 0.0–1.0
   structuredOutput: true         # send JSON schema in format field; set false for providers that reject it (e.g. GitHub Copilot)
-  command:                       # required when legacy extraction.provider: command
-    bin: node
-    args: ["./extract.mjs", "--transcript", "$TRANSCRIPT", "--session", "$SESSION_KEY", "--agent", "$AGENT_ID"]
-    # tokens: $TRANSCRIPT (temp file path), $SESSION_KEY, $PROJECT, $AGENT_ID, $SIGNET_PATH
-    # command stdout/stderr are ignored; command writes memories to Signet state directly
-    # top-level inference.targets.*.executor: command is the separate stdout-based inference-provider path
 
 synthesis:
   enabled: true
@@ -1142,33 +1091,15 @@ claudeCode:
   cooldownMs: 300000             # ms, range 1000–3600000
 
 worker:
-  pollMs: 2000                   # ms, range 100–60000
   maxRetries: 3                  # range 1–10
   leaseTimeoutMs: 300000         # ms, range 10000–600000
-  maxLoadPerCpu: 0.8             # load-per-CPU threshold, range 0.1–8.0
-  overloadBackoffMs: 30000       # ms, range 1000–300000
   maxLlmConcurrency: 2           # shared cap for live LLM calls, range 1–16; SIGNET_MAX_LLM_CONCURRENCY overrides YAML when set
+  # retired under #946 (standalone extraction worker removed): pollMs, maxLoadPerCpu, overloadBackoffMs, threadedExtraction
 
 graph:
   enabled: true
-  extractionWritesEnabled: true  # default; persists extracted entities when graph tables are available
   boostWeight: 0.15              # fraction 0.0–1.0
   boostTimeoutMs: 500            # ms, range 50–5000
-
-structural:
-  enabled: false
-  classifyBatchSize: 8           # range 1–20
-  dependencyBatchSize: 5         # range 1–10
-  pollIntervalMs: 10000          # ms, range 2000–120000
-  synthesisEnabled: false
-  synthesisIntervalMs: 60000     # ms, range 10000–600000
-  synthesisTopEntities: 20       # range 5–100
-  synthesisMaxFacts: 10          # range 3–50
-  synthesisMaxStallMs: 1800000   # 30 min, set 0 to disable
-  supersessionEnabled: true
-  supersessionSweepEnabled: true
-  supersessionSemanticFallback: false
-  supersessionMinConfidence: 0.7
 
 reranker:
   enabled: true
@@ -1261,7 +1192,6 @@ memory:
     enabled: true
     graph:
       enabled: true
-      extractionWritesEnabled: true
     extraction:
       minConfidence: 0.75
 ```

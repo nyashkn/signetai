@@ -27,11 +27,10 @@ updated synchronously. An embedding is generated asynchronously. The
 write succeeds even if the embedding provider is unavailable — those
 memories remain searchable by keyword only.
 
-After the write, `enqueueExtractionJob` inserts a row into the
-`memory_jobs` table (`job_type = 'extract'`, `status = 'pending'`).
-The pipeline worker picks it up, runs extraction and decision, then
-optionally writes derived facts as new memory rows. All of this
-happens without touching the original memory's content.
+The saved row is immutable episodic evidence. Dreaming later selects it with
+related artifacts, transcripts, and summaries, then may derive audited semantic
+claims or links without rewriting the original evidence. No extraction job is
+created by the write path.
 
 Search (`POST /api/memory/recall`) runs hybrid BM25 + vector search,
 optionally augmented by the knowledge graph, and returns a scored,
@@ -44,83 +43,33 @@ Pipeline V2 Processing
 -----------------------
 
 [[pipeline|Pipeline V2]] is the autonomous memory processing subsystem. It runs
-after every `remember` call when `pipelineV2.enabled = true` in
-`agent.yaml` (see [[configuration]]).
+source ingestion, retention, summaries, and Dreaming under
+`memory.pipelineV2` (see [[configuration]]). A remember save is immediately
+available as immutable episodic evidence; it does not start a per-memory
+extraction or decision worker.
 
 ### Extraction
 
-The extraction stage (`platform/daemon/src/pipeline/extraction.ts`)
-sends the raw memory content to an LLM (default: `qwen3:4b` via
-Ollama) with a structured prompt. The model returns a JSON object with
-two arrays: `facts` and `entities`.
+Direct LLM fact/entity extraction from raw memory content was retired under
+the Dreaming cutover (#946). `platform/daemon/src/pipeline/extraction.ts`
+now holds only shared JSON recovery and parsing helpers consumed across the
+pipeline (reranker, contradiction, dreaming) and by the
+ontology modules. Semantic graph authorship flows through the audited
+Dreaming apply path, not a per-memory extraction stage.
 
-Each fact has a `content` string (10–2000 chars), a `type` (see
-Memory Types below), and a `confidence` score from 0 to 1. The
-extractor caps output at 20 facts and 50 entities. Input longer than
-12,000 characters is truncated with a `[truncated]` marker.
+### Dreaming
 
-The LLM output is validated strictly. Missing fields, invalid types,
-or unparseable JSON produce warnings but do not fail the job — the
-stage returns whatever valid facts it could extract. Chain-of-thought
-blocks (`<think>...</think>`) are stripped before parsing, which
-handles models like qwen3 that emit reasoning preambles.
+Dreaming reads the agent-scoped episodic aggregation surface: user evidence,
+source artifacts, live transcripts, and temporal summaries. Each source is
+preserved with its provenance. When a session artifact has a matching
+transcript or temporal-DAG node, Dreaming uses that canonical node once rather
+than repeating the same content from every storage representation. The
+immutable artifact remains available for lineage and recovery.
 
-```
-Extracted fact shape:
-  { content: string, type: MemoryType, confidence: number }
-
-Extracted entity shape:
-  { source: string, relationship: string, target: string, confidence: number }
-```
-
-### Decision Engine
-
-The decision stage (`platform/daemon/src/pipeline/decision.ts`)
-evaluates each extracted fact against existing memories to determine
-what should happen next.
-
-For each fact, the engine runs a focused hybrid search (top 5
-candidates). If no candidates are found, it immediately proposes
-`add`. Otherwise, it sends the fact and its candidates to the LLM,
-which returns one of four actions:
-
-- `add` — no existing memory covers this fact; store it as new
-- `update` — the fact refines or supersedes a specific candidate
-- `delete` — the fact invalidates a specific candidate
-- `none` — the fact is already covered; skip
-
-The decision includes a `targetId` (required for `update` and
-`delete`), a `confidence` score, and a `reason` string. Proposals
-that reference non-candidate IDs, omit required fields, or return
-invalid JSON are rejected with a warning.
-
-### Shadow Mode vs. Controlled Writes
-
-When `pipelineV2.shadowMode = true`, the pipeline runs fully —
-extraction and decisions execute — but no memory rows are created or
-mutated. All proposals are recorded in `memory_history` with
-`changed_by = 'pipeline-shadow'` for inspection. This is safe to
-enable on any deployment.
-
-When shadow mode is off and `pipelineV2.mutationsFrozen = false`,
-the worker enters controlled-write mode. Only `add` proposals are
-applied. `update` and `delete` proposals are blocked by default
-unless `pipelineV2.allowUpdateDelete = true`. Destructive proposals
-are logged in `memory_history` with `blockedReason` set.
-
-Facts below `pipelineV2.minFactConfidenceForWrite` are skipped.
-Empty content after normalization is also skipped. Both cases produce
-`skippedReason` entries in history.
-
-### Graph Entity Persistence
-
-If `pipelineV2.graphEnabled = true`, entities extracted during
-Pipeline V2 are written to the [[docs/knowledge-architecture|knowledge graph]] after the main
-transaction commits. This is a separate transaction — graph failure
-never reverts fact extraction. Entities are stored by `canonical_name`
-with a `mentions` count. Relations link source entities to targets
-with a relationship label. Memory-entity associations are tracked in
-`memory_entity_mentions`.
+Dreaming is the only automatic semantic writer. It reasons over the selected
+evidence and submits audited ontology operations through the daemon-owned apply
+path. Pause/frozen controls can prevent mutation, but there is no parallel
+extraction, decision, or structural worker that writes semantic state.
 
 
 Hybrid Recall
@@ -595,28 +544,19 @@ delay = min(BASE_DELAY × 2^failures, MAX_DELAY) + random_jitter
 `BASE_DELAY` is 1000ms, `MAX_DELAY` is 30,000ms, jitter up to 500ms.
 Successful jobs reset the failure counter.
 
-### Enqueue Deduplication
+### Retired Extraction Queue
 
-`enqueueExtractionJob` checks for existing `pending` or `leased` jobs
-for the same `memory_id` before inserting. Duplicate enqueue calls
-for the same memory are silently dropped.
-
-### Controlled Writes in the Worker
-
-When not in shadow mode, the worker prefetches embeddings for all
-`add` proposals before entering the write transaction. This keeps the
-critical write path synchronous and avoids holding a write lock while
-waiting on network I/O to the embedding provider. Embedding failures
-are non-fatal — the fact is written without an embedding vector and
-remains keyword-searchable.
+The legacy extraction queue is retired. Dreaming selects new evidence
+directly. At startup, each live historical extraction source is promoted to
+the durable episodic cursor before its obsolete job is terminalized.
 
 
 Memory Types
 ------------
 
-Every memory has a `type` field that classifies its semantic role.
-The pipeline extractor assigns types; explicit saves use type
-inference from content patterns or accept an explicit `type` parameter.
+Every semantic memory has a `type` field that classifies its role. Dreaming
+derives those rows from episodic evidence; the original evidence remains
+immutable and provenance-bearing.
 
 | Type | Meaning | Example |
 |------|---------|---------|

@@ -1,37 +1,44 @@
-/**
- * Tests for dreaming memory consolidation.
- *
- * Tests the threshold check, state management, mutation parsing/application,
- * and pass lifecycle -- all without an LLM (the generate function is mocked).
- */
-
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { DreamingConfig } from "@signet/core";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor } from "../db-accessor";
 import {
-	addDreamingTokens,
+	DREAMING_AGENT_PROMPT,
+	DREAMING_CONTENT_AGENT_PROMPT,
+	DREAMING_FAILURE_HALT_THRESHOLD,
+	DREAMING_HALT_COOLDOWN_MS,
+	DREAMING_HYGIENE_AGENT_PROMPT,
+	type DreamingState,
+	_testParseEpisodicCursor,
+	dreamingEarlyExitSummary,
+	enqueueDreamingHygieneAttention,
+	getDreamingEpisodicTokenBacklog,
 	getDreamingPasses,
 	getDreamingState,
+	getDreamingToolCalls,
+	isDreamingHaltActive,
+	isDreamingScopeHalted,
 	recordDreamingFailure,
-	runDreamingPass,
+	requestDreamingEvidenceRequeue,
+	runDreamingAgentPass,
+	selectDreamingPassMode,
 	shouldTriggerDreaming,
 } from "./dreaming";
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
+import {
+	enqueueDreamingAttentionInTx,
+	getDreamingAttention,
+	getDreamingAttentionSnapshots,
+	resolveDreamingAttentionInTx,
+} from "./dreaming-attention";
+import { readDreamingRunbook } from "./dreaming-runbook";
 
 const AGENT = "default";
 
 function defaultCfg(overrides?: Partial<DreamingConfig>): DreamingConfig {
 	return {
-		enabled: true,
 		tokenThreshold: 100_000,
+		maxInterval: 6 * 60 * 60 * 1_000,
 		maxInputTokens: 32_000,
 		maxOutputTokens: 16_000,
 		timeout: 300_000,
@@ -40,7 +47,6 @@ function defaultCfg(overrides?: Partial<DreamingConfig>): DreamingConfig {
 	};
 }
 
-/** Minimal DbAccessor wrapper around an in-memory Database. */
 function wrapDb(db: Database): DbAccessor {
 	return {
 		withReadDb<T>(fn: (db: Database) => T): T {
@@ -52,50 +58,23 @@ function wrapDb(db: Database): DbAccessor {
 				const result = fn(db);
 				db.exec("COMMIT");
 				return result;
-			} catch (e) {
+			} catch (error) {
 				db.exec("ROLLBACK");
-				throw e;
+				throw error;
 			}
 		},
 	} as unknown as DbAccessor;
 }
 
-function seedEntity(db: Database, id: string, name: string, type = "concept"): void {
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	db.prepare(
-		`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
-	).run(id, name, canonical, type, AGENT);
-}
-
-function seedAspect(db: Database, id: string, entityId: string, name: string): void {
-	const canonical = name.trim().toLowerCase().replace(/\s+/g, " ");
-	db.prepare(
-		`INSERT INTO entity_aspects (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, 0.5, datetime('now'), datetime('now'))`,
-	).run(id, entityId, AGENT, name, canonical);
-}
-
-function seedAttribute(db: Database, id: string, aspectId: string, content: string, kind = "attribute"): void {
-	const normalized = content.trim().toLowerCase();
-	db.prepare(
-		`INSERT INTO entity_attributes (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.5, 'active', datetime('now'), datetime('now'))`,
-	).run(id, aspectId, AGENT, kind, content, normalized);
-}
-
 function seedSummary(db: Database, id: string, content: string, tokens: number): void {
 	db.prepare(
-		`INSERT INTO session_summaries (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
+		`INSERT INTO session_summaries
+		 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
 		 VALUES (?, ?, ?, ?, 0, 'session', 'summary', datetime('now'), datetime('now'), datetime('now'))`,
 	).run(id, AGENT, content, tokens);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe("dreaming", () => {
+describe("Dreaming", () => {
 	let db: Database;
 	let accessor: DbAccessor;
 
@@ -105,574 +84,655 @@ describe("dreaming", () => {
 		accessor = wrapDb(db);
 	});
 
-	afterEach(() => {
-		db.close();
-	});
+	afterEach(() => db.close());
 
-	function withTempIdentity(files: Record<string, string>): string {
-		const dir = mkdtempSync(join(tmpdir(), "dreaming-identity-"));
-		for (const [name, content] of Object.entries(files)) {
-			writeFileSync(join(dir, name), content);
+	it("round-trips only canonical episodic cursor kinds", () => {
+		for (const kind of ["memory", "artifact", "transcript", "summary"] as const) {
+			const cursor = { capturedAt: "2026-03-01T00:00:00.000Z", kind, id: `id-${kind}` };
+			expect(_testParseEpisodicCursor(JSON.stringify(cursor))).toEqual(cursor);
 		}
-		return dir;
-	}
-
-	describe("state management", () => {
-		it("returns zero state for new agent", () => {
-			const state = getDreamingState(accessor, AGENT);
-			expect(state.tokensSinceLastPass).toBe(0);
-			expect(state.lastPassAt).toBeNull();
-			expect(state.lastPassMode).toBeNull();
-		});
-
-		it("accumulates tokens", () => {
-			addDreamingTokens(accessor, AGENT, 5000);
-			addDreamingTokens(accessor, AGENT, 3000);
-			const state = getDreamingState(accessor, AGENT);
-			expect(state.tokensSinceLastPass).toBe(8000);
-		});
-
-		it("scopes tokens to agent_id", () => {
-			addDreamingTokens(accessor, AGENT, 5000);
-			addDreamingTokens(accessor, "other", 9000);
-			expect(getDreamingState(accessor, AGENT).tokensSinceLastPass).toBe(5000);
-			expect(getDreamingState(accessor, "other").tokensSinceLastPass).toBe(9000);
-		});
+		expect(_testParseEpisodicCursor(JSON.stringify({ capturedAt: "2026-01-01", kind: "unknown", id: "x" }))).toBeNull();
+		expect(
+			_testParseEpisodicCursor(
+				JSON.stringify({ capturedAt: "2026-03-01T00:00:00.000Z", kind: "summary", id: "fragment", fragmentOffset: 12 }),
+			),
+		).toEqual({ capturedAt: "2026-03-01T00:00:00.000Z", kind: "summary", id: "fragment", fragmentOffset: 12 });
+		expect(
+			_testParseEpisodicCursor(
+				JSON.stringify({ capturedAt: "2026-03-01T00:00:00.000Z", kind: "summary", id: "fragment", fragmentOffset: -1 }),
+			),
+		).toEqual({ capturedAt: "2026-03-01T00:00:00.000Z", kind: "summary", id: "fragment" });
 	});
 
-	describe("threshold check", () => {
-		it("does not trigger when disabled", () => {
-			addDreamingTokens(accessor, AGENT, 999_999);
-			expect(shouldTriggerDreaming(accessor, defaultCfg({ enabled: false }), AGENT)).toBe(false);
-		});
-
-		it("does not trigger below threshold", () => {
-			addDreamingTokens(accessor, AGENT, 50_000);
-			expect(
-				shouldTriggerDreaming(accessor, defaultCfg({ tokenThreshold: 100_000, backfillOnFirstRun: false }), AGENT),
-			).toBe(false);
-		});
-
-		it("triggers at threshold", () => {
-			addDreamingTokens(accessor, AGENT, 100_000);
-			expect(shouldTriggerDreaming(accessor, defaultCfg({ tokenThreshold: 100_000 }), AGENT)).toBe(true);
-		});
-
-		it("triggers on first run with backfill", () => {
-			// No tokens accumulated, but backfillOnFirstRun is true and no pass has run
-			expect(shouldTriggerDreaming(accessor, defaultCfg({ backfillOnFirstRun: true }), AGENT)).toBe(true);
-		});
-
-		it("does not trigger on first run without backfill", () => {
-			expect(shouldTriggerDreaming(accessor, defaultCfg({ backfillOnFirstRun: false }), AGENT)).toBe(false);
-		});
-
-		it("backs off on consecutive failures", () => {
-			// First failure: requires 2x threshold
-			addDreamingTokens(accessor, AGENT, 100_000);
-			recordDreamingFailure(accessor, AGENT);
-			const cfg = defaultCfg({ tokenThreshold: 100_000, backfillOnFirstRun: false });
-			// At 1 failure, need 2x threshold (200k) — current 100k is below
-			expect(shouldTriggerDreaming(accessor, cfg, AGENT)).toBe(false);
-			// Add more tokens to exceed 2x
-			addDreamingTokens(accessor, AGENT, 100_001);
-			expect(shouldTriggerDreaming(accessor, cfg, AGENT)).toBe(true);
-		});
-
-		it("backs off first-run failures requiring threshold tokens", () => {
-			// First-run with backfill but has failures — requires tokenThreshold
-			recordDreamingFailure(accessor, AGENT);
-			const cfg = defaultCfg({ backfillOnFirstRun: true, tokenThreshold: 100_000 });
-			// No tokens: would normally trigger on first run, but failure backoff blocks
-			expect(shouldTriggerDreaming(accessor, cfg, AGENT)).toBe(false);
-			// Add tokens to reach threshold
-			addDreamingTokens(accessor, AGENT, 100_000);
-			expect(shouldTriggerDreaming(accessor, cfg, AGENT)).toBe(true);
-		});
+	it("uses the fixed agent prompt and resets the evidence backlog each pass", async () => {
+		seedSummary(db, "s1", "durable episodic evidence for the backlog.", 500);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
+		let prompt = "";
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					prompt = input.prompt;
+					return { summary: "Done" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(result.summary).toBe("Done");
+		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
+		// The evidence queue resets to pass start: the same evidence must not
+		// re-trigger the next pass.
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
 	});
 
-	describe("pass lifecycle", () => {
-		it("completes pass with no data gracefully", async () => {
-			const generate = async () => JSON.stringify({ mutations: [], summary: "Nothing to do" });
+	it("uses wall-clock backoff independently of later evidence volume", () => {
+		seedSummary(db, "first", "episodic source", 10);
+		recordDreamingFailure(accessor, AGENT);
+		const failedAt = Date.parse(getDreamingState(accessor, AGENT).lastFailureAt ?? "");
+		const cfg = defaultCfg({ tokenThreshold: 1, backfillOnFirstRun: false });
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + 10 * 60 * 1000 - 1)).toBe(false);
+		seedSummary(db, "later", "episodic source ".repeat(3_000), 3_000);
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + 10 * 60 * 1000)).toBe(true);
+	});
 
-			const tmpDir = "/tmp";
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), tmpDir, AGENT, "incremental");
-			expect(result.applied).toBe(0);
-			expect(result.failed).toBe(0);
-			expect(result.summary).toBe("No new summaries or entities to process");
+	it("halts automatic scheduling after repeated consecutive failures", () => {
+		seedSummary(db, "first", "episodic source", 10);
+		for (let i = 0; i < DREAMING_FAILURE_HALT_THRESHOLD; i += 1) {
+			recordDreamingFailure(accessor, AGENT);
+		}
+		const failedAt = Date.parse(getDreamingState(accessor, AGENT).lastFailureAt ?? "");
+		const cfg = defaultCfg({ tokenThreshold: 1, backfillOnFirstRun: false });
+		// Halted: a large backlog and fresh attention must not trigger a pass
+		// inside the cooldown window.
+		seedSummary(db, "later", "episodic source ".repeat(3_000), 3_000);
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + 60 * 1000)).toBe(false);
+		// Cooldown elapsed: scheduling resumes (the next failure re-halts).
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + DREAMING_HALT_COOLDOWN_MS + 1_000)).toBe(true);
+	});
+
+	it("isDreamingScopeHalted gates on the failure threshold and cooldown", () => {
+		const base = (overrides: Partial<DreamingState>): DreamingState => ({
+			consecutiveFailures: 0,
+			lastFailureAt: null,
+			lastPassAt: null,
+			evidenceCursor: null,
+			lastPassId: null,
+			lastPassMode: null,
+			...overrides,
 		});
+		const fresh = { lastFailureAt: "2026-08-05 12:00:00" };
+		expect(
+			isDreamingScopeHalted(
+				base({ ...fresh, consecutiveFailures: DREAMING_FAILURE_HALT_THRESHOLD - 1 }),
+				Date.parse("2026-08-05 12:30:00"),
+			),
+		).toBe(false);
+		expect(
+			isDreamingScopeHalted(
+				base({ ...fresh, consecutiveFailures: DREAMING_FAILURE_HALT_THRESHOLD }),
+				Date.parse("2026-08-05 12:30:00"),
+			),
+		).toBe(true);
+		expect(
+			isDreamingScopeHalted(
+				base({ ...fresh, consecutiveFailures: DREAMING_FAILURE_HALT_THRESHOLD }),
+				Date.parse("2026-08-05 12:00:00") + DREAMING_HALT_COOLDOWN_MS + 1_000,
+			),
+		).toBe(false);
+		expect(
+			isDreamingScopeHalted(base({ lastFailureAt: null, consecutiveFailures: 99 }), Date.parse("2026-08-05 12:30:00")),
+		).toBe(false);
+	});
 
-		it("records pass history", async () => {
-			// Seed some data so we get past the empty check
-			seedEntity(db, "ent-1", "TypeScript", "tool");
-			seedAspect(db, "asp-1", "ent-1", "usage");
-			seedAttribute(db, "attr-1", "asp-1", "TypeScript is used for all backend code");
+	it("isDreamingHaltActive reads the halt state through the accessor", () => {
+		for (let i = 0; i < DREAMING_FAILURE_HALT_THRESHOLD - 1; i += 1) {
+			recordDreamingFailure(accessor, AGENT);
+		}
+		expect(isDreamingHaltActive(accessor, AGENT)).toBe(false);
+		recordDreamingFailure(accessor, AGENT);
+		expect(isDreamingHaltActive(accessor, AGENT)).toBe(true);
+	});
 
-			const generate = async () => JSON.stringify({ mutations: [], summary: "Reviewed graph, no changes needed" });
-
-			await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			const passes = getDreamingPasses(accessor, AGENT);
-			expect(passes.length).toBe(1);
-			expect(passes[0]?.mode).toBe("compact");
-			expect(passes[0]?.status).toBe("completed");
+	it("runs a low-volume episodic backlog once its maximum wait elapses", () => {
+		const now = Date.now();
+		seedSummary(db, "trickle", "small episodic source", 10);
+		accessor.withWriteTx((tx) => {
+			tx.prepare(
+				`INSERT INTO dreaming_state (agent_id, last_pass_at)
+				 VALUES (?, ?)`,
+			).run(AGENT, new Date(now - 6 * 60 * 60 * 1_000).toISOString());
 		});
+		const cfg = defaultCfg({ tokenThreshold: 100_000, maxInterval: 6 * 60 * 60 * 1_000, backfillOnFirstRun: false });
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now - 1)).toBe(false);
+		expect(shouldTriggerDreaming(accessor, cfg, AGENT, now)).toBe(true);
+	});
 
-		it("loads configured startup identity and DREAMING.md special prompt", async () => {
-			seedEntity(db, "ent-1", "Signet", "project");
-			const dir = withTempIdentity({
-				"agent.yaml":
-					"identity:\n  preset: minimal\n  startup:\n    load:\n      - path: AGENTS.md\n        role: startup_rules\n        budget: 12000\n  special:\n    - path: DREAMING.md\n      kind: dreaming\n      role: dreaming_prompt\n      budget: 4000\n",
-				"AGENTS.md": "Startup rules are loaded normally.",
-				"MEMORY.md": "Minimal preset memory should not be injected implicitly.",
-				"SOUL.md": "Soul should not be loaded by the minimal startup preset.",
-				"DREAMING.md": "Dreaming-specific reflection instructions.",
+	it("runs a pass when attention is pending and leaves it for the agent to consume", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "review_due",
+				subjectRef: "entity:aster",
+				details: { reason: "review_after reached" },
+				priority: 90,
 			});
-			try {
-				const generate = async (prompt: string) => {
-					expect(prompt).toContain("Startup rules are loaded normally.");
-					expect(prompt).toContain("Dreaming-specific reflection instructions.");
-					expect(prompt).toContain("<dreaming_prompt>");
-					expect(prompt).not.toContain("Soul should not be loaded");
-					expect(prompt).not.toContain("Minimal preset memory should not be injected implicitly.");
-					return JSON.stringify({ mutations: [], summary: "Prompt inspected" });
-				};
-
-				await runDreamingPass(accessor, generate, defaultCfg(), dir, AGENT, "compact");
-			} finally {
-				rmSync(dir, { recursive: true, force: true });
-			}
 		});
+		expect(shouldTriggerDreaming(accessor, defaultCfg(), AGENT)).toBe(true);
 
-		it("keeps startup MEMORY.md in the working_memory block without duplicating identity", async () => {
-			seedEntity(db, "ent-1", "Signet", "project");
-			const dir = withTempIdentity({
-				"agent.yaml":
-					"identity:\n  preset: openclaw\n  startup:\n    load:\n      - path: AGENTS.md\n        role: startup_rules\n      - path: MEMORY.md\n        role: working_memory\n  special:\n    - path: DREAMING.md\n      kind: dreaming\n      role: dreaming_prompt\n",
-				"AGENTS.md": "Startup rules are loaded normally.",
-				"MEMORY.md": "Memory appears exactly once.",
-				"DREAMING.md": "Dreaming-specific reflection instructions.",
-			});
-			try {
-				const generate = async (prompt: string) => {
-					expect(prompt.match(/Memory appears exactly once\./g)?.length).toBe(1);
-					expect(prompt).toContain("<working_memory>\nMemory appears exactly once.\n</working_memory>");
-					return JSON.stringify({ mutations: [], summary: "Prompt inspected" });
-				};
+		let prompt = "";
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					prompt = input.prompt;
+					return { summary: "Reviewed due claim" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
 
-				await runDreamingPass(accessor, generate, defaultCfg(), dir, AGENT, "compact");
-			} finally {
-				rmSync(dir, { recursive: true, force: true });
-			}
-		});
+		expect(result.summary).toBe("Reviewed due claim");
+		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
+		// Attention is not auto-resolved: the agent consumes it via a flag +
+		// archive batch, which is covered by the operations suite.
+		expect(getDreamingAttention(accessor, AGENT)).toHaveLength(1);
+	});
 
-		it("applies create_entity mutations", async () => {
-			seedSummary(db, "s-1", "User started working on a Rust project called Nexus", 500);
+	it("navigates semantic state through scoped tools instead of a partial graph snapshot", async () => {
+		const evidence = "The deployment is now handled by Aster.";
+		seedSummary(db, "navigation-summary", evidence, 8);
+		db.prepare(
+			`INSERT INTO entities
+			 (id, name, canonical_name, entity_type, agent_id, mentions, pinned, created_at, updated_at)
+			 VALUES ('snapshot-sentinel', 'Static Snapshot Sentinel', 'static snapshot sentinel', 'project', ?, 1, 0, datetime('now'), datetime('now'))`,
+		).run(AGENT);
+		let prompt = "";
+		let toolNames: readonly string[] = [];
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					prompt = input.prompt;
+					toolNames = input.tools.map((tool) => tool.name);
+					return { summary: "Navigated graph through tools" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
+		expect(toolNames).toEqual(
+			expect.arrayContaining(["search_entities", "get_entity", "list_aspect_claims", "walk_links", "attention_list"]),
+		);
+	});
 
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{
-							op: "create_entity",
-							name: "Nexus",
-							type: "project",
-							aspects: [{ name: "overview", attributes: ["A Rust project the user is working on"] }],
-						},
-					],
-					summary: "Created Nexus project entity",
-				});
+	it("turns deterministic graph hygiene into scoped attention without episodic evidence", () => {
+		db.prepare(
+			`INSERT INTO entities
+			 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+			 VALUES ('legacy-husk', 'Legacy Husk', 'legacy husk', 'project', ?, 5, datetime('now'), datetime('now'))`,
+		).run(AGENT);
+		expect(enqueueDreamingHygieneAttention(accessor, AGENT)).toBeGreaterThan(0);
+		expect(getDreamingAttention(accessor, AGENT)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "hygiene",
+					subjectRef: "entity:legacy-husk",
+					details: expect.objectContaining({ reason: "zero_active_attributes" }),
+				}),
+			]),
+		);
+		expect(shouldTriggerDreaming(accessor, defaultCfg(), AGENT)).toBe(true);
+		const snapshots = getDreamingAttentionSnapshots(accessor, AGENT);
+		accessor.withWriteTx((tx) => resolveDreamingAttentionInTx(tx, AGENT, "pass-hygiene", snapshots));
+		enqueueDreamingHygieneAttention(accessor, AGENT);
+		expect(getDreamingAttention(accessor, AGENT)).toEqual([]);
+		db.prepare("UPDATE entities SET name = 'Renamed legacy husk' WHERE id = 'legacy-husk'").run();
+		enqueueDreamingHygieneAttention(accessor, AGENT);
+		expect(getDreamingAttention(accessor, AGENT)).toContainEqual(
+			expect.objectContaining({
+				subjectRef: "entity:legacy-husk",
+				details: expect.objectContaining({ name: "Renamed legacy husk" }),
+			}),
+		);
+	});
 
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-			expect(result.applied).toBe(1);
-			expect(result.failed).toBe(0);
-
-			// Verify entity was created
-			const entity = db
-				.prepare("SELECT name, entity_type FROM entities WHERE agent_id = ? AND canonical_name = ?")
-				.get(AGENT, "nexus") as { name: string; entity_type: string } | undefined;
-			expect(entity).toBeDefined();
-			expect(entity?.entity_type).toBe("project");
-		});
-
-		it("applies merge_entities mutations", async () => {
-			seedEntity(db, "ent-1", "TypeScript", "tool");
-			seedEntity(db, "ent-2", "TS Lang", "tool");
-			seedAspect(db, "asp-1", "ent-1", "usage");
-			seedAttribute(db, "attr-1", "asp-1", "TypeScript is the primary language");
-			seedAspect(db, "asp-2", "ent-2", "features");
-			seedAttribute(db, "attr-2", "asp-2", "TypeScript has great type inference");
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{
-							op: "merge_entities",
-							source: ["TS Lang"],
-							target: "TypeScript",
-							reason: "Same language, different name",
-						},
-					],
-					summary: "Merged duplicate TypeScript entities",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			expect(result.applied).toBe(1);
-
-			// Source entity should be gone
-			const remaining = db.prepare("SELECT COUNT(*) as count FROM entities WHERE agent_id = ?").get(AGENT) as {
-				count: number;
-			};
-			expect(remaining.count).toBe(1);
-
-			// Surviving entity should have both aspects
-			const aspects = db
-				.prepare("SELECT COUNT(*) as count FROM entity_aspects WHERE entity_id = ? AND agent_id = ?")
-				.all("ent-1", AGENT) as Array<{ count: number }>;
-			expect(aspects[0]?.count).toBeGreaterThanOrEqual(1);
-		});
-
-		it("skips merge_entities when source entity is pinned (invariant parity with delete)", async () => {
-			seedEntity(db, "ent-1", "TypeScript", "tool");
-			seedEntity(db, "ent-2", "PinnedAlias", "tool");
-			db.prepare("UPDATE entities SET pinned = 1 WHERE id = ?").run("ent-2");
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{
-							op: "merge_entities",
-							source: ["PinnedAlias"],
-							target: "TypeScript",
-							reason: "Same thing",
-						},
-					],
-					summary: "Tried to merge pinned source",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			// Source was pinned so no merge should have occurred
-			expect(result.applied).toBe(0);
-
-			// Pinned entity must still exist
-			const pinned = db.prepare("SELECT id FROM entities WHERE id = 'ent-2' AND agent_id = ?").get(AGENT);
-			expect(pinned).toBeDefined();
-		});
-
-		it("applies delete_entity mutations but skips pinned", async () => {
-			seedEntity(db, "ent-1", "JunkEntity", "unknown");
-			seedEntity(db, "ent-2", "PinnedEntity", "concept");
-			db.prepare("UPDATE entities SET pinned = 1 WHERE id = ?").run("ent-2");
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{ op: "delete_entity", name: "JunkEntity", reason: "Meaningless fragment" },
-						{ op: "delete_entity", name: "PinnedEntity", reason: "Should not be deleted" },
-					],
-					summary: "Cleaned up junk",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			expect(result.applied).toBe(1);
-			expect(result.skipped).toBe(1);
-
-			const remaining = db.prepare("SELECT name FROM entities WHERE agent_id = ?").all(AGENT) as Array<{
-				name: string;
-			}>;
-			expect(remaining.length).toBe(1);
-			expect(remaining[0]?.name).toBe("PinnedEntity");
-		});
-
-		it("skips delete_entity when entity owns active constraint attributes (invariant 5)", async () => {
-			// Unpinned entity, but it has a constraint attribute — must not be deleted
-			seedEntity(db, "ent-1", "ConstrainedEntity", "concept");
-			const aspId = "asp-c1";
-			seedAspect(db, aspId, "ent-1", "system constraints");
+	it("reopens duplicate hygiene attention when group membership changes", () => {
+		for (const [id, name] of [
+			["acme-a", "Acme"],
+			["acme-b", "ACME"],
+		] as const) {
 			db.prepare(
-				`INSERT INTO entity_attributes (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance, status, created_at, updated_at)
-				 VALUES ('attr-c1', ?, ?, 'constraint', 'Must not be deleted', 'must not be deleted', 1.0, 1.0, 'active', datetime('now'), datetime('now'))`,
-			).run(aspId, AGENT);
+				`INSERT INTO entities
+				 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+				 VALUES (?, ?, 'acme', 'project', ?, 1, datetime('now'), datetime('now'))`,
+			).run(id, name, AGENT);
+		}
+		enqueueDreamingHygieneAttention(accessor, AGENT);
+		const snapshots = getDreamingAttentionSnapshots(accessor, AGENT);
+		accessor.withWriteTx((tx) => resolveDreamingAttentionInTx(tx, AGENT, "pass-duplicates", snapshots));
+		db.prepare("DELETE FROM entities WHERE id = 'acme-b'").run();
+		db.prepare(
+			`INSERT INTO entities
+			 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+			 VALUES ('acme-c', 'Acme Inc.', 'acme', 'project', ?, 1, datetime('now'), datetime('now'))`,
+		).run(AGENT);
+		enqueueDreamingHygieneAttention(accessor, AGENT);
+		expect(getDreamingAttention(accessor, AGENT)).toContainEqual(
+			expect.objectContaining({ subjectRef: "duplicate:acme", details: expect.objectContaining({ count: "2" }) }),
+		);
+	});
 
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [{ op: "delete_entity", name: "ConstrainedEntity", reason: "Seems unused" }],
-					summary: "Attempt to delete constrained entity",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			expect(result.applied).toBe(0);
-			expect(result.skipped).toBe(1);
-
-			// Entity must still exist
-			const still = db.prepare("SELECT id FROM entities WHERE id = 'ent-1' AND agent_id = ?").get(AGENT);
-			expect(still).toBeDefined();
+	it("keeps semantic attention pending when its pass fails", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "contested_claim",
+				subjectRef: "claim:aster:owner",
+				details: { reason: "conflicting evidence" },
+			});
 		});
 
-		it("applies supersede_attribute mutations", async () => {
-			seedEntity(db, "ent-1", "Redis", "tool");
-			seedAspect(db, "asp-1", "ent-1", "usage");
-			seedAttribute(db, "attr-1", "asp-1", "Redis is used for caching only");
+		await expect(
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run() {
+						throw new Error("provider unavailable");
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental",
+			),
+		).rejects.toThrow("provider unavailable");
+		expect(getDreamingAttention(accessor, AGENT)).toContainEqual(
+			expect.objectContaining({ kind: "contested_claim", subjectRef: "claim:aster:owner" }),
+		);
+	});
 
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
+	it("keeps a same-subject requeue made during a pass for the next pass", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "hygiene",
+				subjectRef: "entity:aster",
+			});
+		});
+
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run() {
+					accessor.withWriteTx((tx) => {
+						enqueueDreamingAttentionInTx(tx, {
+							agentId: AGENT,
+							kind: "hygiene",
+							subjectRef: "entity:aster",
+						});
+					});
+					return { summary: "Reviewed once" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+
+		expect(getDreamingAttention(accessor, AGENT)).toContainEqual(
+			expect.objectContaining({ kind: "hygiene", subjectRef: "entity:aster" }),
+		);
+	});
+
+	it("turns an explicit evidence requeue into scoped semantic attention", () => {
+		db.prepare(
+			`INSERT INTO dreaming_evidence_exclusions
+			 (agent_id, source_kind, source_id, reason, pass_id, excluded_at, requeue_requested_at, resolved_at)
+			 VALUES (?, 'summary', 'retry-summary', 'semantic_operation_rejected', 'failed-pass', datetime('now'), NULL, NULL)`,
+		).run(AGENT);
+
+		expect(requestDreamingEvidenceRequeue(accessor, AGENT, "summary", "retry-summary")).toBe(true);
+		const attention = getDreamingAttention(accessor, AGENT);
+		expect(attention).toEqual([
+			expect.objectContaining({
+				kind: "evidence_requeue",
+				subjectRef: "summary:retry-summary",
+				details: { sourceKind: "summary", sourceId: "retry-summary" },
+			}),
+		]);
+		expect(Object.keys(attention[0] ?? {})).not.toContain("detailsJson");
+	});
+
+	it("applies cited operations only through the daemon-owned tool surface", async () => {
+		const evidence = "Aster is the project that owns the edge deployment.";
+		seedSummary(db, "agentic-summary", evidence, 12);
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
+					if (!apply) throw new Error("Missing apply_ontology_ops");
+					await apply.execute(
+						"call",
 						{
-							op: "supersede_attribute",
-							entity: "Redis",
-							aspect: "usage",
-							old: "Redis is used for caching only",
-							new: "Redis is used for caching and session storage",
+							agentId: AGENT,
+							operations: [
+								{
+									operation: "create_entity",
+									payload: { name: "Aster", type: "project" },
+									reason: "The evidence names a durable project.",
+									evidence: [
+										{
+											source_ref: "summary:agentic-summary",
+											source_kind: "summary",
+											source_id: "agentic-summary",
+											quote: evidence,
+										},
+									],
+								},
+							],
 						},
-					],
-					summary: "Updated Redis usage",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-			expect(result.applied).toBe(1);
-
-			// Old attribute should be superseded
-			const old = db.prepare("SELECT status FROM entity_attributes WHERE id = ?").get("attr-1") as { status: string };
-			expect(old.status).toBe("superseded");
-
-			// New attribute should exist
-			const newAttr = db
-				.prepare("SELECT content FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND status = 'active'")
-				.get("asp-1", AGENT) as { content: string } | undefined;
-			expect(newAttr?.content).toBe("Redis is used for caching and session storage");
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Created Aster" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(result).toMatchObject({ applied: 1, failed: 0, summary: "Created Aster" });
+		expect(
+			db.prepare("SELECT proposal_id FROM entities WHERE agent_id = ? AND name = 'Aster'").get(AGENT),
+		).toMatchObject({
+			proposal_id: expect.any(String),
 		});
+		const calls = getDreamingToolCalls(accessor, AGENT, result.passId);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({
+			passId: result.passId,
+			sequence: 1,
+			toolName: "apply_ontology_ops",
+			success: true,
+			input: { operations: expect.any(Array) },
+			output: { tool: "apply_ontology_ops", ok: true },
+		});
+		expect(readDreamingRunbook(accessor, AGENT)[0]).toMatchObject({
+			passId: result.passId,
+			operations: [{ operation: "create_entity", ok: true, error: null }],
+		});
+	});
 
-		it("does not supersede constraints", async () => {
-			seedEntity(db, "ent-1", "Auth", "system");
-			seedAspect(db, "asp-1", "ent-1", "rules");
-			seedAttribute(db, "attr-1", "asp-1", "All endpoints require authentication", "constraint");
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
+	it("carries scoped runbook history into a later pass", async () => {
+		seedSummary(db, "runbook-summary", "The deployment review is deferred pending an owner.", 10);
+		const first = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const write = input.tools.find((tool) => tool.name === "runbook_write");
+					if (!write) throw new Error("Missing runbook_write");
+					await write.execute(
+						"runbook",
 						{
-							op: "supersede_attribute",
-							entity: "Auth",
-							aspect: "rules",
-							old: "All endpoints require authentication",
-							new: "Some endpoints are public",
+							summary: "Deferred deployment review",
+							openQuestions: ["Who owns the review?"],
+							deferred: ["Link owner after confirmation"],
 						},
-					],
-					summary: "Tried to change constraint",
-				});
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Recorded deferred review" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		const stored = db.prepare("SELECT runbook_json FROM dreaming_passes WHERE id = ?").get(first.passId) as {
+			runbook_json: string;
+		};
+		expect(JSON.parse(stored.runbook_json)).toMatchObject({ openQuestions: ["Who owns the review?"] });
 
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-			expect(result.applied).toBe(0);
-			expect(result.skipped).toBe(1); // constraint was protected
+		let prompt = "";
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					prompt = input.prompt;
+					return { summary: "Reviewed prior runbook" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"compact",
+		);
+		// The pass prompt is fixed; the agent reads prior notes via runbook_read.
+		expect(prompt).toBe(DREAMING_AGENT_PROMPT);
+	});
 
-			// Constraint should still be active
-			const attr = db.prepare("SELECT status, kind FROM entity_attributes WHERE id = ?").get("attr-1") as {
-				status: string;
-				kind: string;
-			};
-			expect(attr.status).toBe("active");
-			expect(attr.kind).toBe("constraint");
-		});
-
-		it("records failed pass on LLM error", async () => {
-			seedEntity(db, "ent-1", "Test", "concept");
-
-			const generate = async (): Promise<string> => {
-				throw new Error("LLM timeout");
-			};
-
-			await expect(runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental")).rejects.toThrow(
-				"LLM timeout",
-			);
-
-			const passes = getDreamingPasses(accessor, AGENT);
-			expect(passes.length).toBe(1);
-			expect(passes[0]?.status).toBe("failed");
-			expect(passes[0]?.error).toBe("LLM timeout");
-		});
-
-		it("handles malformed LLM response gracefully", async () => {
-			seedEntity(db, "ent-1", "Test", "concept");
-
-			const generate = async () => "this is not json at all!!!";
-
-			await expect(runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental")).rejects.toThrow();
-
-			const passes = getDreamingPasses(accessor, AGENT);
-			expect(passes[0]?.status).toBe("failed");
-		});
-
-		it("accepts valid JSON after a reasoning preamble and resets the token counter", async () => {
-			addDreamingTokens(accessor, AGENT, 120_000);
-			seedEntity(db, "ent-1", "Test", "concept");
-			const response = JSON.stringify({ mutations: [], summary: "Reviewed graph after reasoning" });
-			const generate = async () => `Looking at {graph} before deciding...\n${response}\nDone.`;
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-
-			expect(result.summary).toBe("Reviewed graph after reasoning");
-			expect(getDreamingState(accessor, AGENT).tokensSinceLastPass).toBe(0);
-		});
-
-		it("accepts fenced JSON after a reasoning preamble", async () => {
-			seedEntity(db, "ent-1", "Test", "concept");
-			const response = JSON.stringify({ mutations: [], summary: "Reviewed fenced result" });
-			const generate = async () => `Looking at the graph...\n\`\`\`json\n${response}\n\`\`\``;
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-
-			expect(result.summary).toBe("Reviewed fenced result");
-		});
-
-		it("keeps braces, escaped quotes, and backslashes inside JSON strings balanced", async () => {
-			seedEntity(db, "ent-1", "Test", "concept");
-			const summary = 'Reviewed {draft}, the "quoted" value, and C:\\temp';
-			const response = JSON.stringify({ mutations: [], summary });
-			const generate = async () => `Reasoning first.\n${response}`;
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-
-			expect(result.summary).toBe(summary);
-		});
-
-		it("rejects malformed balanced output after a preamble", async () => {
-			seedEntity(db, "ent-1", "Test", "concept");
-			const generate = async () => 'Looking...\n{"mutations": nope, "summary": "broken"}';
-
-			await expect(runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental")).rejects.toThrow();
-			expect(getDreamingPasses(accessor, AGENT)[0]?.status).toBe("failed");
-		});
-
-		it("resets token counter after successful pass", async () => {
-			addDreamingTokens(accessor, AGENT, 120_000);
-			seedEntity(db, "ent-1", "Test", "concept");
-
-			const generate = async () => JSON.stringify({ mutations: [], summary: "Nothing changed" });
-
-			await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-
-			const state = getDreamingState(accessor, AGENT);
-			expect(state.tokensSinceLastPass).toBe(0);
-			expect(state.lastPassAt).not.toBeNull();
-			expect(state.lastPassMode).toBe("incremental");
-		});
-
-		it("applies update_aspect mutations (additive — does not replace existing attributes)", async () => {
-			seedEntity(db, "ent-1", "Node.js", "tool");
-			seedAspect(db, "asp-1", "ent-1", "usage");
-			seedAttribute(db, "attr-1", "asp-1", "Used for API servers");
-			seedSummary(db, "s-1", "Node.js is also used for CLI tooling", 200);
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
+	it("reports a rejected unsupported operation as a failed mutation", async () => {
+		const evidence = "Briar owns the release process.";
+		seedSummary(db, "rejected-summary", evidence, 8);
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
+					if (!apply) throw new Error("Missing apply_ontology_ops");
+					await apply.execute(
+						"call",
 						{
-							op: "update_aspect",
-							entity: "Node.js",
-							aspect: "usage",
-							attributes: ["Used for CLI tooling"],
+							operations: [
+								{
+									operation: "not_an_ontology_operation",
+									payload: {},
+								},
+							],
 						},
-					],
-					summary: "Added CLI usage to Node.js",
-				});
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Rejected unsupported operation" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(result).toMatchObject({ applied: 0, failed: 1 });
+	});
 
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-			expect(result.applied).toBe(1);
+	it("records empty and failed bounded-agent passes honestly", async () => {
+		const empty = await runDreamingAgentPass(
+			accessor,
+			{
+				async run() {
+					throw new Error("agent should not be invoked for an empty pass");
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(empty.summary).toBe("No new episodic evidence or semantic attention to process");
+		expect(empty.applied).toBe(0);
 
-			// Original attribute must still exist (additive operation)
-			const original = db.prepare("SELECT status FROM entity_attributes WHERE id = 'attr-1'").get() as
-				| { status: string }
-				| undefined;
-			expect(original?.status).toBe("active");
+		// Seed evidence with a future watermark so it is unambiguously newer
+		// than the previous pass's cutoff (same-second seeds are racy).
+		db.prepare(
+			`INSERT INTO session_summaries
+			 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
+			 VALUES ('failure', ?, 'Evidence that reaches the agent.', 5, 0, 'session', 'summary',
+			         datetime('now', '+1 minute'), datetime('now', '+1 minute'), datetime('now'))`,
+		).run(AGENT);
+		await expect(
+			runDreamingAgentPass(
+				accessor,
+				{
+					async run() {
+						throw new Error("agent timeout");
+					},
+				},
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental",
+			),
+		).rejects.toThrow("agent timeout");
+		expect(getDreamingPasses(accessor, AGENT).find((pass) => pass.status === "failed")?.error).toBe("agent timeout");
+	});
 
-			// New attribute should have been added
-			const count = db
-				.prepare(
-					"SELECT COUNT(*) as c FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND status = 'active'",
-				)
-				.get("asp-1", AGENT) as { c: number };
-			expect(count.c).toBe(2);
+	it("selects the focused runbook, alternating when both kinds of work are pending (#1098)", () => {
+		// Regression for #1098: with the hygiene queue perpetually full, the
+		// old worker ran the combined runbook hygiene-first every pass and
+		// content ingestion never got budget. With both kinds of work
+		// pending, the worker must alternate so content gets a guaranteed
+		// turn.
+		expect(selectDreamingPassMode(null, true, true)).toBe("incremental-hygiene");
+		expect(selectDreamingPassMode("hygiene", true, true)).toBe("incremental-content");
+		expect(selectDreamingPassMode("content", true, true)).toBe("incremental-hygiene");
+		// Only one kind pending: run that kind directly, no alternation.
+		expect(selectDreamingPassMode("content", true, false)).toBe("incremental-hygiene");
+		expect(selectDreamingPassMode("hygiene", false, true)).toBe("incremental-content");
+	});
+
+	it("early-exits each focused pass mode on its own empty work (#1098)", () => {
+		// Hygiene exits on an empty attention queue even while evidence is
+		// pending; content exits on an empty backlog even while attention is
+		// pending; combined modes need both empty; compact never exits.
+		expect(dreamingEarlyExitSummary("incremental-hygiene", false, 100)).toBe("No hygiene attention to process");
+		expect(dreamingEarlyExitSummary("incremental-hygiene", true, 0)).toBeNull();
+		expect(dreamingEarlyExitSummary("incremental-content", true, 0)).toBe("No new episodic evidence to process");
+		expect(dreamingEarlyExitSummary("incremental-content", false, 1)).toBeNull();
+		expect(dreamingEarlyExitSummary("incremental", false, 0)).toBe(
+			"No new episodic evidence or semantic attention to process",
+		);
+		expect(dreamingEarlyExitSummary("incremental", true, 0)).toBeNull();
+		expect(dreamingEarlyExitSummary("compact", false, 0)).toBeNull();
+	});
+
+	it("uses the mode-specific runbook prompt for focused passes (#1098)", async () => {
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "hygiene",
+				subjectRef: "entity:legacy-husk",
+			});
 		});
+		let hygienePrompt = "";
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					hygienePrompt = input.prompt;
+					return { summary: "Archived flagged husks" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-hygiene",
+		);
+		expect(hygienePrompt).toBe(DREAMING_HYGIENE_AGENT_PROMPT);
+		expect(hygienePrompt).not.toContain("find new evidence since the cutoff");
 
-		it("applies delete_aspect mutations (hard-deletes aspect and attributes)", async () => {
-			seedEntity(db, "ent-1", "Webpack", "tool");
-			seedAspect(db, "asp-1", "ent-1", "legacy config");
-			seedAttribute(db, "attr-1", "asp-1", "Used webpack.config.js with CommonJS");
-			seedAttribute(db, "attr-2", "asp-1", "Migrated to Vite");
+		seedSummary(db, "content-prompt", "New evidence for the content runbook.", 8);
+		let contentPrompt = "";
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					contentPrompt = input.prompt;
+					return { summary: "Extracted claims" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+		expect(contentPrompt).toBe(DREAMING_CONTENT_AGENT_PROMPT);
+		expect(contentPrompt).not.toContain("Process ALL pending hygiene records");
+	});
 
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [{ op: "delete_aspect", entity: "Webpack", aspect: "legacy config", reason: "Outdated info" }],
-					summary: "Removed stale Webpack config aspect",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			expect(result.applied).toBe(1);
-
-			// Aspect row must be gone (hard delete)
-			const aspect = db.prepare("SELECT id FROM entity_aspects WHERE id = 'asp-1' AND agent_id = ?").get(AGENT);
-			expect(aspect).toBeNull();
-
-			// All attribute rows must be gone (hard delete)
-			const attrCount = db
-				.prepare("SELECT COUNT(*) as c FROM entity_attributes WHERE aspect_id = 'asp-1' AND agent_id = ?")
-				.get(AGENT) as { c: number };
-			expect(attrCount.c).toBe(0);
+	it("does not advance the evidence watermark for hygiene-only work (#1098)", async () => {
+		// Regression for #1098: a pass that only processed hygiene used to
+		// reset the evidence cursor anyway, so the unprocessed episodic
+		// backlog no longer counted as new and content ingestion never got
+		// budget. A hygiene pass must leave the watermark untouched so the
+		// next content pass still sees the backlog.
+		seedSummary(db, "starved-evidence", "New transcript evidence that content passes never reached.", 8);
+		accessor.withWriteTx((tx) => {
+			enqueueDreamingAttentionInTx(tx, {
+				agentId: AGENT,
+				kind: "hygiene",
+				subjectRef: "entity:legacy-husk",
+			});
 		});
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 
-		it("applies create_attribute mutations", async () => {
-			seedEntity(db, "ent-1", "Bun", "tool");
-			seedAspect(db, "asp-1", "ent-1", "features");
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run() {
+					return { summary: "Archived flagged husks" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-hygiene",
+		);
+		// The hygiene pass consumed no evidence: the backlog still counts as
+		// new, so the next scheduled content pass gets it.
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{
-							op: "create_attribute",
-							entity: "Bun",
-							aspect: "features",
-							content: "Built-in SQLite driver with bun:sqlite",
-						},
-					],
-					summary: "Added Bun SQLite feature",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "incremental");
-			expect(result.applied).toBe(1);
-
-			const attr = db
-				.prepare(
-					"SELECT content, status FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND status = 'active'",
-				)
-				.get("asp-1", AGENT) as { content: string; status: string } | undefined;
-			expect(attr?.content).toBe("Built-in SQLite driver with bun:sqlite");
-		});
-
-		it("applies delete_attribute mutations (soft-delete)", async () => {
-			seedEntity(db, "ent-1", "React", "tool");
-			seedAspect(db, "asp-1", "ent-1", "usage");
-			seedAttribute(db, "attr-1", "asp-1", "React class components are used throughout");
-
-			const generate = async () =>
-				JSON.stringify({
-					mutations: [
-						{
-							op: "delete_attribute",
-							entity: "React",
-							aspect: "usage",
-							content: "React class components are used throughout",
-							reason: "Migrated to hooks",
-						},
-					],
-					summary: "Removed stale React class component reference",
-				});
-
-			const result = await runDreamingPass(accessor, generate, defaultCfg(), "/tmp", AGENT, "compact");
-			expect(result.applied).toBe(1);
-
-			// Attribute row should still exist with status=deleted (soft delete)
-			const attr = db.prepare("SELECT status FROM entity_attributes WHERE id = 'attr-1'").get() as
-				| { status: string }
-				| undefined;
-			expect(attr?.status).toBe("deleted");
-		});
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run() {
+					return { summary: "Extracted claims" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental-content",
+		);
+		expect(getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBe(0);
 	});
 });

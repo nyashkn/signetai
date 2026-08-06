@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import type { OAuthProviderInterface } from "@earendil-works/pi-ai";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import type { OAuthAuth } from "@earendil-works/pi-ai";
 import {
 	completeOAuthInteraction,
 	disconnectOAuthProvider,
 	listOAuthProviderMetadata,
 	loadOAuthCredentials,
+	registerOAuthProviderForTests,
 	resetOAuthStateForTests,
 	resolveOAuthCredential,
 	startOAuthLogin,
@@ -19,22 +19,29 @@ const PROVIDER_ID = "signet-test-oauth-966";
 const originalSignetPath = process.env.SIGNET_PATH;
 let agentsDir = "";
 
-function provider(overrides: Partial<OAuthProviderInterface> = {}): OAuthProviderInterface {
+function provider(overrides: Partial<OAuthAuth> = {}): {
+	readonly id: string;
+	readonly name: string;
+	readonly oauth: OAuthAuth;
+} {
 	return {
 		id: PROVIDER_ID,
 		name: "Signet test OAuth",
-		async login(callbacks) {
-			callbacks.onAuth({ url: "https://example.test/login", instructions: "Sign in" });
-			const answer = await callbacks.onPrompt({ message: "Account", placeholder: "name" });
-			return { refresh: `refresh-${answer}`, access: "access-login", expires: Date.now() + 60_000 };
+		oauth: {
+			name: "Signet test OAuth",
+			async login(interaction) {
+				interaction.notify({ type: "auth_url", url: "https://example.test/login", instructions: "Sign in" });
+				const answer = await interaction.prompt({ type: "text", message: "Account", placeholder: "name" });
+				return { type: "oauth", refresh: `refresh-${answer}`, access: "access-login", expires: Date.now() + 60_000 };
+			},
+			async refresh(credentials) {
+				return { ...credentials, access: "access-refreshed", expires: Date.now() + 60_000 };
+			},
+			async toAuth(credentials) {
+				return { apiKey: credentials.access };
+			},
+			...overrides,
 		},
-		async refreshToken(credentials) {
-			return { ...credentials, access: "access-refreshed", expires: Date.now() + 60_000 };
-		},
-		getApiKey(credentials) {
-			return credentials.access;
-		},
-		...overrides,
 	};
 }
 
@@ -57,12 +64,11 @@ describe("inference OAuth", () => {
 		agentsDir = mkdtempSync(`${tmpdir()}/signet-oauth-`);
 		mkdirSync(agentsDir, { recursive: true });
 		process.env.SIGNET_PATH = agentsDir;
-		registerOAuthProvider(provider());
+		registerOAuthProviderForTests(provider());
 	});
 
 	afterEach(() => {
 		resetOAuthStateForTests();
-		unregisterOAuthProvider(PROVIDER_ID);
 		invalidateSecretsCache();
 		if (originalSignetPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		else process.env.SIGNET_PATH = originalSignetPath;
@@ -104,7 +110,7 @@ describe("inference OAuth", () => {
 			access: "access-refreshed",
 			expires: Date.now() + 60_000,
 		}));
-		registerOAuthProvider(provider({ refreshToken }));
+		registerOAuthProviderForTests(provider({ refresh: refreshToken }));
 		await storeOAuthCredentials(PROVIDER_ID, {
 			refresh: "refresh-old",
 			access: "access-expired",
@@ -126,7 +132,7 @@ describe("inference OAuth", () => {
 		const refreshToken = mock(async () => {
 			throw new Error("revoked refresh token");
 		});
-		registerOAuthProvider(provider({ refreshToken }));
+		registerOAuthProviderForTests(provider({ refresh: refreshToken }));
 		await storeOAuthCredentials(PROVIDER_ID, {
 			refresh: "refresh-revoked",
 			access: "access-expired",
@@ -144,14 +150,15 @@ describe("inference OAuth", () => {
 	});
 
 	test("accepts only selection values offered by the OAuth provider", async () => {
-		registerOAuthProvider(
+		registerOAuthProviderForTests(
 			provider({
-				async login(callbacks) {
-					const selected = await callbacks.onSelect({
+				async login(interaction) {
+					const selected = await interaction.prompt({
+						type: "select",
 						message: "Choose a flow",
 						options: [{ id: "device_code", label: "Device code" }],
 					});
-					return { refresh: "refresh", access: selected ?? "none", expires: Date.now() + 60_000 };
+					return { type: "oauth", refresh: "refresh", access: selected, expires: Date.now() + 60_000 };
 				},
 			}),
 		);

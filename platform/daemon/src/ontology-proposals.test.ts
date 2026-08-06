@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
+import { linkDerivedMemorySourcesInTx } from "./derived-memory-provenance";
 import { listEpistemicAssertions } from "./ontology-assertions";
 import { getOntologyClaimEvidence } from "./ontology-claim-evidence";
 import { consolidateOntologyProposals } from "./ontology-consolidation";
@@ -25,6 +26,7 @@ import {
 	proposeDuplicateEntityMerges,
 	rejectOntologyProposal,
 } from "./ontology-proposals";
+import { txIngestEnvelope } from "./transactions";
 
 describe("ontology proposals", () => {
 	let dir = "";
@@ -138,7 +140,184 @@ describe("ontology proposals", () => {
 		expect(row?.confidence).toBeCloseTo(0.92);
 		expect(row?.source_kind).toBe("transcript");
 		expect(row?.proposal_id).toBe(proposal.id);
+
+		const projection = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT attr.id AS attribute_id, attr.memory_id, mem.content, mem.type, mem.memory_kind,
+						        mem.source_type, mem.source_id,
+						        (SELECT COUNT(*) FROM memory_entity_mentions WHERE memory_id = attr.memory_id) AS mentions
+						 FROM entity_attributes attr
+						 JOIN entity_aspects asp ON asp.id = attr.aspect_id
+						 JOIN memories mem ON mem.id = attr.memory_id
+						 WHERE asp.entity_id = (SELECT id FROM entities WHERE name = 'Signet' AND agent_id = 'ant')`,
+					)
+					.get() as
+					| {
+							attribute_id: string;
+							memory_id: string;
+							content: string;
+							type: string;
+							memory_kind: string | null;
+							source_type: string;
+							source_id: string;
+							mentions: number;
+					  }
+					| undefined,
+		);
+		expect(projection).toMatchObject({
+			attribute_id: projection?.memory_id,
+			content: "Ontology extraction preserves provenance before mutating semantic state.",
+			type: "semantic",
+			memory_kind: "derived",
+			source_type: "dreaming",
+			source_id: "transcript:test",
+			mentions: 1,
+		});
 		expect(JSON.parse(row?.proposal_evidence ?? "[]")).toEqual([{ source: "transcript:test", message_ids: ["m1"] }]);
+	});
+
+	it("records canonical episodic lineage and stales aggregate snapshots when a claim changes", () => {
+		const initial = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload: {
+				entity: "Signet",
+				entity_type: "project",
+				aspect: "architecture",
+				group_key: "core",
+				claim_key: "purpose",
+				value: "Signet is a local-first memory system.",
+			},
+			evidence: [
+				{
+					source_ref: "memory:episodic-source",
+					source_kind: "manual",
+					source_id: "episodic-source",
+					quote: "Signet is a local-first memory system.",
+				},
+			],
+			sourceKind: "manual",
+			sourceId: "episodic-source",
+		});
+		const claimId = initial.result?.attributeId;
+		expect(typeof claimId).toBe("string");
+
+		getDbAccessor().withWriteTx((db) => {
+			txIngestEnvelope(db, {
+				id: "aggregate-snapshot",
+				content: "Signet is a local-first memory system.",
+				contentHash: "aggregate-snapshot",
+				who: "signet",
+				why: "aggregate recall",
+				project: null,
+				importance: 0.7,
+				type: "semantic",
+				tags: "aggregate,recall",
+				pinned: 0,
+				sourceType: "aggregate-recall",
+				sourceId: "aggregate-snapshot",
+				agentId: "ant",
+				visibility: "private",
+				createdAt: "2026-08-04T00:00:00.000Z",
+			});
+			linkDerivedMemorySourcesInTx(db, {
+				derivedMemoryId: "aggregate-snapshot",
+				agentId: "ant",
+				sources: [{ sourceKind: "ontology_claim", sourceId: claimId as string }],
+				createdAt: "2026-08-04T00:00:00.000Z",
+			});
+		});
+
+		const lineage = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						"SELECT source_kind, source_id FROM derived_memory_sources WHERE derived_memory_id = ? ORDER BY source_kind",
+					)
+					.all(claimId) as Array<{ source_kind: string; source_id: string }>,
+		);
+		expect(lineage).toEqual([{ source_kind: "memory", source_id: "episodic-source" }]);
+
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload: {
+				entity: "Signet",
+				entity_type: "project",
+				aspect: "architecture",
+				group_key: "core",
+				claim_key: "purpose",
+				value: "Signet is a local-first memory system with a semantic layer.",
+			},
+			evidence: [
+				{
+					source_ref: "memory:episodic-source",
+					source_kind: "manual",
+					source_id: "episodic-source",
+					quote: "Signet is a local-first memory system with a semantic layer.",
+				},
+			],
+			sourceKind: "manual",
+			sourceId: "episodic-source",
+		});
+
+		expect(
+			getDbAccessor().withReadDb((db) =>
+				db.prepare("SELECT stale_at FROM memories WHERE id = ? AND agent_id = ?").get("aggregate-snapshot", "ant"),
+			),
+		).toMatchObject({ stale_at: expect.any(String) });
+	});
+
+	it("rejects generic entity labels before creating ontology entities", () => {
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				operation: "create_entity",
+				payload: { name: "the", entity_type: "project" },
+			}),
+		).toThrow("Entity name rejected: generic_or_scaffolding_name");
+		expect(
+			getDbAccessor().withReadDb(
+				(db) => db.prepare("SELECT COUNT(*) AS count FROM entities WHERE agent_id = ?").get("ant") as { count: number },
+			),
+		).toEqual({ count: 0 });
+	});
+
+	it("does not archive an aspect that has an active constraint without force", () => {
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "set_claim_value",
+			payload: {
+				entity: "Constraint Guard",
+				entity_type: "project",
+				aspect: "retention",
+				claim_key: "source_of_truth",
+				value: "Artifacts remain immutable evidence.",
+				kind: "constraint",
+			},
+		});
+
+		expect(() =>
+			applyOntologyOperation(getDbAccessor(), {
+				agentId: "ant",
+				actor: "test",
+				operation: "archive_aspect",
+				payload: { entity: "Constraint Guard", selector: "retention" },
+			}),
+		).toThrow("Refusing to archive aspect with active constraint attributes without force");
+		const applied = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "test",
+			operation: "archive_aspect",
+			payload: { entity: "Constraint Guard", selector: "retention", force: true },
+		});
+		expect(applied.proposal.status).toBe("applied");
 	});
 
 	it("rejects a pending proposal without mutating graph state", () => {
@@ -694,6 +873,7 @@ describe("ontology proposals", () => {
 			"ontology_proposal",
 			"session_transcript",
 			"memory_artifact",
+			"memory",
 		]);
 		expect(evidence.items[0]?.evidence[0]?.label).toBe(`proposal:${proposal.id}`);
 		expect(evidence.items[0]?.evidence[1]?.excerpt).toContain("evidence after proposal application");
@@ -791,6 +971,20 @@ describe("ontology proposals", () => {
 		expect(replacement?.content).toContain("provenance-backed operations");
 		expect(replacement?.confidence).toBeCloseTo(0.93);
 		expect(replacement?.source_kind).toBe("transcript");
+		const memoryStates = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT id, is_deleted, superseded_by FROM memories WHERE id IN (?, ?)")
+					.all(oldId, replacementId) as Array<{ id: string; is_deleted: number; superseded_by: string | null }>,
+		);
+		expect(memoryStates.find((memory) => memory.id === oldId)).toMatchObject({
+			is_deleted: 0,
+			superseded_by: replacementId,
+		});
+		expect(memoryStates.find((memory) => memory.id === replacementId)).toMatchObject({
+			is_deleted: 0,
+			superseded_by: null,
+		});
 	});
 
 	it("applies semantic create_link proposal roles from ontology extraction", () => {
@@ -1638,24 +1832,61 @@ describe("ontology proposals", () => {
 		expect(dot.items[0]?.payload.name).toBe("Dot Project");
 	});
 
-	it("marks unsupported pending operations failed instead of mutating state", () => {
-		const proposal = createOntologyProposal(getDbAccessor(), {
+	it("applies policy, action, and interface operations through existing graph primitives", () => {
+		const policy = applyOntologyOperation(getDbAccessor(), {
 			agentId: "default",
+			actor: "operator",
+			operation: "create_policy",
+			payload: {
+				target_entity: "Signet",
+				kind: "storage",
+				content: "Use SQLite for application state.",
+			},
+		});
+		expect(policy.proposal.status).toBe("applied");
+		const action = applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "operator",
+			operation: "create_action_type",
+			payload: { action_type: "Deploy release" },
+		});
+		const iface = applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "operator",
 			operation: "create_interface",
-			payload: { source: ["A"], target: "B" },
+			payload: { name: "Memory provider" },
+		});
+		const attachment = applyOntologyOperation(getDbAccessor(), {
+			agentId: "default",
+			actor: "operator",
+			operation: "attach_interface",
+			payload: { entity: "Signet", interface: "Memory provider" },
 		});
 
-		expect(() =>
-			applyOntologyProposal(getDbAccessor(), {
-				agentId: "default",
-				id: proposal.id,
-				actor: "operator",
-			}),
-		).toThrow(OntologyProposalError);
-
-		const failed = getOntologyProposal(getDbAccessor(), proposal.id, "default");
-		expect(failed?.status).toBe("failed");
-		expect(failed?.result?.error).toContain("Unsupported");
+		expect(action.result).toMatchObject({ entity: "Deploy release" });
+		expect(iface.result).toMatchObject({ entity: "Memory provider" });
+		expect(attachment.result).toMatchObject({ updated: false });
+		const graph = getDbAccessor().withReadDb((db) => ({
+			policy: db
+				.prepare(
+					`SELECT ea.kind, ea.group_key, ea.claim_key, ea.content
+					 FROM entity_attributes ea JOIN entity_aspects asp ON asp.id = ea.aspect_id
+					 JOIN entities e ON e.id = asp.entity_id
+					 WHERE e.agent_id = 'default' AND e.name = 'Signet' AND asp.name = 'policy'`,
+				)
+				.get(),
+			action: db
+				.prepare("SELECT entity_type FROM entities WHERE agent_id = 'default' AND name = 'Deploy release'")
+				.get(),
+			interface: db
+				.prepare("SELECT entity_type FROM entities WHERE agent_id = 'default' AND name = 'Memory provider'")
+				.get(),
+			link: db.prepare("SELECT dependency_type FROM entity_dependencies WHERE agent_id = 'default'").get(),
+		}));
+		expect(graph.policy).toMatchObject({ kind: "constraint", group_key: "policy", claim_key: "storage" });
+		expect(graph.action).toMatchObject({ entity_type: "action" });
+		expect(graph.interface).toMatchObject({ entity_type: "interface" });
+		expect(graph.link).toMatchObject({ dependency_type: "implements" });
 	});
 
 	it("applies direct operations by creating an applied proposal and graph mutation atomically", () => {
@@ -1891,6 +2122,21 @@ describe("ontology proposals", () => {
 		});
 		expect(restored.items.find((item) => item.version === 2)?.status).toBe("active");
 		expect(restored.items.find((item) => item.version === 3)?.status).toBe("superseded");
+		const restoredMemoryState = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare("SELECT id, is_deleted, superseded_by FROM memories WHERE id IN (?, ?)")
+					.all(shown?.id, v3.result?.attributeId) as Array<{
+					id: string;
+					is_deleted: number;
+					superseded_by: string | null;
+				}>,
+		);
+		expect(restoredMemoryState.find((memory) => memory.id === shown?.id)).toMatchObject({
+			is_deleted: 0,
+			superseded_by: null,
+		});
+		expect(restoredMemoryState.find((memory) => memory.id === v3.result?.attributeId)?.superseded_by).toBe(shown?.id);
 	});
 
 	it("archives claim values and hides them from default active reads", () => {
@@ -1930,6 +2176,56 @@ describe("ontology proposals", () => {
 		});
 		expect(active.n).toBe(0);
 		expect(versions.items[0]?.status).toBe("deleted");
+		const memory = getDbAccessor().withReadDb(
+			(db) =>
+				db.prepare("SELECT is_deleted FROM memories WHERE id = ?").get(attributeId) as
+					| { is_deleted: number }
+					| undefined,
+		);
+		expect(memory?.is_deleted).toBe(1);
+	});
+
+	it("restores an archived semantic claim memory and honors an explicit force", () => {
+		const applied = applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "operator",
+			operation: "set_claim_value",
+			payload: {
+				entity: "Signet",
+				entity_type: "project",
+				aspect: "architecture",
+				group_key: "ontology",
+				claim_key: "restore_archived_claim",
+				value: "This semantic claim can be restored.",
+			},
+		});
+		const attributeId = applied.result?.attributeId as string;
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE memories SET pinned = 1 WHERE id = ?").run(attributeId);
+		});
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "operator",
+			operation: "archive_claim_value",
+			payload: { attribute_id: attributeId, force: true },
+		});
+		applyOntologyOperation(getDbAccessor(), {
+			agentId: "ant",
+			actor: "operator",
+			operation: "restore_claim_version",
+			payload: { attribute_id: attributeId },
+		});
+		const restored = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT attr.status, mem.is_deleted, mem.superseded_by
+						 FROM entity_attributes attr JOIN memories mem ON mem.id = attr.memory_id
+						 WHERE attr.id = ?`,
+					)
+					.get(attributeId) as { status: string; is_deleted: number; superseded_by: string | null } | undefined,
+		);
+		expect(restored).toEqual({ status: "active", is_deleted: 0, superseded_by: null });
 	});
 
 	it("continues claim version chains after the active value is archived", () => {

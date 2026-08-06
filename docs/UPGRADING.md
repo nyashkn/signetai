@@ -40,10 +40,10 @@ structured error pointing at this page:
 | `llama-cpp` | unchanged (now Pi-backed via OpenAI-compatible) |
 | `openai-compatible` | unchanged (now Pi-backed) |
 
-> The **legacy** `memory.pipelineV2.extraction.provider: command` path (a
-> separate stdin/stdout provider living in the summary worker) is **not**
-> affected — only the top-level `inference.targets.*.executor: command`
-> routing target was removed.
+`memory.pipelineV2.extraction.provider: command` is also retired. Configure a
+canonical `inference.workloads.memoryExtraction` target instead; the daemon
+will reject the retired command configuration rather than silently falling
+back to another provider.
 
 ## Action required after updating
 
@@ -57,7 +57,7 @@ structured error pointing at this page:
    (with `acpx: { agent: codex }`). Direct-API targets (`anthropic`,
    `openrouter`, `ollama`, `llama-cpp`, `openai-compatible`) keep working as-is
    — only the underlying engine changed.
-3. **Verify a background call.** Trigger an extraction or synthesis job
+3. **Verify a background call.** Trigger a Dreaming pass or session summary
    (`signet memory ingest ...`, or send a session through the pipeline) and
    confirm it completes.
 4. **Verify aggregate recall** if you use it: `signet recall "<query>" --aggregate`.

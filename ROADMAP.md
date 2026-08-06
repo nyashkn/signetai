@@ -1,9 +1,41 @@
 Roadmap
 ===
 
-Updated 2026-07-23. This gets updated as priorities shift.
+Updated 2026-08-03. This gets updated as priorities shift.
 
 What the markers mean: `[done]` shipped, `[wip]` working on it now, `[next]` next in line, `[backlog]` want to do it but not yet scheduled.
+
+---
+
+Stop the bleeding
+
+---
+
+The daemon has to be boring before anything else ships. Sustained ingestion exposed a class of failures — crash loops, silent backlogs, repair tooling that lies about its own results — that erode the one thing Signet sells: trust that your context is safe.
+
+**[wip] Backlog death spiral (#1059, P0)**
+
+Under sustained ingestion the daemon enters a self-sustaining crash loop: backlog grows, retries pile up, the daemon falls over, restart makes it worse. This is the single most important open issue.
+
+**[wip] Hook process leak regression (#1061)**
+
+#890 regressed on v0.157.3 — hook processes leak again, ~800 MB each.
+
+**[next] Repair tooling honesty (#1048, #1050–1053)**
+
+Status and doctor hide an unhealthy dead-job backlog. Queue repair reports daemon failure with exit code 0. Invalid `--tables` falls through to the broad both-queue default. Requeue starves summary jobs. `--max-batch` treated as a per-queue cap. If the repair tools can't be trusted, nothing can.
+
+**[next] Install and update hygiene (#1060, #1044, #1045)**
+
+Auto-updater recreates the npm symlink that doctor then flags. Invalid CLI commands and doctor targets exit successfully. Dashboard command falsely reports starting a healthy daemon. Small, but they're the first commands a new user runs.
+
+**[next] Session TTL eviction (#902)**
+
+Eviction drops tracker state without checkpoint or finalization.
+
+**[wip] Strict quality gates (#919)**
+
+Mandatory lint/typecheck/test across TypeScript and Rust. Baseline PRs are open (#1034–#1037). Once the backlog above clears, the gate goes hard-required.
 
 ---
 
@@ -11,57 +43,58 @@ What we're building now
 
 ---
 
-The core memory system works. The pipeline drains. Recall is fast. What's missing is the part where normal people can install it and not feel lost.
+The core memory system works. What's missing is the part where normal people can install it and not feel lost.
 
 **[wip] Dashboard redesign (#948)**
 
-The old dashboard was never given a proper design pass. It grew piece by piece without a plan. We're replacing it completely.
-
-The new one is React 19 with shadcn/ui and Geist fonts. One design, light and dark mode, system-default. The design is already locked -- there's an HTML mockup at `surfaces/dashboard/redesign-home-mockup.html`. The React build has to match it pixel for pixel. First milestone proves the build works inside Electron. After that, every page gets rebuilt: home, memory browsing, settings, harness config, sources, journal.
+The old dashboard was never given a proper design pass. The new one is React 19 with shadcn/ui and Geist fonts, one design, light and dark mode. The design is locked — HTML mockup at `surfaces/dashboard/redesign-home-mockup.html` — and M1 (contract scaffold + surfaces) is open as PR #1022. The React build matches the mockup pixel for pixel. After M1 lands inside Electron, every page gets rebuilt: home, memory browsing, settings, harness config, sources, journal. Known polish items: #1046, #1047.
 
 **[wip] Desktop app (#1001)**
 
-Right now Signet is a command-line tool. That works for developers. It doesn't work for everyone else.
-
-The desktop app is an Electron shell that wraps the same compiled binary headless installs use. It manages the daemon in the background, shows a tray icon, and updates itself. Ships as .dmg, .exe, and .AppImage from GitHub releases. No app store.
-
-Headless installs (`npm i -g signetai`, curl-install) still work. The data lives in `~/.agents/` no matter how you install it, so switching from headless to desktop is seamless -- the desktop app detects your existing setup and adopts it.
-
-**[wip] Config system that doesn't suck**
-
-The router blocks targets with opaque error messages. The privacy check for local models is broken. Old config fields get left behind after migration. These all came up during real use and need to be fixed before the settings panel in the dashboard can ship.
+The distribution spec is locked: three install shapes. The desktop app is an Electron shell around the same compiled binary headless installs use — manages the daemon, tray icon, self-updates, ships as .dmg / .exe / .AppImage from GitHub releases. No app store. Headless installs keep working; data lives in `~/.agents/` either way, so the desktop app detects and adopts an existing setup.
 
 **[next] Setup wizard (#967)**
 
-New users shouldn't have to hand-edit a YAML file to get started. The wizard walks through harness connections, inference targets, and workspace setup.
+New users shouldn't hand-edit YAML. The wizard walks harness connections, inference targets, and workspace setup — and it unblocks the settings panel in the new dashboard.
 
 **[next] Transcript export (#984)**
 
-Export session transcripts in a format suitable for training. Powers the dataset work below.
+Export session transcripts in a training/fine-tuning format from the CLI. Powers the dataset work below.
 
 ---
 
-Making the pipeline coherent
+One memory engine
 
 ---
 
-Extraction works, but the architecture between the pipeline and dreaming is tangled. Both should draw from the same queue and produce the same kind of graph changes, so users can pick whichever approach fits their hardware.
+Episodic evidence now has one shared aggregation path. Dreaming is the only
+automatic semantic writer; document ingestion, summaries, retention, and
+source-native topology remain separate non-semantic responsibilities.
 
 **[wip] Unify pipeline and dreaming (#913)**
 
-One queue for everything -- summaries, transcripts, imported content. Pipeline distillation and agentic dreaming both read from it and write to the same graph operations. You turn one on, you turn the other off, or you run both. The system doesn't care.
+One selector covers summaries, transcripts, imported content, compactions, and
+explicit episodic memory. Dreaming reasons over that evidence and applies
+audited graph operations; semantic-first retrieval remains available over the
+derived layer.
 
-**[next] Dreaming as a proper agent inside the daemon (#947 B)**
+**[wip] Dreaming as a proper agent inside the daemon (#947 B)**
 
-Pi is a TypeScript library that gives us auth, model selection, and 30+ providers out of the box. Embedding it in the daemon means the dreaming agent gets real graph tools and produces runbook logs. Replaces the current fragile chain of five separate LLM calls with a single agent that can wander the graph, check its assumptions, and write back.
+Dreaming now uses the daemon router with isolated Pi AgentSessions and scoped
+ACPX MCP sessions. Remaining work is quality evaluation, live scope-matrix
+proof, and safe boundary splitting for oversized evidence.
 
 **[next] Temporal claims (#945)**
 
-When someone saves "going to Venezuela in March," the system should remember to follow up when March passes. A `review_after` timestamp on the memory makes this possible without scanning everything.
+"Going to Venezuela in March 2027" should become "should have gone" when March passes — without claiming it happened. Minimal schema change: a nullable `review_after` on memories, set by the dreaming pass when it creates a temporal claim, picked up on later passes, superseded with retrospective framing. Agents can also set expiry explicitly at save time on any surface. Works identically under pipeline dreaming and agentic dreaming.
 
 **[next] Cross-agent notifications (#944)**
 
-Messages that jump between agent sessions in different harnesses without polling. Each harness declares which hooks it exposes. The module routes through the next available one.
+Next-available-hook delivery between agent sessions in different harnesses, without polling. Each harness declares its notification-compatible hooks; the module routes through the next available one.
+
+**[next] Recall search strengthening**
+
+Memory search doesn't read entity aliases or community detection yet. Session-start injection no longer skews rehearsal boost (#972, shipped); the remaining work is wiring the ontology signals into ranking.
 
 ---
 
@@ -69,45 +102,51 @@ Cloud, scale, and the long tail
 
 ---
 
-The cloud is not a replacement for the local product. It's optional infrastructure the daemon connects to if you want it. The app is free and local. You pay for sync and hosted services on top. Same model as Obsidian.
+The cloud is optional infrastructure the daemon connects to if you want it. The app is free and local. You pay for sync and hosted services on top. Same model as Obsidian.
 
 **[backlog] Cloud inference API (#647, #1001)**
 
-Background pipeline tasks run on cloud GPUs instead of your local machine. Small free monthly allowance. Paid tier (~$4-8/mo) for more. Separate private repo.
+Background pipeline tasks on cloud GPUs. Small free monthly allowance, paid tier (~$4–8/mo). Separate private repo.
 
 **[backlog] Cross-device sync**
 
-Memory, config, and sources sync between your machines. The daemon opens an outbound connection to the relay. No firewall issues.
+Memory, config, and sources between your machines. Outbound connection to a relay, no firewall issues.
 
 **[backlog] Full hosted daemon**
 
-The daemon runs in the cloud so your background pipeline keeps going even when your laptop is closed. Not for v1.
+The daemon in the cloud so the pipeline runs while your laptop is closed. Not for v1.
 
 **[backlog] Training dataset and reasoning model**
 
-Fine-tune a small reasoning model from 20k collected conversations. PII sanitized. Mythos-style reasoning traces for extraction and synthesis. Open source the dataset.
+Fine-tune a small reasoning model from collected conversations (#984 feeds this). PII sanitized. Open source the dataset.
+
+**[backlog] Raspberry Pi target (#921)**
+
+Pi 3B+ as minimum platform, idle RSS under 100 MB. Constrained ARM edge runtime PR open (#999).
+
+**[backlog] Usage analytics (#1026)**
+
+PostHog, non-intrusive, for understanding install and usage patterns.
 
 ---
 
-Operations
+Trust and adoption
 
 ---
 
-**[wip] Strict quality gates (#919)**
+The July competitive audit's conclusion: Signet's engineering is easier to trust than Signet itself. Closing that gap is product work, not marketing fluff.
 
-Make lint, typecheck, and test gates mandatory across TypeScript and Rust. Clear the backlog so the gate can go hard-required.
+**[next] Surface the real proof points**
 
-**[wip] Release pipeline**
+The homepage leads with an 8-question LoCoMo sample while the defensible LongMemEval result (run on Supermemory's own MemoryBench harness, vendored in `memorybench/`) is buried in the docs. Surface the strong number with methodology next to it, or pull the weak one.
 
-Nightly releases produce all three distribution artifacts (npm package, compiled binary, desktop installer). Non-blocking CI.
+**[next] Team, about, and pricing pages**
 
-**[next] Status clarity (#908)**
+We ask users to run a persistent daemon with access to their secrets, and the site says nothing about who is behind it. That's the biggest trust gap on the site — bigger than any technical one.
 
-Status currently mixes up configured, resolved, effective, and running states. Needs to be cleaner.
+**[next] Separate shipped from vision on the site**
 
-**[next] Raspberry Pi target (#921)**
-
-Test and optimize for Pi 3B+. Target idle RSS under 100MB.
+"Open agent economies" copy sits directly below verified capability sections and undercuts them. Shipped-and-verified gets the product page; the long arc gets its own home (see VISION.md).
 
 ---
 
@@ -115,17 +154,18 @@ Recently shipped
 
 ---
 
-- **[done]** Inference cutover to pi-ai + ACPX (#947 / #949). All hand-rolled providers deleted. -5853 lines of code.
+- **[done]** Rust daemon experiment ended (#1056). One daemon, TypeScript on Bun. The parity harness, shadow proxy, and runtime switch are gone.
+- **[done]** Embedding migration without recall downtime (v0.157.x).
+- **[done]** Rehearsal boost fix (#972) — session-start injection no longer advances access tracking.
+- **[done]** Recall divergence fix (#929) — shared request builder across CLI, MCP, and Pi extension; follow-up #931 for the remaining harnesses.
+- **[done]** Public repositioning — README and site language now lead with local-first memory and secrets.
+- **[done]** Inference cutover to pi-ai + ACPX (#947 A / #949). All hand-rolled providers deleted, -5,853 lines.
 - **[done]** Distribution model spec (#1001). Three install shapes, cloud architecture, locked.
-- **[done]** Dashboard redesign HTML mockup. The design spec for the React rewrite.
-- **[done]** Multi-agent support baseline.
-- **[done]** Connector expansion (Hermes Agent, OpenClaw).
-- **[done]** Readable changelog and release notes.
-- **[done]** Recall alignment across CLI, MCP, SDK, and hooks.
-- **[done]** Documentation site improvements.
+- **[done]** Dashboard redesign HTML mockup — the design spec for the React rewrite.
+- **[done]** Connector expansion (Hermes Agent, OpenClaw, Kimi provider PR open).
 
 ---
 
-What changed from the old roadmap
+What changed from the last roadmap
 
-The old roadmap talked about "skills over substrate," "source events as agent triggers," and a "proving-ground loop." Those aren't wrong directions, but they're not what we're shipping right now. What we're shipping is a dashboard that doesn't confuse people, a desktop app that installs like a real application, and a pipeline that doesn't need hand-holding. Once those are solid, the bigger ideas have a foundation to land on.
+Three things. First, the Rust daemon is gone — the experiment produced good data and the answer was no; one daemon means one place bugs live. Second, ops hardening jumped the queue: the backlog death spiral (#1059) and the repair-tooling bugs made clear that reliability work can't keep sitting behind feature work. Third, benchmarks moved from headline to evidence — recall quality is table stakes now; what differentiates Signet is distribution, UX, and the secrets/memory bundle nobody else ships. The long-arc ideas from VISION.md (measured access to personal data, authority artifacts) are unchanged — they're the destination. This roadmap is the next stretch of road.

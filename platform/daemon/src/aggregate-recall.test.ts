@@ -299,19 +299,22 @@ describe("aggregateRecall", () => {
 		expect(saved.type).toBe("semantic");
 		expect(saved.extraction_status).toBe("none");
 
-		const extractJob = getDbAccessor().withReadDb((db) =>
-			db.prepare("SELECT job_type, status FROM memory_jobs WHERE memory_id = ?").get("aggregate-1"),
-		) as Record<string, unknown>;
-		expect(extractJob).toEqual({ job_type: "extract", status: "pending" });
+		// No legacy extract job is enqueued — the extraction worker runtime is
+		// deleted and Dreaming owns semantic processing. Aggregate saves are
+		// retrievable evidence, not direct graph writes.
+		const extractJobCount = getDbAccessor().withReadDb((db) =>
+			db.prepare("SELECT COUNT(*) as cnt FROM memory_jobs WHERE memory_id = ?").get("aggregate-1"),
+		) as { cnt: number };
+		expect(extractJobCount.cnt).toBe(0);
 
 		const links = getDbAccessor().withReadDb((db) =>
 			db
 				.prepare(
-					"SELECT source_memory_id FROM aggregate_memory_sources WHERE aggregate_memory_id = ? ORDER BY source_memory_id",
+					"SELECT source_id FROM derived_memory_sources WHERE derived_memory_id = ? AND source_kind = 'memory' ORDER BY source_id",
 				)
 				.all("aggregate-1"),
-		) as Array<{ source_memory_id: string }>;
-		expect(links.map((link) => link.source_memory_id)).toEqual(["mem-1", "mem-2", "mem-3"]);
+		) as Array<{ source_id: string }>;
+		expect(links.map((link) => link.source_id)).toEqual(["mem-1", "mem-2", "mem-3"]);
 
 		const hint = getDbAccessor().withReadDb(
 			(db) => db.prepare("SELECT hint FROM memory_hints WHERE memory_id = ?").get("aggregate-1") as { hint: string },
@@ -319,18 +322,77 @@ describe("aggregateRecall", () => {
 		expect(hint.hint).toBe("what happened");
 	});
 
-	it("synthesizes through a direct OpenAI-compatible API target without ACPX", async () => {
+	it("never enqueues a legacy extract job — worker runtime is deleted (#946)", async () => {
 		writeFileSync(
 			join(dir, "agent.yaml"),
 			`name: AggregateRecallTest
 memory:
-  pipelineV2:
-    extraction:
-      provider: openai-compatible
-      model: gpt-4o-mini
+  dreaming:
+    enabled: true
+`,
+		);
+
+		const router = new StaticRouter();
+		const result = await aggregateRecall(
+			{
+				query: "what happened",
+				aggregate: true,
+				aggregateBudget: "small",
+				agentId: "agent-a",
+				readPolicy: "isolated",
+			},
+			loadMemoryConfig(dir),
+			{
+				router,
+				embedFn: async () => null,
+				logger: quietLogger(),
+				now: () => new Date("2026-05-20T12:00:00.000Z"),
+				idFactory: () => "aggregate-dream",
+				hybridRecall: async () => response("what happened", [row("mem-1", "First evidence")]),
+			},
+		);
+
+		// The aggregate memory is still saved (immediate retrieval preserved).
+		expect(result.aggregate).toMatchObject({ savedMemoryId: "aggregate-dream", saved: true });
+
+		// No legacy extract job is enqueued — the extraction worker runtime is
+		// fully deleted; Dreaming owns semantic processing. This holds regardless
+		// of config because there is no worker to lease the job.
+		const jobCount = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare("SELECT COUNT(*) as cnt FROM memory_jobs WHERE memory_id = ? AND job_type = 'extract'")
+				.get("aggregate-dream"),
+		) as { cnt: number };
+		expect(jobCount.cnt).toBe(0);
+	});
+
+	it("synthesizes through a direct OpenAI-compatible API target without ACPX", async () => {
+		writeFileSync(
+			join(dir, "agent.yaml"),
+			`inference:
+  defaultPolicy: aggregate
+  accounts:
+    aggregate-api:
+      kind: api
+      providerFamily: openai-compatible
+      credentialRef: OPENAI_API_KEY
+  targets:
+    aggregate:
+      executor: openai-compatible
+      account: aggregate-api
       endpoint: https://gateway.example.test/v1
-    synthesis:
-      enabled: false
+      models:
+        default:
+          model: gpt-4o-mini
+  policies:
+    aggregate:
+      mode: automatic
+      defaultTargets:
+        - aggregate/default
+  workloads:
+    aggregateRecall:
+      target: aggregate/default
+      taskClass: session_synthesis
 `,
 		);
 		process.env.OPENAI_API_KEY = "test-openai-compatible-key";
@@ -341,7 +403,10 @@ memory:
 			const headers = new Headers(init?.headers);
 			seen.push({ url, authorization: headers.get("authorization") });
 			if (url.endsWith("/models")) {
-				return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+				// OpenAI-compatible gateways may not implement discovery. The shared
+				// Pi provider deliberately treats a reachable 404 as available and
+				// lets the actual completion request establish compatibility.
+				return Promise.resolve(new Response("not found", { status: 404 }));
 			}
 			chatCalls += 1;
 			const content =
@@ -356,6 +421,7 @@ memory:
 			return Promise.resolve(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }));
 		}) as unknown as typeof fetch;
 
+		const directRouter = getOrCreateInferenceRouter(dir);
 		const result = await aggregateRecall(
 			{
 				query: "can aggregate recall use direct API models",
@@ -367,7 +433,7 @@ memory:
 			},
 			loadMemoryConfig(dir),
 			{
-				router: getOrCreateInferenceRouter(dir),
+				router: directRouter,
 				embedFn: async () => null,
 				logger: quietLogger(),
 				hybridRecall: async (params: RecallParams) =>
@@ -486,6 +552,54 @@ memory:
 				db.prepare("SELECT hint FROM memory_hints WHERE memory_id = ?").all("aggregate-1") as Array<{ hint: string }>,
 		);
 		expect(hints.map((hint) => hint.hint)).toEqual(["what happened"]);
+	});
+
+	it("rederives a stale aggregate instead of returning its superseded snapshot", async () => {
+		const params: RecallParams = {
+			query: "what happened",
+			aggregate: true,
+			agentId: "agent-a",
+			readPolicy: "isolated",
+		};
+		const deps = {
+			embedFn: async () => null,
+			logger: quietLogger(),
+			now: () => new Date("2026-05-20T12:00:00.000Z"),
+			idFactory: () => "aggregate-stale",
+			hybridRecall: async (input: RecallParams) => response(input.query, [row("mem-1", "Corrected evidence")]),
+		};
+
+		await aggregateRecall(params, loadMemoryConfig(dir), {
+			...deps,
+			router: new StaticRouter("Old aggregate snapshot."),
+		});
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare("UPDATE memories SET stale_at = ? WHERE id = ?").run("2026-05-21T00:00:00.000Z", "aggregate-stale");
+		});
+
+		const refreshed = await aggregateRecall(params, loadMemoryConfig(dir), {
+			...deps,
+			router: new StaticRouter("Current aggregate answer."),
+		});
+
+		expect(refreshed.results[0]).toMatchObject({ id: "aggregate-stale", content: "Current aggregate answer." });
+		expect(refreshed.aggregate?.deduped).toBe(false);
+		const memoryRow = getDbAccessor().withReadDb((db) =>
+			db.prepare("SELECT content, stale_at FROM memories WHERE id = ?").get("aggregate-stale"),
+		) as { content: string; stale_at: string | null };
+		expect(memoryRow).toEqual({ content: "Current aggregate answer.", stale_at: null });
+		const history = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare(
+					"SELECT event, old_content, new_content FROM memory_history WHERE memory_id = ? ORDER BY created_at DESC",
+				)
+				.get("aggregate-stale"),
+		) as { event: string; old_content: string; new_content: string };
+		expect(history).toEqual({
+			event: "rederived",
+			old_content: "Old aggregate snapshot.",
+			new_content: "Current aggregate answer.",
+		});
 	});
 
 	it("runs planned follow-up recalls concurrently", async () => {
@@ -637,16 +751,16 @@ memory:
 				visibility: string;
 			};
 			const evidence = db
-				.prepare(
-					"SELECT source_kind, source_id, source_path FROM aggregate_evidence_sources WHERE aggregate_memory_id = ?",
-				)
+				.prepare("SELECT source_kind, source_id, source_path FROM derived_memory_sources WHERE derived_memory_id = ?")
 				.all(result.aggregate?.savedMemoryId) as Array<{
 				source_kind: string;
 				source_id: string;
 				source_path: string | null;
 			}>;
 			const memory = db
-				.prepare("SELECT COUNT(*) AS n FROM aggregate_memory_sources WHERE aggregate_memory_id = ?")
+				.prepare(
+					"SELECT COUNT(*) AS n FROM derived_memory_sources WHERE derived_memory_id = ? AND source_kind = 'memory'",
+				)
 				.get(result.aggregate?.savedMemoryId) as { n: number };
 			return { evidence, memory, saved };
 		});
@@ -867,11 +981,11 @@ memory:
 			(db) =>
 				db
 					.prepare(
-						"SELECT source_memory_id FROM aggregate_memory_sources WHERE aggregate_memory_id = ? ORDER BY source_memory_id",
+						"SELECT source_id FROM derived_memory_sources WHERE derived_memory_id = ? AND source_kind = 'memory' ORDER BY source_id",
 					)
-					.all("aggregate-sources") as Array<{ source_memory_id: string }>,
+					.all("aggregate-sources") as Array<{ source_id: string }>,
 		);
-		expect(links.map((link) => link.source_memory_id)).toEqual(["mem-1"]);
+		expect(links.map((link) => link.source_id)).toEqual(["mem-1"]);
 	});
 
 	it("marks every recall during aggregate synthesis to exclude aggregate-created memories", async () => {
@@ -1174,14 +1288,15 @@ memory:
 				.prepare(
 					`SELECT
 						(SELECT COUNT(*) FROM memories WHERE id = 'aggregate-loser') AS loser_count,
-						(SELECT COUNT(*) FROM aggregate_memory_sources WHERE aggregate_memory_id = 'aggregate-race-winner') AS link_count,
+						(SELECT COUNT(*) FROM derived_memory_sources WHERE derived_memory_id = 'aggregate-race-winner') AS link_count,
 						(SELECT COUNT(*) FROM memory_jobs WHERE memory_id = 'aggregate-race-winner' AND job_type = 'extract' AND status = 'pending') AS pending_extract_count`,
 				)
 				.get(),
 		) as { loser_count: number; link_count: number; pending_extract_count: number };
 		expect(rows.loser_count).toBe(0);
 		expect(rows.link_count).toBe(1);
-		expect(rows.pending_extract_count).toBe(1);
+		// No extract job — worker runtime deleted, Dreaming owns semantics.
+		expect(rows.pending_extract_count).toBe(0);
 	});
 
 	it("returns structured no-hit metadata when aggregate recall has no evidence", async () => {

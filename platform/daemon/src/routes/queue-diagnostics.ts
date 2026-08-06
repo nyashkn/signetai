@@ -43,11 +43,9 @@ interface QueueDiagnosticsResponse {
 	readonly queues: {
 		readonly memory: QueueCounts;
 		readonly summary: QueueCounts;
-		readonly extraction: QueueCounts;
 	};
 	readonly oldestDeadSummaryJob: ReturnType<typeof getOldestDeadJob>;
 	readonly oldestDeadMemoryJob: ReturnType<typeof getOldestDeadJob>;
-	readonly oldestDeadExtractionJob: ReturnType<typeof getOldestDeadJob>;
 	readonly thresholds: QueueThresholds;
 }
 
@@ -69,11 +67,9 @@ function buildQueueDiagnosticsResponse(db: ReadDb): QueueDiagnosticsResponse {
 		queues: {
 			memory: snapshot.memory,
 			summary: snapshot.summary,
-			extraction: snapshot.extraction,
 		},
 		oldestDeadSummaryJob: snapshot.oldestDeadSummaryJob,
 		oldestDeadMemoryJob: snapshot.oldestDeadMemoryJob,
-		oldestDeadExtractionJob: snapshot.oldestDeadExtractionJob,
 		thresholds: loadThresholds(),
 	};
 }

@@ -410,7 +410,6 @@ describe("status report openclaw runtime", () => {
 						bindHost: "127.0.0.1",
 						networkMode: "local",
 						extraction: null,
-						extractionWorker: null,
 						transcripts: null,
 						probe: {
 							status: "healthy",
@@ -515,7 +514,7 @@ describe("doctor concurrent Signet installations", () => {
 								executablePath: join(root, ".npm-global", "bin", "signet"),
 								packagePath: join(root, ".npm-global", "lib", "node_modules", "signetai"),
 								active: false,
-								removalCommand: "npm uninstall -g signetai",
+								removalCommand: `rm -f -- '${join(root, ".npm-global", "bin", "signet")}'`,
 							},
 						],
 					}),
@@ -533,7 +532,7 @@ describe("doctor concurrent Signet installations", () => {
 			expect(output.findings).toContainEqual(
 				expect.objectContaining({
 					code: "duplicate_signet_installation",
-					fix: expect.stringContaining("npm uninstall -g signetai"),
+					fix: expect.stringContaining("rm -f --"),
 				}),
 			);
 		} finally {
@@ -573,7 +572,6 @@ describe("doctor physical memory diagnostics", () => {
 							peakPhysicalFootprint: 7782,
 						},
 						extraction: null,
-						extractionWorker: null,
 						transcripts: null,
 						probe: {
 							status: "healthy",
@@ -629,7 +627,6 @@ describe("getExtractionStatusNotice", () => {
 				reason: "Claude Code CLI not found during extraction startup preflight",
 				since: "2026-03-26T00:00:00.000Z",
 			},
-			extractionWorker: null,
 		});
 
 		expect(notice).toEqual({
@@ -659,7 +656,6 @@ describe("getExtractionStatusNotice", () => {
 				blockedBy: ["missing credential for extraction", "account state missing"],
 				since: "2026-03-26T00:00:00.000Z",
 			},
-			extractionWorker: null,
 		});
 
 		expect(notice?.level).toBe("error");
@@ -669,35 +665,7 @@ describe("getExtractionStatusNotice", () => {
 		);
 	});
 
-	it("returns a warning when extraction worker is load-shedding", () => {
-		const notice = getExtractionStatusNotice({
-			running: true,
-			pid: 1,
-			uptime: 10,
-			version: "0.0.1",
-			host: "127.0.0.1",
-			bindHost: "127.0.0.1",
-			networkMode: "local",
-			extraction: null,
-			extractionWorker: {
-				running: true,
-				overloaded: true,
-				loadPerCpu: 1.82,
-				maxLoadPerCpu: 0.8,
-				overloadBackoffMs: 30000,
-				overloadSince: "2026-03-26T00:00:00.000Z",
-				nextTickInMs: 28000,
-			},
-		});
-
-		expect(notice).toEqual({
-			level: "warn",
-			title: "Pipeline load-shedding",
-			detail: "load/core 1.82 > threshold 0.80 — next tick in 28s",
-		});
-	});
-
-	it("prioritizes blocked extraction over load-shedding warning", () => {
+	it("returns an error when extraction is blocked", () => {
 		const notice = getExtractionStatusNotice({
 			running: true,
 			pid: 1,
@@ -715,19 +683,107 @@ describe("getExtractionStatusNotice", () => {
 				reason: "Claude Code CLI not found during extraction startup preflight; fallbackProvider is none",
 				since: "2026-03-26T00:00:00.000Z",
 			},
-			extractionWorker: {
-				running: true,
-				overloaded: true,
-				loadPerCpu: 1.82,
-				maxLoadPerCpu: 0.8,
-				overloadBackoffMs: 30000,
-				overloadSince: "2026-03-26T00:00:00.000Z",
-				nextTickInMs: 28000,
-			},
 		});
 
 		expect(notice?.level).toBe("error");
 		expect(notice?.title).toBe("Extraction blocked");
+	});
+
+	// Regression (#946): the standalone extraction worker was retired, so the
+	// daemon reports an active route as ready even though workerRunning is false.
+	// This must NOT produce a misleading "Extraction worker stopped" notice.
+	it("does not warn when an active route is ready despite the retired worker", () => {
+		const notice = getExtractionStatusNotice({
+			running: true,
+			pid: 1,
+			uptime: 10,
+			version: "0.0.1",
+			host: "127.0.0.1",
+			bindHost: "127.0.0.1",
+			networkMode: "local",
+			extraction: {
+				configured: "command",
+				resolved: "command",
+				effective: "command",
+				fallbackProvider: "none",
+				status: "active",
+				degraded: false,
+				reason: null,
+				blockedBy: [],
+				since: null,
+				enabled: true,
+				paused: false,
+				workerRunning: false,
+				ready: true,
+				blockedReason: null,
+				hasWorkloadState: true,
+			},
+		});
+
+		expect(notice).toBeNull();
+	});
+
+	it("does not surface a pipeline notice when the extraction pipeline is retired", () => {
+		const notice = getExtractionStatusNotice({
+			running: true,
+			pid: 1,
+			uptime: 10,
+			version: "0.0.1",
+			host: "127.0.0.1",
+			bindHost: "127.0.0.1",
+			networkMode: "local",
+			extraction: {
+				configured: "command",
+				resolved: "command",
+				effective: "none",
+				fallbackProvider: "none",
+				status: "disabled",
+				degraded: false,
+				reason: "Dreaming cutover owns semantic writes",
+				blockedBy: [],
+				since: null,
+				enabled: false,
+				paused: false,
+				workerRunning: false,
+				ready: false,
+				blockedReason: null,
+				hasWorkloadState: true,
+			},
+		});
+
+		expect(notice).toBeNull();
+	});
+
+	it("still warns that the pipeline is disabled when no retirement reason is present", () => {
+		const notice = getExtractionStatusNotice({
+			running: true,
+			pid: 1,
+			uptime: 10,
+			version: "0.0.1",
+			host: "127.0.0.1",
+			bindHost: "127.0.0.1",
+			networkMode: "local",
+			extraction: {
+				configured: null,
+				resolved: null,
+				effective: null,
+				fallbackProvider: "none",
+				status: "disabled",
+				degraded: false,
+				reason: null,
+				blockedBy: [],
+				since: null,
+				enabled: false,
+				paused: false,
+				workerRunning: false,
+				ready: false,
+				blockedReason: null,
+				hasWorkloadState: true,
+			},
+		});
+
+		expect(notice?.level).toBe("warn");
+		expect(notice?.title).toBe("Pipeline disabled");
 	});
 });
 
@@ -755,7 +811,6 @@ describe("showStatus readiness labeling", () => {
 				bindHost: "127.0.0.1",
 				networkMode: "local",
 				extraction: null,
-				extractionWorker: null,
 				transcripts: null,
 				probe,
 				openclaw: null,
@@ -817,6 +872,246 @@ describe("showStatus readiness labeling", () => {
 			expect(output).not.toContain("Readiness degraded");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// Regression (#1074): a daemon whose event loop is wedged keeps its TCP
+	// listener (and often its process) alive while /health times out. That is
+	// "unresponsive", not "stopped" — a restart re-triggers the same wedge, so
+	// the label must not send the operator down the restart path.
+	it("labels an alive-but-unresponsive daemon as unresponsive, not stopped", async () => {
+		const root = mkdtempSync(join(tmpdir(), "health-status-"));
+		try {
+			const deps = {
+				...depsFor(root),
+				getDaemonStatus: async () => ({
+					running: false,
+					pid: 42,
+					uptime: null,
+					version: null,
+					host: null,
+					bindHost: null,
+					networkMode: null,
+					probe: {
+						status: "listener-unhealthy" as const,
+						detail:
+							"TCP listener is present on http://127.0.0.1:3850, but /health did not return successfully within the probe timeout",
+						url: "http://127.0.0.1:3850",
+						listenerPresent: true,
+						processPid: 42,
+						stalePid: null,
+					},
+				}),
+			};
+			const output = await captureStatus(deps);
+			expect(output).toContain("Daemon unresponsive");
+			expect(output).toContain("not answering");
+			expect(output).not.toContain("Daemon stopped");
+			expect(output).not.toContain("signet daemon restart");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("dead-job backlog surfacing (#1048)", () => {
+	const queueFixture = {
+		memory: {
+			pending: 0,
+			leased: 0,
+			completed: 8548,
+			failed: 0,
+			dead: 10952,
+			oldestAgeSec: 0,
+			oldestDeadAgeSec: 86400 * 9,
+			lastError: "LLM extraction failed: All routing candidates were blocked by policy or runtime state.",
+		},
+		summary: {
+			pending: 0,
+			leased: 0,
+			completed: 2204,
+			failed: 0,
+			dead: 275,
+			oldestAgeSec: 0,
+			oldestDeadAgeSec: 86400 * 3,
+			lastError: "All routed targets failed.",
+		},
+	};
+
+	function deadBacklogDeps(basePath: string, withHealth = true) {
+		return {
+			...depsFor(basePath),
+			getDaemonStatus: async () => ({
+				running: true,
+				pid: 3046866,
+				uptime: 54,
+				version: "0.156.4",
+				host: "127.0.0.1",
+				bindHost: "127.0.0.1",
+				networkMode: "local",
+				extraction: null,
+				transcripts: { pending: 0, failed: 0, dead: 0 },
+				health: withHealth ? { score: 0.817, status: "unhealthy" } : null,
+				queue: queueFixture,
+				probe: {
+					status: "healthy" as const,
+					detail: "/health responded",
+					url: "http://127.0.0.1:3850",
+					listenerPresent: true,
+					processPid: 42,
+					stalePid: null,
+				},
+				openclaw: null,
+			}),
+		};
+	}
+
+	async function captureStatus(deps: ReturnType<typeof deadBacklogDeps>): Promise<string> {
+		const lines: string[] = [];
+		const oldLog = console.log;
+		console.log = (...args: unknown[]) => {
+			lines.push(args.join(" "));
+		};
+		try {
+			await showStatus({}, deps);
+		} finally {
+			console.log = oldLog;
+		}
+		return lines.join("\n");
+	}
+
+	it("status visibly warns about the dead-job backlog and its last error", async () => {
+		const root = mkdtempSync(join(tmpdir(), "health-dead-backlog-"));
+		try {
+			const output = await captureStatus(deadBacklogDeps(root));
+			expect(output).toContain("Pipeline queues (dead jobs present)");
+			expect(output).toContain("d=10952");
+			expect(output).toContain("d=275");
+			expect(output).toContain("LLM extraction failed");
+			expect(output).toContain("signet repair queue");
+			expect(output).toContain("unhealthy composite health");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("doctor flags the dead-job backlog as an error finding (ok becomes false)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-dead-backlog-"));
+		try {
+			const jsonOut = await captureDoctorJson(deadBacklogDeps(root).getDaemonStatus);
+			expect(jsonOut.ok).toBe(false);
+			const deadFinding = jsonOut.findings.find((f) => f.code === "dead_jobs_backlog");
+			expect(deadFinding).toBeDefined();
+			expect(deadFinding?.level).toBe("error");
+			expect(deadFinding?.message).toContain("11227");
+			expect(deadFinding?.fix).toContain("signet repair queue requeue");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("doctor flags unhealthy composite health even without a dead backlog", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-unhealthy-"));
+		try {
+			const jsonOut = await captureDoctorJson(deadBacklogDeps(root, true).getDaemonStatus);
+			expect(jsonOut.ok).toBe(false);
+			const unhealthy = jsonOut.findings.find((f) => f.code === "daemon_unhealthy");
+			expect(unhealthy).toBeDefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("doctor stays ok for a running daemon with clean queues", async () => {
+		const root = mkdtempSync(join(tmpdir(), "doctor-clean-"));
+		try {
+			const workspace = join(root, "agents");
+			mkdirSync(workspace, { recursive: true });
+			writeFileSync(join(workspace, "agent.yaml"), "version: 1\n");
+			writeFileSync(join(workspace, "SOUL.md"), "soul\n");
+			writeFileSync(join(workspace, "IDENTITY.md"), "identity\n");
+			writeFileSync(join(workspace, "USER.md"), "user\n");
+			writeFileSync(join(workspace, "MEMORY.md"), "memory\n");
+			writeFileSync(join(workspace, "AGENTS.md"), "# agents\n");
+			mkdirSync(join(workspace, "memory"), { recursive: true });
+			writeFileSync(join(workspace, "memory", "memories.db"), "sqlite");
+			process.env.HOME = root;
+
+			const base = deadBacklogDeps(workspace);
+			base.getDaemonStatus = async () => ({
+				...(await deadBacklogDeps(workspace).getDaemonStatus()),
+				health: { score: 0.99, status: "healthy" },
+				queue: {
+					memory: { ...queueFixture.memory, dead: 0, lastError: null },
+					summary: { ...queueFixture.summary, dead: 0, lastError: null },
+				},
+			});
+			const jsonOut = await captureDoctorJson(base.getDaemonStatus);
+			expect(jsonOut.findings.some((f) => f.code === "dead_jobs_backlog")).toBe(false);
+			expect(jsonOut.findings.some((f) => f.code === "daemon_unhealthy")).toBe(false);
+		} finally {
+			process.env.HOME = originalHome;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+async function captureDoctorJson(
+	getDaemonStatus: () => Promise<Record<string, unknown>>,
+): Promise<{ ok: boolean; findings: Array<{ code?: string; level: string; message: string; fix?: string }> }> {
+	const lines: string[] = [];
+	const oldLog = console.log;
+	console.log = (...args: unknown[]) => {
+		lines.push(args.join(" "));
+	};
+	try {
+		await showDoctor(
+			{ json: true },
+			{
+				agentsDir: "/tmp/agents",
+				defaultPort: 3850,
+				detectExistingSetup: () => ({
+					agentsDir: true,
+					agentsMd: true,
+					agentYaml: true,
+					memoryDb: true,
+				}),
+				extractPathOption: () => null,
+				formatUptime: () => "0s",
+				getDaemonStatus,
+				normalizeAgentPath: (pathValue: string) => pathValue,
+				parseIntegerValue: (value: unknown) => (typeof value === "number" ? value : null),
+				signetLogo: () => "signet",
+			},
+		);
+	} finally {
+		console.log = oldLog;
+	}
+	return JSON.parse(lines.join("")) as {
+		ok: boolean;
+		findings: Array<{ code?: string; level: string; message: string; fix?: string }>;
+	};
+}
+
+describe("doctor unknown target", () => {
+	it("sets a non-zero exit code for an unsupported doctor target", async () => {
+		const lines: string[] = [];
+		const oldLog = console.log;
+		const previousExitCode = process.exitCode;
+		try {
+			Reflect.deleteProperty(process, "exitCode");
+			console.log = (...args: unknown[]) => {
+				lines.push(args.join(" "));
+			};
+
+			await showDoctor({ target: "nonexistent-target" }, depsFor("/tmp/doctor-unknown-target"));
+
+			expect(process.exitCode).toBe(1);
+			expect(lines.join("\n")).toContain("Unknown doctor target: nonexistent-target");
+			expect(lines.join("\n")).toContain("Supported targets: hermes");
+		} finally {
+			console.log = oldLog;
+			process.exitCode = previousExitCode ?? 0;
 		}
 	});
 });

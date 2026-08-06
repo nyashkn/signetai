@@ -10,13 +10,12 @@
  * Idempotent — matched by canonical name + frontmatter content hash.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { watch } from "chokidar";
 import type { DbAccessor } from "../db-accessor.js";
 import { logger } from "../logger.js";
 import type { EmbeddingConfig, PipelineV2Config } from "../memory-config.js";
-import type { LlmProvider } from "./provider.js";
 import { parseSkillFile } from "./skill-frontmatter.js";
 import { installSkillNode, skillEmbeddingHash, uninstallSkillNode } from "./skill-graph.js";
 
@@ -29,12 +28,15 @@ export interface ReconcilerDeps {
 	readonly pipelineConfig: PipelineV2Config;
 	readonly embeddingConfig: EmbeddingConfig;
 	readonly fetchEmbedding: (text: string, cfg: EmbeddingConfig) => Promise<number[] | null>;
-	readonly getProvider: () => LlmProvider | null;
 	readonly agentsDir: string;
 }
 
 export interface ReconcilerHandle {
 	stop(): void;
+}
+
+export interface ReconcileOptions {
+	readonly scanFilesystem?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,42 @@ export interface ReconcilerHandle {
 
 function skillsDir(agentsDir: string): string {
 	return join(agentsDir, "skills");
+}
+
+// ---------------------------------------------------------------------------
+// Per-skill failure backoff
+// ---------------------------------------------------------------------------
+
+/**
+ * A skill whose reconcile fails deterministically (schema conflict, provider
+ * outage, unreadable file) must not re-run the full install pipeline every
+ * interval: each attempt re-reads the file, rewrites the graph, and can
+ * saturate the daemon event loop (Signet-AI/signetai#1086). After
+ * SKILL_BACKOFF_FAILURES consecutive failures the skill is skipped until its
+ * backoff window elapses; the window doubles per subsequent failure up to
+ * SKILL_BACKOFF_MAX_MS. Any pass that completes without throwing clears the
+ * state, as does a watcher event (new content is a fresh signal).
+ */
+const SKILL_BACKOFF_BASE_MS = 10_000;
+const SKILL_BACKOFF_MAX_MS = 10 * 60_000;
+const SKILL_BACKOFF_FAILURES = 3;
+
+const skillFailureState = new Map<string, { consecutiveFailures: number; nextAttemptAt: number }>();
+
+/** Backoff delay after `consecutiveFailures` failures (0 until the threshold). */
+export function skillBackoffDelayMs(
+	consecutiveFailures: number,
+	baseMs: number = SKILL_BACKOFF_BASE_MS,
+	maxMs: number = SKILL_BACKOFF_MAX_MS,
+): number {
+	if (consecutiveFailures <= SKILL_BACKOFF_FAILURES) return 0;
+	const delay = baseMs * 2 ** (consecutiveFailures - SKILL_BACKOFF_FAILURES - 1);
+	return Math.min(delay, maxMs);
+}
+
+/** Clear a skill's failure state after a successful pass or watcher event. */
+export function resetSkillFailureState(skillName: string): void {
+	skillFailureState.delete(skillName);
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +95,10 @@ function skillsDir(agentsDir: string): string {
  *    - If entity exists but frontmatter changed → re-install
  * 3. For each skill_meta row with no matching file → uninstall
  */
-export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
+export async function reconcileOnce(
+	deps: ReconcilerDeps,
+	options: ReconcileOptions = {},
+): Promise<{
 	installed: number;
 	updated: number;
 	removed: number;
@@ -67,23 +108,26 @@ export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
 	let updated = 0;
 	let removed = 0;
 
-	if (!existsSync(dir)) {
-		return { installed, updated, removed };
-	}
-
 	// 1. Scan filesystem
 	const diskSkills = new Map<string, string>(); // name → SKILL.md path
-	const entries = readdirSync(dir, { withFileTypes: true });
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const skillMdPath = join(dir, entry.name, "SKILL.md");
-		if (existsSync(skillMdPath)) {
-			diskSkills.set(entry.name, skillMdPath);
+	if (options.scanFilesystem !== false && existsSync(dir)) {
+		const entries = readdirSync(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const skillMdPath = join(dir, entry.name, "SKILL.md");
+			if (existsSync(skillMdPath)) {
+				diskSkills.set(entry.name, skillMdPath);
+			}
 		}
 	}
 
 	// 2. Check each disk skill against the graph
 	for (const [name, mdPath] of diskSkills) {
+		const failureState = skillFailureState.get(name);
+		if (failureState && failureState.nextAttemptAt > Date.now()) {
+			continue;
+		}
+
 		try {
 			const content = readFileSync(mdPath, "utf-8");
 			const parsed = parseSkillFile(content);
@@ -112,7 +156,6 @@ export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
 					deps.pipelineConfig,
 					deps.embeddingConfig,
 					deps.fetchEmbedding,
-					deps.getProvider(),
 				);
 				installed++;
 				logger.info("reconciler", "Backfilled skill node", { skill: name });
@@ -128,9 +171,9 @@ export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
 				);
 				const rawHash = skillEmbeddingHash(actualId, parsed.frontmatter);
 
-				// Compare the raw on-disk frontmatter fingerprint. Installs may
-				// enrich description/triggers before generating embeddings, so
-				// comparing against chunk_text causes infinite update loops.
+				// Compare the raw on-disk frontmatter fingerprint against the
+				// stored one, not the embedding chunk text, so metadata-only
+				// changes reinstall without creating update loops.
 				if (storedEmb && storedEmb.content_hash !== rawHash) {
 					await installSkillNode(
 						{
@@ -143,18 +186,32 @@ export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
 						deps.pipelineConfig,
 						deps.embeddingConfig,
 						deps.fetchEmbedding,
-						deps.getProvider(),
 					);
 					updated++;
 					logger.info("reconciler", "Updated changed skill node", { skill: name });
 				}
 			}
+
+			// Reaching here means this pass handled the skill without
+			// throwing — clear any accumulated failure state.
+			resetSkillFailureState(name);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			logger.warn("reconciler", "Failed to reconcile skill", {
 				skill: name,
 				error: msg,
 			});
+
+			const consecutiveFailures = (failureState?.consecutiveFailures ?? 0) + 1;
+			const backoffMs = skillBackoffDelayMs(consecutiveFailures);
+			skillFailureState.set(name, { consecutiveFailures, nextAttemptAt: Date.now() + backoffMs });
+			if (backoffMs > 0) {
+				logger.warn("reconciler", "Skill reconcile failed repeatedly; entering backoff", {
+					skill: name,
+					consecutiveFailures,
+					backoffMs,
+				});
+			}
 		}
 	}
 
@@ -168,11 +225,14 @@ export async function reconcileOnce(deps: ReconcilerDeps): Promise<{
 
 	for (const row of graphSkills) {
 		if (!existsSync(row.fs_path)) {
-			// Extract skill name from entity_id: "skill:default:{name}"
+			// Prefer the namespace id, but retain the filesystem name for legacy
+			// rows whose entity_id does not use the skill namespace.
 			const parts = row.entity_id.split(":");
-			const skillName = parts.slice(2).join(":");
+			const skillName = parts[0] === "skill" ? parts.slice(2).join(":") : basename(dirname(row.fs_path));
 			if (skillName) {
-				uninstallSkillNode({ skillName }, deps.accessor);
+				const result = uninstallSkillNode({ skillName, entityId: row.entity_id }, deps.accessor);
+				if (!result.removed) continue;
+
 				removed++;
 				logger.info("reconciler", "Removed orphaned skill node", {
 					skill: skillName,
@@ -207,9 +267,25 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 	const intervalMs = deps.pipelineConfig.procedural.reconcileIntervalMs;
 	const dir = skillsDir(deps.agentsDir);
 	let reconciling = false;
+	let lastScannedDirMtimeMs: number | null | undefined;
+
+	const directoryMtimeMs = (): number | null => {
+		try {
+			return statSync(dir).mtimeMs;
+		} catch {
+			return null;
+		}
+	};
+
+	const reconcileIfChanged = async (): Promise<void> => {
+		const currentMtimeMs = directoryMtimeMs();
+		const scanFilesystem = currentMtimeMs !== lastScannedDirMtimeMs;
+		await reconcileOnce(deps, { scanFilesystem });
+		lastScannedDirMtimeMs = currentMtimeMs;
+	};
 
 	// Immediate backfill (async, doesn't block startup)
-	reconcileOnce(deps).catch((e) => {
+	reconcileIfChanged().catch((e) => {
 		logger.error("reconciler", "Startup backfill failed", e instanceof Error ? e : undefined, {
 			error: String(e),
 		});
@@ -219,7 +295,7 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 	const timer = setInterval(() => {
 		if (reconciling) return;
 		reconciling = true;
-		reconcileOnce(deps)
+		reconcileIfChanged()
 			.catch((e) => {
 				logger.error("reconciler", "Periodic reconciliation failed", e instanceof Error ? e : undefined, {
 					error: String(e),
@@ -242,18 +318,21 @@ export function startReconciler(deps: ReconcilerDeps): ReconcilerHandle {
 		watcher.on("add", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md added", { skill: skillName });
+			resetSkillFailureState(skillName);
 			reconcileSkill(skillName, filePath, deps);
 		});
 
 		watcher.on("change", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md changed", { skill: skillName });
+			resetSkillFailureState(skillName);
 			reconcileSkill(skillName, filePath, deps);
 		});
 
 		watcher.on("unlink", (filePath) => {
 			const skillName = basename(dirname(filePath));
 			logger.info("reconciler", "SKILL.md removed", { skill: skillName });
+			resetSkillFailureState(skillName);
 			uninstallSkillNode({ skillName }, deps.accessor);
 		});
 	}
@@ -324,7 +403,6 @@ async function reconcileSkill(skillName: string, mdPath: string, deps: Reconcile
 			deps.pipelineConfig,
 			deps.embeddingConfig,
 			deps.fetchEmbedding,
-			deps.getProvider(),
 		);
 
 		logger.debug("reconciler", "Skill reconciled via watcher", { skill: skillName });

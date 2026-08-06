@@ -1471,7 +1471,6 @@ Track A2: DB access and transaction boundaries
    - pooled read handles when beneficial
 2. Implement explicit transaction wrappers:
    - `txIngestEnvelope()`
-   - `txApplyDecision()`
    - `txFinalizeAccessAndHistory()`
 3. Enforce no provider call inside write transaction via lintable guard:
    - central helper requiring pure DB closures

@@ -11,6 +11,8 @@ import {
 } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { requireDependencyReason } from "./dependency-history";
+import { linkDerivedMemorySourcesInTx, markDerivedMemoriesStaleForSourceInTx } from "./derived-memory-provenance";
+import { classifyEntityQuality } from "./entity-quality";
 import {
 	type OntologyEvidenceItem,
 	type OntologyEvidenceRef,
@@ -18,6 +20,7 @@ import {
 	resolveOntologyEvidenceRef,
 	uniqueOntologyEvidenceRefs,
 } from "./ontology-evidence";
+import { insertHistoryEvent, txForgetMemory, txIngestEnvelope, txSupersedeMemory } from "./transactions";
 
 type ProposalRow = {
 	readonly id: string;
@@ -191,6 +194,11 @@ export interface ProposeDuplicateEntityMergesParams {
 	readonly createdBy?: string;
 }
 
+export interface FindDuplicateEntityMergesParams {
+	readonly agentId: string;
+	readonly name: string;
+}
+
 export interface OntologyOperationInput {
 	readonly operation: string;
 	readonly payload: Readonly<Record<string, unknown>>;
@@ -240,6 +248,48 @@ export interface OntologyOperationBatchError {
 	readonly operation: string;
 	readonly error: string;
 	readonly status: 400 | 404 | 409;
+}
+
+/** Apply an audited operation batch inside a caller-owned transaction. */
+export function applyOntologyOperationBatchInTx(
+	db: WriteDb,
+	params: Pick<ApplyOntologyOperationBatchParams, "agentId" | "actor" | "operations">,
+): ApplyOntologyOperationBatchResult {
+	if (params.operations.length === 0) throw new OntologyProposalError("operations are required", 400);
+	if (params.operations.length > 500)
+		throw new OntologyProposalError("cannot apply more than 500 operations at once", 400);
+
+	const items: ApplyOntologyOperationResult[] = [];
+	for (const operation of params.operations) {
+		const inserted = insertProposalInTx(
+			db,
+			{
+				agentId: params.agentId,
+				operation: operation.operation,
+				payload: operation.payload,
+				confidence: operation.confidence,
+				rationale: operation.reason,
+				evidence: operation.evidence,
+				risk: operation.risk,
+				sourceKind: operation.sourceKind,
+				sourceId: operation.sourceId,
+				sourcePath: operation.sourcePath,
+				sourceRoot: operation.sourceRoot,
+				createdBy: params.actor,
+			},
+			now(),
+		);
+		const row = getProposalInTx(db, inserted.id, params.agentId);
+		if (row === null) throw new OntologyProposalError("Proposal not found", 404);
+		const result = applyOperation(db, row, params.actor);
+		items.push({
+			proposal: markAppliedInTx(db, row, params.actor, result),
+			result,
+			dryRun: false,
+			proposed: false,
+		});
+	}
+	return { items, count: items.length, dryRun: false, proposed: false };
 }
 
 export interface ClaimVersionReadParams {
@@ -469,6 +519,31 @@ function proposalAuditEvidence(proposal: ProposalRow): readonly unknown[] {
 	return parseJsonArray(proposal.evidence);
 }
 
+/**
+ * The graph keeps connector/source ownership separately on its rows. Derived
+ * memory lineage instead keys on the immutable record named by source_ref, so
+ * corrections to that record can invalidate every dependent semantic row.
+ */
+function derivedMemorySourcesForProposal(proposal: ProposalRow): readonly {
+	readonly sourceKind: string;
+	readonly sourceId: string;
+	readonly sourcePath: string | null;
+}[] {
+	const sources: Array<{ sourceKind: string; sourceId: string; sourcePath: string | null }> = [];
+	for (const ref of proposalEvidenceRefs(toProposal(proposal))) {
+		if (typeof ref.reference !== "object" || ref.reference === null || Array.isArray(ref.reference)) continue;
+		const sourceRef = readString(ref.reference as Readonly<Record<string, unknown>>, "source_ref");
+		if (sourceRef === null) continue;
+		const separator = sourceRef.indexOf(":");
+		if (separator <= 0 || separator === sourceRef.length - 1) continue;
+		const sourceKind = sourceRef.slice(0, separator);
+		const sourceId = sourceRef.slice(separator + 1);
+		if (!(["memory", "artifact", "transcript", "summary"] as const).includes(sourceKind as "memory")) continue;
+		sources.push({ sourceKind, sourceId, sourcePath: ref.sourcePath });
+	}
+	return sources;
+}
+
 function canonicalKey(value: string | null): string | null {
 	if (value === null) return null;
 	const key = canonical(value).replace(/\s+/g, "_");
@@ -548,6 +623,8 @@ function resolveEntity(db: WriteDb, agentId: string, name: string): string | nul
 function resolveOrCreateEntity(db: WriteDb, agentId: string, name: string, type: EntityType): string {
 	const existing = resolveEntity(db, agentId, name);
 	if (existing !== null) return existing;
+	const quality = classifyEntityQuality(name);
+	if (!quality.ok) throw new OntologyProposalError(`Entity name rejected: ${quality.reason}`, 400);
 	const id = crypto.randomUUID();
 	db.prepare(
 		`INSERT INTO entities
@@ -607,13 +684,253 @@ function applyCreateEntity(
 ): Readonly<Record<string, unknown>> {
 	const name = readString(payload, "name");
 	if (name === null) throw new OntologyProposalError("payload.name is required", 400);
-	const entityId = resolveOrCreateEntity(db, agentId, name, normalizeEntityType(readString(payload, "entity_type")));
+	const existingEntityId = resolveEntity(db, agentId, name);
+	const entityId =
+		existingEntityId ??
+		resolveOrCreateEntity(db, agentId, name, normalizeEntityType(readString(payload, "entity_type")));
+	const proposalEvidence = JSON.stringify(proposalAuditEvidence(proposal));
+	if (existingEntityId !== null) {
+		// Never turn a previously user-owned or differently sourced entity into a
+		// source-owned row merely because new evidence mentions it.
+		db.prepare(
+			`UPDATE entities
+			 SET proposal_id = ?, proposal_evidence = ?, updated_at = datetime('now')
+			 WHERE id = ? AND agent_id = ?`,
+		).run(proposal.id, proposalEvidence, entityId, agentId);
+	} else {
+		db.prepare(
+			`UPDATE entities
+			 SET proposal_id = ?, proposal_evidence = ?, source_id = ?, source_kind = ?,
+			     source_path = ?, source_root = ?, updated_at = datetime('now')
+			 WHERE id = ? AND agent_id = ?`,
+		).run(
+			proposal.id,
+			proposalEvidence,
+			proposal.source_id,
+			proposal.source_kind,
+			proposal.source_path,
+			proposal.source_root,
+			entityId,
+			agentId,
+		);
+	}
+	return { entityId, entity: name };
+}
+
+/**
+ * Policies are durable constraints on the entity they govern. Keeping them as
+ * claims preserves their evidence, versioning, and existing constraint guards
+ * rather than introducing a second policy store.
+ */
+function applyCreatePolicy(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const target = readPayloadSelector(payload, "target_entity", "entity", "entity_id");
+	const policyKind = readString(payload, "kind");
+	const content = readString(payload, "content");
+	if (target === null) throw new OntologyProposalError("payload.target_entity is required", 400);
+	if (policyKind === null) throw new OntologyProposalError("payload.kind is required", 400);
+	if (content === null) throw new OntologyProposalError("payload.content is required", 400);
+	const result = applyAddClaimValue(db, agentId, proposal, {
+		entity: target,
+		entity_type: readString(payload, "entity_type") ?? undefined,
+		aspect: "policy",
+		group_key: "policy",
+		claim_key: canonicalKey(policyKind) ?? policyKind,
+		value: content,
+		kind: "constraint",
+		confidence: readNumber(payload, "confidence") ?? proposal.confidence,
+		importance: readNumber(payload, "importance") ?? proposal.confidence,
+	});
+	return { ...result, policyKind, policy: content };
+}
+
+function applyCreateActionType(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const name = readString(payload, "name") ?? readString(payload, "action_type");
+	if (name === null) throw new OntologyProposalError("payload.name is required", 400);
+	return applyCreateEntity(db, agentId, proposal, { name, entity_type: "action" });
+}
+
+function applyCreateInterface(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const name = readString(payload, "name") ?? readString(payload, "interface");
+	if (name === null) throw new OntologyProposalError("payload.name is required", 400);
+	return applyCreateEntity(db, agentId, proposal, { name, entity_type: "interface" });
+}
+
+/** Attach a concrete entity to an interface using the existing typed edge. */
+function applyAttachInterface(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const entity = readPayloadSelector(payload, "entity", "source_entity", "target_entity");
+	const interfaceName = readPayloadSelector(payload, "interface", "interface_name", "target_interface");
+	if (entity === null) throw new OntologyProposalError("payload.entity is required", 400);
+	if (interfaceName === null) throw new OntologyProposalError("payload.interface is required", 400);
+	return applyCreateLink(db, agentId, proposal, {
+		source_entity: entity,
+		target_entity: interfaceName,
+		target_type: "interface",
+		link_type: "implements",
+		reason: readString(payload, "reason") ?? proposal.rationale,
+		strength: readNumber(payload, "strength") ?? 0.5,
+		confidence: readNumber(payload, "confidence") ?? proposal.confidence,
+	});
+}
+
+/**
+ * An active claim value is a first-class semantic memory, not merely a graph
+ * decoration. The attribute and its retrievable memory intentionally share a
+ * durable id and are created in the same ontology apply transaction.
+ */
+function materializeAttributeMemoryInTx(
+	db: WriteDb,
+	input: {
+		readonly attributeId: string;
+		readonly entityId: string;
+		readonly agentId: string;
+		readonly content: string;
+		readonly normalizedContent: string;
+		readonly importance: number;
+		readonly proposal: ProposalRow;
+	},
+): string {
+	const existing = db.prepare("SELECT id FROM memories WHERE id = ?").get(input.attributeId) as
+		| { id: string }
+		| undefined;
+	if (!existing) {
+		txIngestEnvelope(db, {
+			id: input.attributeId,
+			content: input.content,
+			normalizedContent: input.normalizedContent,
+			// Claim identity, rather than raw text, is the deduplication unit: two
+			// independently maintained claims may legitimately render the same text.
+			contentHash: `semantic-attribute:${input.attributeId}`,
+			who: "dreaming",
+			why: input.proposal.rationale || null,
+			project: null,
+			importance: input.importance,
+			type: "semantic",
+			tags: "semantic,attribute",
+			pinned: 0,
+			extractionStatus: "completed",
+			updatedBy: "dreaming",
+			memoryKind: "derived",
+			sourceType: "dreaming",
+			sourceId: input.proposal.source_id,
+			sourcePath: input.proposal.source_path,
+			agentId: input.agentId,
+			visibility: "global",
+			createdAt: now(),
+		});
+	}
+	db.prepare("UPDATE entity_attributes SET memory_id = ? WHERE id = ? AND agent_id = ?").run(
+		input.attributeId,
+		input.attributeId,
+		input.agentId,
+	);
+	db.prepare("INSERT OR IGNORE INTO memory_entity_mentions (memory_id, entity_id) VALUES (?, ?)").run(
+		input.attributeId,
+		input.entityId,
+	);
 	db.prepare(
 		`UPDATE entities
-		 SET proposal_id = ?, proposal_evidence = ?, updated_at = datetime('now')
+		 SET mentions = (SELECT COUNT(*) FROM memory_entity_mentions WHERE entity_id = entities.id)
 		 WHERE id = ? AND agent_id = ?`,
-	).run(proposal.id, JSON.stringify(proposalAuditEvidence(proposal)), entityId, agentId);
-	return { entityId, entity: name };
+	).run(input.entityId, input.agentId);
+	linkDerivedMemorySourcesInTx(db, {
+		derivedMemoryId: input.attributeId,
+		agentId: input.agentId,
+		sources: derivedMemorySourcesForProposal(input.proposal),
+		createdAt: now(),
+	});
+	return input.attributeId;
+}
+
+function supersedeAttributeMemoryInTx(
+	db: WriteDb,
+	input: { readonly memoryId: string | null; readonly replacementMemoryId: string; readonly proposal: ProposalRow },
+): void {
+	if (!input.memoryId || input.memoryId === input.replacementMemoryId) return;
+	const result = txSupersedeMemory(db, {
+		memoryId: input.memoryId,
+		supersededBy: input.replacementMemoryId,
+		reason: input.proposal.rationale || null,
+		changedBy: "dreaming",
+		changedAt: now(),
+	});
+	if (result.status !== "superseded" && result.status !== "already_superseded") {
+		throw new OntologyProposalError(`Unable to supersede semantic memory: ${result.status}`, 409);
+	}
+	markDerivedMemoriesStaleForSourceInTx(db, {
+		sourceKind: "ontology_claim",
+		sourceId: input.memoryId,
+		agentId: input.proposal.agent_id,
+		staleAt: now(),
+	});
+}
+
+function archiveAttributeMemoryInTx(db: WriteDb, memoryId: string | null, proposal: ProposalRow, force: boolean): void {
+	if (!memoryId) return;
+	const result = txForgetMemory(db, {
+		memoryId,
+		reason: proposal.rationale || "Semantic claim archived",
+		changedBy: "dreaming",
+		changedAt: now(),
+		force,
+	});
+	if (result.status === "pinned_requires_force") {
+		throw new OntologyProposalError("Refusing to archive a claim whose semantic memory is pinned", 409);
+	}
+	if (result.status !== "deleted" && result.status !== "already_deleted") {
+		throw new OntologyProposalError(`Unable to archive semantic memory: ${result.status}`, 409);
+	}
+	markDerivedMemoriesStaleForSourceInTx(db, {
+		sourceKind: "ontology_claim",
+		sourceId: memoryId,
+		agentId: proposal.agent_id,
+		staleAt: now(),
+	});
+}
+
+function restoreAttributeMemoryInTx(db: WriteDb, memoryId: string | null, proposal: ProposalRow): void {
+	if (!memoryId) return;
+	const memory = db.prepare("SELECT id, content, is_deleted, superseded_by FROM memories WHERE id = ?").get(memoryId) as
+		| { id: string; content: string; is_deleted: number; superseded_by: string | null }
+		| undefined;
+	if (!memory) return;
+	if (memory.is_deleted === 0 && memory.superseded_by === null) return;
+	const changedAt = now();
+	db.prepare(
+		`UPDATE memories
+		 SET is_deleted = 0, deleted_at = NULL, superseded_by = NULL, superseded_at = NULL,
+		     superseded_reason = NULL, updated_at = ?, updated_by = 'dreaming', version = version + 1
+		 WHERE id = ?`,
+	).run(changedAt, memoryId);
+	insertHistoryEvent(db, {
+		memoryId,
+		event: "recovered",
+		oldContent: null,
+		newContent: memory.content,
+		changedBy: "dreaming",
+		reason: proposal.rationale || "Semantic claim restored",
+		metadata: JSON.stringify({ previousSupersededBy: memory.superseded_by }),
+		createdAt: changedAt,
+	});
 }
 
 function applyAddClaimValue(
@@ -686,7 +1003,16 @@ function applyAddClaimValue(
 		proposal.id,
 		JSON.stringify(proposalEvidence),
 	);
-	return { entityId, aspectId, attributeId: id, deduped: false };
+	const memoryId = materializeAttributeMemoryInTx(db, {
+		attributeId: id,
+		entityId,
+		agentId,
+		content: value,
+		normalizedContent: normalized,
+		importance,
+		proposal,
+	});
+	return { entityId, aspectId, attributeId: id, memoryId, deduped: false };
 }
 
 function applySetClaimValue(
@@ -710,7 +1036,7 @@ function applySetClaimValue(
 	const kind = normalizeAttributeKind(readString(payload, "kind"));
 	const slot = db
 		.prepare(
-			`SELECT id, content, normalized_content, version, version_root_id, kind, status
+			`SELECT id, memory_id, content, normalized_content, version, version_root_id, kind, status
 			 FROM entity_attributes
 			 WHERE aspect_id = ?
 			   AND agent_id = ?
@@ -721,6 +1047,7 @@ function applySetClaimValue(
 		)
 		.all(aspectId, agentId, kind, groupKey, claimKey) as Array<{
 		id: string;
+		memory_id: string | null;
 		content: string;
 		normalized_content: string;
 		version: number | null;
@@ -781,6 +1108,15 @@ function applySetClaimValue(
 		proposal.id,
 		JSON.stringify(proposalAuditEvidence(proposal)),
 	);
+	const memoryId = materializeAttributeMemoryInTx(db, {
+		attributeId: id,
+		entityId,
+		agentId,
+		content: value,
+		normalizedContent: normalized,
+		importance,
+		proposal,
+	});
 
 	if (active.length > 0) {
 		db.prepare(
@@ -794,12 +1130,16 @@ function applySetClaimValue(
 			   AND status = 'active'
 			   AND id != ?`,
 		).run(id, agentId, aspectId, kind, groupKey, claimKey, id);
+		for (const prior of active) {
+			supersedeAttributeMemoryInTx(db, { memoryId: prior.memory_id, replacementMemoryId: memoryId, proposal });
+		}
 	}
 
 	return {
 		entityId,
 		aspectId,
 		attributeId: id,
+		memoryId,
 		version,
 		versionRootId: rootId,
 		previousAttributeId: previous?.id ?? null,
@@ -844,8 +1184,11 @@ function applySupersedeClaimValue(
 	filters.push("COALESCE(group_key, 'general') = ?");
 	args.push(groupKey);
 
-	const rows = db.prepare(`SELECT id FROM entity_attributes WHERE ${filters.join(" AND ")}`).all(...args) as Array<{
+	const rows = db
+		.prepare(`SELECT id, memory_id FROM entity_attributes WHERE ${filters.join(" AND ")}`)
+		.all(...args) as Array<{
 		id: string;
+		memory_id: string | null;
 	}>;
 	if (rows.length === 0) throw new OntologyProposalError("No active claim values matched supersession payload", 400);
 
@@ -869,13 +1212,34 @@ function applySupersedeClaimValue(
 		replacementId = typeof replacement.attributeId === "string" ? replacement.attributeId : null;
 	}
 
-	const supersededBy = replacementId ?? readString(payload, "superseded_by");
+	const requestedReplacementId = readString(payload, "superseded_by");
+	const supersededBy = replacementId ?? requestedReplacementId;
+	const replacementMemoryId =
+		replacementId ??
+		(requestedReplacementId === null
+			? null
+			: (() => {
+					const target = db
+						.prepare("SELECT id, memory_id FROM entity_attributes WHERE id = ? AND agent_id = ?")
+						.get(requestedReplacementId, agentId) as { id: string; memory_id: string | null } | undefined;
+					if (!target?.memory_id) {
+						throw new OntologyProposalError("payload.superseded_by must reference a semantic claim memory", 400);
+					}
+					return target.memory_id;
+				})());
 	const ids = rows.map((row) => row.id);
 	db.prepare(
 		`UPDATE entity_attributes
 		 SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
 		 WHERE agent_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
 	).run(supersededBy, agentId, ...ids);
+	if (replacementMemoryId === null) {
+		for (const row of rows) archiveAttributeMemoryInTx(db, row.memory_id, proposal, false);
+	} else {
+		for (const row of rows) {
+			supersedeAttributeMemoryInTx(db, { memoryId: row.memory_id, replacementMemoryId, proposal });
+		}
+	}
 
 	return { supersededAttributeIds: ids, replacementAttributeId: replacementId };
 }
@@ -988,6 +1352,16 @@ function applyArchiveEntity(
 	if (pinned?.pinned === 1 && !truthy(payload.force)) {
 		throw new OntologyProposalError("Refusing to archive pinned entity without force", 409);
 	}
+	const attributeMemories = db
+		.prepare(
+			`SELECT attr.memory_id
+			 FROM entity_attributes attr
+			 JOIN entity_aspects asp ON asp.id = attr.aspect_id AND asp.agent_id = attr.agent_id
+			 WHERE asp.entity_id = ? AND attr.agent_id = ? AND attr.status = 'active'`,
+		)
+		.all(entity.id, agentId) as Array<{ memory_id: string | null }>;
+	for (const attribute of attributeMemories)
+		archiveAttributeMemoryInTx(db, attribute.memory_id, proposal, truthy(payload.force));
 	db.prepare(
 		`UPDATE entities
 		 SET status = 'archived', archived_at = datetime('now'), archived_by = ?,
@@ -1070,6 +1444,21 @@ function applyArchiveAspect(
 	if (aspectSelector === null) throw new OntologyProposalError("payload.selector is required", 400);
 	const entity = resolveEntityStrict(db, agentId, entitySelector);
 	const aspect = resolveAspectStrict(db, agentId, entity.id, aspectSelector);
+	const constraint = db
+		.prepare(
+			`SELECT 1 FROM entity_attributes
+			 WHERE aspect_id = ? AND agent_id = ? AND kind = 'constraint' AND status = 'active'
+			 LIMIT 1`,
+		)
+		.get(aspect.id, agentId);
+	if (constraint && !truthy(payload.force)) {
+		throw new OntologyProposalError("Refusing to archive aspect with active constraint attributes without force", 409);
+	}
+	const attributeMemories = db
+		.prepare("SELECT memory_id FROM entity_attributes WHERE aspect_id = ? AND agent_id = ? AND status = 'active'")
+		.all(aspect.id, agentId) as Array<{ memory_id: string | null }>;
+	for (const attribute of attributeMemories)
+		archiveAttributeMemoryInTx(db, attribute.memory_id, proposal, truthy(payload.force));
 	db.prepare(
 		`UPDATE entity_aspects
 		 SET status = 'archived', archived_at = datetime('now'), archived_by = ?,
@@ -1102,12 +1491,13 @@ function applyArchiveClaimValue(
 	const attributeId = readString(payload, "attribute_id");
 	if (attributeId === null) throw new OntologyProposalError("payload.attribute_id is required", 400);
 	const row = db
-		.prepare("SELECT id, kind FROM entity_attributes WHERE id = ? AND agent_id = ?")
-		.get(attributeId, agentId) as { id: string; kind: string } | undefined;
+		.prepare("SELECT id, kind, memory_id FROM entity_attributes WHERE id = ? AND agent_id = ?")
+		.get(attributeId, agentId) as { id: string; kind: string; memory_id: string | null } | undefined;
 	if (!row) throw new OntologyProposalError("Attribute not found", 404);
 	if (row.kind === "constraint" && !truthy(payload.force)) {
 		throw new OntologyProposalError("Refusing to archive constraint attribute without force", 409);
 	}
+	archiveAttributeMemoryInTx(db, row.memory_id, proposal, truthy(payload.force));
 	db.prepare(
 		`UPDATE entity_attributes
 		 SET status = 'deleted', archived_at = datetime('now'), archived_by = ?,
@@ -1134,13 +1524,14 @@ function applyRestoreClaimVersion(
 	if (attributeId === null) throw new OntologyProposalError("payload.attribute_id is required", 400);
 	const row = db
 		.prepare(
-			`SELECT id, aspect_id, kind, group_key, claim_key, version_root_id
+			`SELECT id, memory_id, aspect_id, kind, group_key, claim_key, version_root_id
 			 FROM entity_attributes
 			 WHERE id = ? AND agent_id = ?`,
 		)
 		.get(attributeId, agentId) as
 		| {
 				id: string;
+				memory_id: string | null;
 				aspect_id: string;
 				kind: string;
 				group_key: string | null;
@@ -1149,6 +1540,20 @@ function applyRestoreClaimVersion(
 		  }
 		| undefined;
 	if (!row) throw new OntologyProposalError("Attribute not found", 404);
+	const activeMemories = db
+		.prepare(
+			`SELECT memory_id FROM entity_attributes
+			 WHERE agent_id = ? AND aspect_id = ? AND kind = ?
+			   AND COALESCE(group_key, 'general') = COALESCE(?, 'general')
+			   AND claim_key = ? AND status = 'active' AND id != ?`,
+		)
+		.all(agentId, row.aspect_id, row.kind, row.group_key, row.claim_key, attributeId) as Array<{
+		memory_id: string | null;
+	}>;
+	restoreAttributeMemoryInTx(db, row.memory_id, proposal);
+	for (const active of activeMemories) {
+		supersedeAttributeMemoryInTx(db, { memoryId: active.memory_id, replacementMemoryId: attributeId, proposal });
+	}
 	db.prepare(
 		`UPDATE entity_attributes
 		 SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
@@ -1332,14 +1737,20 @@ function applyCreateLink(
 	proposal: ProposalRow,
 	payload: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> {
-	const source = readString(payload, "source_entity");
-	const target = readString(payload, "target_entity");
+	const sourceIdSelector = readString(payload, "source_entity_id");
+	const targetIdSelector = readString(payload, "target_entity_id");
+	const source = sourceIdSelector ?? readString(payload, "source_entity");
+	const target = targetIdSelector ?? readString(payload, "target_entity");
 	if (source === null) throw new OntologyProposalError("payload.source_entity is required", 400);
 	if (target === null) throw new OntologyProposalError("payload.target_entity is required", 400);
 
 	const dependencyType = normalizeDependencyType(readString(payload, "link_type"));
-	const sourceId = resolveOrCreateEntity(db, agentId, source, normalizeEntityType(readString(payload, "source_type")));
-	const targetId = resolveOrCreateEntity(db, agentId, target, normalizeEntityType(readString(payload, "target_type")));
+	const sourceId = sourceIdSelector
+		? resolveEntityStrict(db, agentId, source).id
+		: resolveOrCreateEntity(db, agentId, source, normalizeEntityType(readString(payload, "source_type")));
+	const targetId = targetIdSelector
+		? resolveEntityStrict(db, agentId, target).id
+		: resolveOrCreateEntity(db, agentId, target, normalizeEntityType(readString(payload, "target_type")));
 	const reason = requireDependencyReason(dependencyType, readString(payload, "reason") ?? proposal.rationale);
 	const strength = clamp01(readNumber(payload, "strength") ?? 0.5);
 	const confidence = clamp01(readNumber(payload, "confidence") ?? proposal.confidence);
@@ -1489,6 +1900,104 @@ function applyArchiveLink(
 	return { dependencyId: id, archived: true };
 }
 
+function applyPinEntity(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const selector = readPayloadSelector(payload, "selector", "entity", "entity_id", "id");
+	if (selector === null) throw new OntologyProposalError("payload.entity is required", 400);
+	const entity = resolveEntityStrict(db, agentId, selector);
+	const ts = now();
+	db.prepare(
+		`UPDATE entities
+		 SET pinned = 1, pinned_at = ?, proposal_id = ?, proposal_evidence = ?, updated_at = ?
+		 WHERE id = ? AND agent_id = ?`,
+	).run(ts, proposal.id, JSON.stringify(proposalAuditEvidence(proposal)), ts, entity.id, agentId);
+	return { entityId: entity.id, pinned: true, pinnedAt: ts };
+}
+
+function applyUnpinEntity(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const selector = readPayloadSelector(payload, "selector", "entity", "entity_id", "id");
+	if (selector === null) throw new OntologyProposalError("payload.entity is required", 400);
+	const entity = resolveEntityStrict(db, agentId, selector);
+	db.prepare(
+		`UPDATE entities
+		 SET pinned = 0, pinned_at = NULL, proposal_id = ?, proposal_evidence = ?, updated_at = datetime('now')
+		 WHERE id = ? AND agent_id = ?`,
+	).run(proposal.id, JSON.stringify(proposalAuditEvidence(proposal)), entity.id, agentId);
+	return { entityId: entity.id, pinned: false };
+}
+
+function applyCreateEntityAlias(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const entitySelector = readPayloadSelector(payload, "entity", "entity_id");
+	const alias = readString(payload, "alias");
+	if (entitySelector === null) throw new OntologyProposalError("payload.entity is required", 400);
+	if (alias === null) throw new OntologyProposalError("payload.alias is required", 400);
+	const canonicalAlias = canonical(alias);
+	if (canonicalAlias.length === 0) throw new OntologyProposalError("payload.alias is required", 400);
+	const entity = resolveEntityStrict(db, agentId, entitySelector);
+	const confidence = clamp01(readNumber(payload, "confidence") ?? 1);
+	const source = readString(payload, "source");
+	// What kind of handle this is (email vs GitHub login vs phone) and which
+	// organization the person was acting for when they used it. Both are columns
+	// on the table (migration 106) rather than an encoding inside `source`,
+	// because identity resolution, trail queries and the identity surface all
+	// read them and would otherwise each re-parse one string.
+	const aliasKind = readString(payload, "alias_kind");
+	const orgEntityId = readString(payload, "org_entity_id");
+	if (orgEntityId !== null) {
+		// `org_entity_id` declares REFERENCES entities(id), but nothing in this
+		// repo turns foreign keys on, so the constraint is decorative. Check it
+		// here or a typo writes an org pointer that resolves to nothing forever.
+		const org = db
+			.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status, 'active') = 'active'")
+			.get(orgEntityId, agentId) as { id: string } | undefined;
+		if (!org) throw new OntologyProposalError("Organization entity not found", 404);
+	}
+	const id = crypto.randomUUID();
+	db.prepare(
+		`INSERT INTO entity_aliases
+		 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, org_entity_id, confidence, source,
+		  status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+	).run(id, entity.id, agentId, alias.trim(), canonicalAlias, aliasKind, orgEntityId, confidence, source ?? null);
+	return { aliasId: id, entityId: entity.id, alias: alias.trim(), canonicalAlias };
+}
+
+function applyArchiveEntityAlias(
+	db: WriteDb,
+	agentId: string,
+	proposal: ProposalRow,
+	payload: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+	const entitySelector = readPayloadSelector(payload, "entity", "entity_id");
+	const aliasId = readString(payload, "alias_id");
+	if (entitySelector === null) throw new OntologyProposalError("payload.entity is required", 400);
+	if (aliasId === null) throw new OntologyProposalError("payload.alias_id is required", 400);
+	const entity = resolveEntityStrict(db, agentId, entitySelector);
+	const result = db
+		.prepare(
+			`UPDATE entity_aliases
+			 SET status = 'archived', updated_at = datetime('now')
+			 WHERE id = ? AND entity_id = ? AND agent_id = ? AND status = 'active'`,
+		)
+		.run(aliasId, entity.id, agentId);
+	if (result.changes === 0) throw new OntologyProposalError("Alias not found", 404);
+	return { aliasId, entityId: entity.id, archived: true };
+}
+
 function applyOperation(db: WriteDb, proposal: ProposalRow, actor: string): Readonly<Record<string, unknown>> {
 	const payload = parseJsonRecord(proposal.payload);
 	if (proposal.operation === "create_entity") return applyCreateEntity(db, proposal.agent_id, proposal, payload);
@@ -1513,6 +2022,17 @@ function applyOperation(db: WriteDb, proposal: ProposalRow, actor: string): Read
 	if (proposal.operation === "create_link") return applyCreateLink(db, proposal.agent_id, proposal, payload);
 	if (proposal.operation === "update_link") return applyUpdateLink(db, proposal.agent_id, proposal, payload);
 	if (proposal.operation === "archive_link") return applyArchiveLink(db, proposal.agent_id, proposal, payload, actor);
+	if (proposal.operation === "create_policy") return applyCreatePolicy(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "create_action_type")
+		return applyCreateActionType(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "create_interface") return applyCreateInterface(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "attach_interface") return applyAttachInterface(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "pin_entity") return applyPinEntity(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "unpin_entity") return applyUnpinEntity(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "create_entity_alias")
+		return applyCreateEntityAlias(db, proposal.agent_id, proposal, payload);
+	if (proposal.operation === "archive_entity_alias")
+		return applyArchiveEntityAlias(db, proposal.agent_id, proposal, payload);
 	throw new OntologyProposalError(`Unsupported ontology proposal operation: ${proposal.operation}`, 400);
 }
 
@@ -2335,8 +2855,14 @@ function duplicateMergeCandidates(
 	db: ReadDb,
 	agentId: string,
 	limit: number,
+	canonicalName?: string,
+	includePending = false,
 ): readonly DuplicateEntityMergeCandidate[] {
+	// Suppression covers rejected as well as pending: scanning on `pending` alone
+	// meant rejecting a candidate cleared its key and regenerated the identical
+	// proposal on the next run, forever.
 	const existing = suppressedDuplicateRepairKeys(db, agentId);
+	const scopedCanonicalName = canonicalName?.trim() || null;
 	const rows = db
 		.prepare(
 			`SELECT id, name, canonical_name, entity_type,
@@ -2346,9 +2872,10 @@ function duplicateMergeCandidates(
 			 FROM entities
 			 WHERE agent_id = ?
 			   AND COALESCE(status, 'active') = 'active'
+			   AND (? IS NULL OR canonical_name = ? OR canonical_name IS NULL)
 			 ORDER BY COALESCE(canonical_name, LOWER(name)), COALESCE(mentions, 0) DESC, updated_at DESC`,
 		)
-		.all(agentId) as DuplicateEntityRow[];
+		.all(agentId, scopedCanonicalName, scopedCanonicalName) as DuplicateEntityRow[];
 	const groups = new Map<string, DuplicateEntityRow[]>();
 	for (const row of rows) {
 		const key = canonical(row.canonical_name ?? row.name);
@@ -2364,7 +2891,13 @@ function duplicateMergeCandidates(
 	const localParts = bridgeAddressLocalParts(db, agentId, clustered);
 
 	return [...collapseSharedGroups(clustered).entries()]
-		.filter(([key, group]) => key.length > 0 && group.length > 1 && !existing.has(key))
+		.filter(
+			([key, group]) =>
+				key.length > 0 &&
+				group.length > 1 &&
+				(scopedCanonicalName === null || key === scopedCanonicalName) &&
+				(includePending || !existing.has(key)),
+		)
 		.map(([key, group]) => {
 			const ordered = [...group].sort(compareDuplicateTargets);
 			const target = ordered[0];
@@ -2466,6 +2999,21 @@ function duplicateMergeCandidates(
 		})
 		.sort((a, b) => b.sources.length - a.sources.length || a.canonicalName.localeCompare(b.canonicalName))
 		.slice(0, limit);
+}
+
+/**
+ * Read-only exact-canonical duplicate lookup for a named entity. The same
+ * merge candidate planner powers the repair/proposal path, so guard callers
+ * see the target, sources, and safety warnings that the daemon would use.
+ */
+export function findDuplicateEntityMerges(
+	accessor: DbAccessor,
+	params: FindDuplicateEntityMergesParams,
+): readonly DuplicateEntityMergeCandidate[] {
+	const agentId = requireText(params.agentId, "agentId");
+	const canonicalName = canonical(params.name);
+	if (canonicalName.length === 0) return [];
+	return accessor.withReadDb((db) => duplicateMergeCandidates(db, agentId, 1, canonicalName, true));
 }
 
 export function proposeDuplicateEntityMerges(
@@ -2673,6 +3221,9 @@ export function applyOntologyOperationBatch(
 			dryRun: false,
 			proposed: true,
 		};
+	}
+	if (!params.dryRun) {
+		return accessor.withWriteTx((db) => applyOntologyOperationBatchInTx(db, params));
 	}
 
 	let preview: ApplyOntologyOperationBatchResult | null = null;

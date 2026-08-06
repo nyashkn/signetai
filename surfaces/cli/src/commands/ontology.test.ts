@@ -912,7 +912,7 @@ describe("registerOntologyCommands", () => {
 							enabled: true,
 							shadowMode: false,
 							mutationsFrozen: false,
-							graph: { enabled: true, extractionWritesEnabled: false },
+							graph: { enabled: true },
 							traversal: { enabled: true },
 							autonomous: { enabled: true, frozen: false, allowUpdateDelete: false },
 						},

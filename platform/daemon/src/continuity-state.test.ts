@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, test } from "bun:test";
 import {
 	initContinuity,
 	recordPrompt,
-	recordRemember,
 	shouldCheckpoint,
 	consumeState,
 	clearContinuity,
@@ -60,16 +59,6 @@ describe("continuity-state", () => {
 		expect(state?.pendingQueries[19]).toBe("query-24");
 	});
 
-	test("recordRemember stores content capped at 10", () => {
-		initContinuity("s4", "test", "/tmp/p");
-		for (let i = 0; i < 12; i++) {
-			recordRemember("s4", `remember-${i}`);
-		}
-		const state = getState("s4");
-		expect(state?.pendingRemembers.length).toBe(10);
-		expect(state?.pendingRemembers[0]).toBe("remember-2");
-	});
-
 	test("shouldCheckpoint returns true after promptInterval", () => {
 		initContinuity("s5", "test", "/tmp/p");
 		for (let i = 0; i < 4; i++) {
@@ -95,18 +84,15 @@ describe("continuity-state", () => {
 	test("consumeState returns snapshot and resets accumulators", () => {
 		initContinuity("s7", "test", "/tmp/p");
 		recordPrompt("s7", "q1", undefined);
-		recordRemember("s7", "r1");
 
 		const snap = consumeState("s7");
 		expect(snap?.promptCount).toBe(1);
 		expect(snap?.pendingQueries).toEqual(["q1"]);
-		expect(snap?.pendingRemembers).toEqual(["r1"]);
 
 		// State should be reset
 		const after = getState("s7");
 		expect(after?.promptCount).toBe(0);
 		expect(after?.pendingQueries).toEqual([]);
-		expect(after?.pendingRemembers).toEqual([]);
 	});
 
 	test("clearContinuity removes session state", () => {
@@ -119,7 +105,6 @@ describe("continuity-state", () => {
 		// None of these should throw
 		recordPrompt(undefined, "test", undefined);
 		recordPrompt("", "test", undefined);
-		recordRemember(undefined, "test");
 		expect(shouldCheckpoint(undefined, defaultConfig)).toBe(false);
 		expect(consumeState(undefined)).toBeUndefined();
 		clearContinuity(undefined);

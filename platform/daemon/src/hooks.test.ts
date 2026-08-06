@@ -23,12 +23,12 @@ const lineage = await import("./memory-lineage");
 const transcriptAudit = await import("./transcript-audit");
 const { deriveSessionEndFallbackId } = await import("./session-end-recovery");
 const { buildSignetSystemPrompt } = await import("./session-start-format");
+const { resetTokenizerStats, tokenizerStats } = await import("./pipeline/tokenizer");
 const {
 	handleSessionStart,
 	handlePreCompaction,
 	handleSynthesisRequest,
 	handleUserPromptSubmit,
-	handleRemember,
 	handleSessionEnd,
 	handleCheckpointExtract,
 	effectiveScore,
@@ -691,6 +691,27 @@ describe("handleSessionStart", () => {
 	test.serial("inject starts with memory status line", async () => {
 		const result = await handleSessionStart({ harness: "test" });
 		expect(result.inject).toContain("[memory active");
+	});
+
+	test.serial("keeps tokenizer encodes off the event loop for a populated recall pool (#1114)", async () => {
+		createMemoryDb(
+			Array.from({ length: 60 }, (_, i) => ({
+				content: `Memory ${i}: ${"the quick brown fox jumps over the lazy dog and keeps running. ".repeat(6)}`,
+				importance: 0.5 + (i % 5) / 10,
+			})),
+		);
+		resetTokenizerStats();
+
+		const result = await handleSessionStart({ harness: "claude-code" });
+
+		// Session-start used to run one full BPE encode per recall candidate (up
+		// to ~50) plus re-encodes of the reserved sections and the final inject —
+		// 55+ synchronous encodes blocking the daemon's event loop for seconds.
+		// Budget decisions now use the cheap char estimate; only the exact
+		// truncation path may encode, so the count must stay small and must not
+		// scale with the recall pool.
+		expect(tokenizerStats.encodeCalls).toBeLessThanOrEqual(3);
+		expect(result.inject.length).toBeGreaterThan(0);
 	});
 
 	test.serial("deduplicates resumed Codex session-start after normal session-end", async () => {
@@ -1542,81 +1563,6 @@ describe("handleUserPromptSubmit", () => {
 });
 
 // ============================================================================
-// handleRemember
-// ============================================================================
-
-describe("handleRemember", () => {
-	test.serial("saves valid content", async () => {
-		createMemoryDb([]);
-
-		const result = handleRemember({
-			harness: "test",
-			content: "User prefers dark mode",
-		});
-
-		expect(result.saved).toBe(true);
-		expect(result.id).toBeTruthy();
-		expect(result.id.length).toBeGreaterThan(0);
-	});
-
-	test.serial("handles critical: prefix", async () => {
-		createMemoryDb([]);
-
-		const result = handleRemember({
-			harness: "test",
-			content: "critical: Never deploy on Fridays",
-		});
-
-		expect(result.saved).toBe(true);
-
-		// Verify pinned in DB
-		const db = openTestDb();
-		const row = db.prepare("SELECT * FROM memories WHERE id = ?").get(result.id) as {
-			pinned: number;
-			importance: number;
-			content: string;
-		};
-		db.close();
-
-		expect(row.pinned).toBe(1);
-		expect(row.importance).toBe(1.0);
-		expect(row.content).toBe("Never deploy on Fridays");
-	});
-
-	test.serial("extracts [tags] from content", async () => {
-		createMemoryDb([]);
-
-		const result = handleRemember({
-			harness: "test",
-			content: "[auth,security]: Use JWT for API tokens",
-		});
-
-		expect(result.saved).toBe(true);
-
-		const db = openTestDb();
-		const row = db.prepare("SELECT * FROM memories WHERE id = ?").get(result.id) as {
-			tags: string;
-			content: string;
-		};
-		db.close();
-
-		expect(row.tags).toBe("auth,security");
-		expect(row.content).toBe("Use JWT for API tokens");
-	});
-
-	test.serial("fails gracefully on missing database", async () => {
-		// Don't create db
-		const result = handleRemember({
-			harness: "test",
-			content: "This should fail gracefully",
-		});
-
-		expect(result.saved).toBe(false);
-		expect(result.id).toBe("");
-	});
-});
-
-// ============================================================================
 // handleSessionEnd
 // ============================================================================
 
@@ -1822,6 +1768,50 @@ describe("handleSessionEnd", () => {
 				)
 				.get(sessionKey) as { count: number };
 			expect(summaries.count).toBe(2);
+		} finally {
+			db.close();
+		}
+	});
+
+	test.serial("preserves an imported session's capture time across canonical episodic records", async () => {
+		createMemoryDb([]);
+		const capturedAt = "2023-05-20T10:20:00.000Z";
+		const transcript = "User: retain the original session date for temporal reasoning.\nAssistant: the transcript remains immutable evidence.\n".repeat(
+			8,
+		);
+
+		const result = await handleSessionEnd({
+			harness: "memorybench",
+			transcript,
+			sessionKey: "memorybench:case-1:session-1",
+			sessionId: "memorybench:case-1:session-1",
+			agentId: "memorybench",
+			cwd: "memorybench",
+			capturedAt,
+		});
+
+		expect(result.transcriptCaptureJobId).toBeString();
+		await flushSessionEndDeferredWork();
+
+		const db = openTestDb();
+		try {
+			const live = db
+				.prepare("SELECT created_at, updated_at FROM session_transcripts WHERE agent_id = ? AND session_key = ?")
+				.get("memorybench", "memorybench:case-1:session-1") as
+				| { created_at: string; updated_at: string }
+				| undefined;
+			const artifact = db
+				.prepare(
+					"SELECT captured_at FROM memory_artifacts WHERE agent_id = ? AND source_kind = 'transcript' LIMIT 1",
+				)
+				.get("memorybench") as { captured_at: string } | undefined;
+			const memoryCount = db.prepare("SELECT COUNT(*) AS count FROM memories WHERE agent_id = ?").get("memorybench") as {
+				count: number;
+			};
+
+			expect(live).toEqual({ created_at: capturedAt, updated_at: capturedAt });
+			expect(artifact?.captured_at).toBe(capturedAt);
+			expect(memoryCount.count).toBe(0);
 		} finally {
 			db.close();
 		}
@@ -2240,11 +2230,9 @@ memory:
 		expect(first).not.toBe(second);
 	});
 
-	test.serial("enqueues summary job when only dreaming is enabled (pipelineV2 disabled)", async () => {
+	test.serial("enqueues summary job when pipelineV2 is enabled", async () => {
 		writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: true
 `);
 		createMemoryDb([]);
@@ -2263,11 +2251,9 @@ memory:
 		expect(typeof result.jobId).toBe("string");
 	});
 
-	test.serial("skips enqueueing when neither pipelineV2 nor dreaming is enabled", async () => {
+	test.serial("skips enqueueing when pipelineV2 is disabled", async () => {
 		writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: false
 `);
 		createMemoryDb([]);
@@ -2709,14 +2695,32 @@ describe("memory-lineage", () => {
 			summary:
 				"Compacted the Signet rolling lineage session, preserved PR#390 context, and linked the durable compaction narrative back to the canonical manifest for later drill-down.",
 		});
+		const laterCompaction = await writeCompactionArtifact({
+			agentId: "default",
+			sessionId: "sess-compaction",
+			sessionKey: "sess-compaction",
+			project: "/tmp/signetai",
+			harness: "test",
+			capturedAt: "2026-03-28T22:41:00.000Z",
+			startedAt: null,
+			endedAt: "2026-03-28T22:41:00.000Z",
+			summary: "A later compaction is a separate immutable event and must not replace the earlier lineage artifact.",
+		});
 
 		const transcriptAfter = readFileSync(join(TEST_DIR, transcript.transcriptPath), "utf8");
 		const manifest = readFileSync(join(TEST_DIR, compaction.manifestPath), "utf8");
 
 		expect(transcriptAfter).toBe(transcriptBefore);
+		expect(laterCompaction.compactionPath).not.toBe(compaction.compactionPath);
+		expect(readFileSync(join(TEST_DIR, compaction.compactionPath), "utf8")).toContain(
+			"Compacted the Signet rolling lineage session",
+		);
+		expect(readFileSync(join(TEST_DIR, laterCompaction.compactionPath), "utf8")).toContain(
+			"later compaction is a separate immutable event",
+		);
 		expect(manifest).toContain('compaction_path: "memory/');
 		expect(manifest).toContain('kind: "manifest"');
-		expect(manifest).toContain("revision: 3");
+		expect(manifest).toContain("revision: 4");
 	});
 
 	test.serial("projection uses artifact frontmatter sentence and rejects low-signal frontmatter", async () => {
@@ -3544,11 +3548,9 @@ describe("handleCheckpointExtract", () => {
 		expect(result.queued).toBeUndefined();
 	});
 
-	test.serial("enqueues checkpoint when only dreaming is enabled", () => {
+	test.serial("enqueues checkpoint when pipelineV2 is enabled", () => {
 		writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: true
 `);
 		createMemoryDb([]);
@@ -3563,11 +3565,9 @@ describe("handleCheckpointExtract", () => {
 		expect(typeof result.jobId).toBe("string");
 	});
 
-	test.serial("skips checkpoint when neither pipelineV2 nor dreaming is enabled", () => {
+	test.serial("skips checkpoint when pipelineV2 is disabled", () => {
 		writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: false
 `);
 		createMemoryDb([]);
@@ -3589,12 +3589,10 @@ describe("handleCheckpointExtract", () => {
 
 describe("summary worker tick gate", () => {
 	test.serial(
-		"processes enqueued job when only dreaming is enabled",
+		"processes enqueued job when pipelineV2 is enabled",
 		async () => {
 			writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: true
 `);
 			createMemoryDb([]);
@@ -3631,12 +3629,10 @@ describe("summary worker tick gate", () => {
 	);
 
 	test.serial(
-		"leaves jobs unchanged when direct worker startup has no route check",
+		"leaves jobs unchanged when synthesis is unavailable",
 		async () => {
 			writeAgentYaml(`memory:
   pipelineV2:
-    enabled: false
-  dreaming:
     enabled: true
 `);
 			createMemoryDb([]);
@@ -3659,183 +3655,6 @@ describe("summary worker tick gate", () => {
 			};
 			db.close();
 			expect(job).toEqual({ status: "pending", attempts: 0 });
-		},
-		15_000,
-	);
-
-	test.serial(
-		"does not activate retained command config when pipeline V2 is disabled",
-		async () => {
-			const marker = join(TEST_DIR, "disabled-pipeline-command-ran");
-			writeAgentYaml(`memory:
-  pipelineV2:
-    enabled: false
-    allowRemoteProviders: true
-    extraction:
-      provider: command
-      command:
-        bin: node
-        args:
-          - -e
-          - "require('node:fs').writeFileSync('${marker}', 'unexpected')"
-    synthesis:
-      enabled: false
-      provider: none
-  dreaming:
-    enabled: true
-`);
-			createMemoryDb([]);
-			const enq = handleCheckpointExtract({
-				harness: "test",
-				sessionKey: "ckpt-worker-disabled-command",
-				transcript: "x".repeat(600),
-			});
-			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
-
-			const { startSummaryWorker } = await import("./pipeline/summary-worker");
-			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => false });
-			try {
-				await new Promise((resolve) => setTimeout(resolve, 5500));
-			} finally {
-				handle.stop();
-			}
-
-			const db = openTestDb();
-			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
-				status: string;
-				attempts: number;
-			};
-			db.close();
-			expect(existsSync(marker)).toBe(false);
-			expect(job).toEqual({ status: "pending", attempts: 0 });
-		},
-		15_000,
-	);
-
-	test.serial(
-		"uses synthesis instead of retained command config when pipeline V2 is disabled",
-		async () => {
-			const marker = join(TEST_DIR, "disabled-pipeline-available-command-ran");
-			writeAgentYaml(`memory:
-  pipelineV2:
-    enabled: false
-    allowRemoteProviders: true
-    extraction:
-      provider: command
-      command:
-        bin: node
-        args:
-          - -e
-          - "require('node:fs').writeFileSync('${marker}', 'unexpected')"
-  dreaming:
-    enabled: true
-`);
-			createMemoryDb([]);
-			const schemaDb = openTestDb();
-			schemaDb.exec("ALTER TABLE summary_jobs ADD COLUMN error TEXT");
-			schemaDb.close();
-			const enq = handleCheckpointExtract({
-				harness: "test",
-				sessionKey: "ckpt-worker-disabled-command-with-synthesis",
-				transcript: "x".repeat(600),
-			});
-			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
-
-			let resolverCalls = 0;
-			let generateCalls = 0;
-			const { initInferenceProviderResolver, closeInferenceProviderResolver } = await import("./llm");
-			initInferenceProviderResolver(() => {
-				resolverCalls += 1;
-				return {
-					name: "test-synthesis",
-					async available() {
-						return true;
-					},
-					async generate() {
-						generateCalls += 1;
-						throw new Error("expected synthesis attempt");
-					},
-				};
-			});
-			const { startSummaryWorker } = await import("./pipeline/summary-worker");
-			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => true });
-			try {
-				await new Promise((resolve) => setTimeout(resolve, 5500));
-			} finally {
-				handle.stop();
-				closeInferenceProviderResolver();
-			}
-
-			const db = openTestDb();
-			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
-				status: string;
-				attempts: number;
-			};
-			db.close();
-			expect(existsSync(marker)).toBe(false);
-			expect(resolverCalls).toBe(1);
-			expect(generateCalls).toBe(1);
-			expect(job).toEqual({ status: "pending", attempts: 1 });
-		},
-		15_000,
-	);
-
-	test.serial(
-		"completes command-only extraction without resolving synthesis",
-		async () => {
-			const marker = join(TEST_DIR, "command-only-ran");
-			writeAgentYaml(`memory:
-  pipelineV2:
-    enabled: true
-    allowRemoteProviders: true
-    significance:
-      enabled: false
-    extraction:
-      provider: command
-      command:
-        bin: node
-        args:
-          - -e
-          - "require('node:fs').writeFileSync('${marker}', 'ok')"
-    synthesis:
-      enabled: false
-      provider: none
-`);
-			createMemoryDb([]);
-			const schemaDb = openTestDb();
-			schemaDb.exec("ALTER TABLE summary_jobs ADD COLUMN result TEXT");
-			schemaDb.close();
-			const enq = handleCheckpointExtract({
-				harness: "test",
-				sessionKey: "ckpt-worker-command-only",
-				transcript: "x".repeat(600),
-			});
-			if (!enq.jobId) throw new Error("expected checkpoint enqueue to return a job id");
-
-			let resolverCalls = 0;
-			const { initInferenceProviderResolver, closeInferenceProviderResolver } = await import("./llm");
-			initInferenceProviderResolver(() => {
-				resolverCalls += 1;
-				throw new Error("synthesis resolver must not be called");
-			});
-			const { startSummaryWorker } = await import("./pipeline/summary-worker");
-			const handle = startSummaryWorker(getDbAccessor(), { isSynthesisAvailable: async () => false });
-			try {
-				await new Promise((resolve) => setTimeout(resolve, 5500));
-			} finally {
-				handle.stop();
-				closeInferenceProviderResolver();
-			}
-
-			const db = openTestDb();
-			const job = db.prepare("SELECT status, attempts FROM summary_jobs WHERE id = ?").get(enq.jobId) as {
-				status: string;
-				attempts: number;
-			};
-			db.close();
-			expect(existsSync(marker)).toBe(true);
-			expect(resolverCalls).toBe(0);
-			expect(job).toEqual({ status: "completed", attempts: 1 });
 		},
 		15_000,
 	);

@@ -1,5 +1,13 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { doRestart, doStart, doStop, requestPipelinePauseApi, showLogs, summarizePipelineToggle } from "./daemon.js";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+	doRestart,
+	doStart,
+	doStop,
+	launchDashboard,
+	requestPipelinePauseApi,
+	showLogs,
+	summarizePipelineToggle,
+} from "./daemon.js";
 
 describe("requestPipelinePauseApi", () => {
 	it("uses the live daemon pause endpoint when available", async () => {
@@ -87,6 +95,21 @@ function makeDeps(overrides?: Partial<Parameters<typeof doRestart>[1]>): Paramet
 }
 
 describe("daemon lifecycle recovery", () => {
+	it("lets an already-running daemon reconcile its installation owner", async () => {
+		let started = false;
+		const deps = makeDeps({
+			isDaemonRunning: async () => true,
+			startDaemon: async () => {
+				started = true;
+				return true;
+			},
+		});
+
+		await doStart({}, deps);
+
+		expect(started).toBe(true);
+	});
+
 	it("restart stops a stale daemon process even when health checks say stopped", async () => {
 		const calls: string[] = [];
 		const deps = makeDeps({
@@ -119,6 +142,43 @@ describe("daemon lifecycle recovery", () => {
 		await doStop({}, deps);
 
 		expect(stopped).toBe(true);
+	});
+
+	// Regression (#1074): under launchd KeepAlive the daemon respawns on exit,
+	// so "stop" must boot the job out even when the health endpoint says
+	// stopped — otherwise the reported stop is silently undone.
+	it("stop unloads the launchd keepalive when the daemon is unhealthy but launchd-managed", async () => {
+		let stopped = false;
+		const deps = makeDeps({
+			isDaemonRunning: async () => false,
+			hasDaemonProcess: async () => false,
+			isLaunchdDaemonLoaded: async () => true,
+			stopDaemon: async () => {
+				stopped = true;
+				return true;
+			},
+		});
+
+		await doStop({}, deps);
+
+		expect(stopped).toBe(true);
+	});
+
+	it("stop reports not running when nothing is alive and no launchd agent is loaded", async () => {
+		let stopped = false;
+		const deps = makeDeps({
+			isDaemonRunning: async () => false,
+			hasDaemonProcess: async () => false,
+			isLaunchdDaemonLoaded: async () => false,
+			stopDaemon: async () => {
+				stopped = true;
+				return true;
+			},
+		});
+
+		await doStop({}, deps);
+
+		expect(stopped).toBe(false);
 	});
 
 	it("restart runs signet sync when the user accepts the sync prompt", async () => {
@@ -318,5 +378,176 @@ describe("daemon exit codes on failure", () => {
 
 		await expect(doRestart({ sync: false }, deps)).rejects.toThrow("EXIT_1");
 		expect(exitSpy).toHaveBeenCalledWith(1);
+	});
+});
+
+describe("launchDashboard", () => {
+	let exitSpy: ReturnType<typeof spyOn>;
+	let lines: string[];
+
+	beforeEach(() => {
+		lines = [];
+		spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			lines.push(args.join(" "));
+		});
+		spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+			lines.push(args.join(" "));
+		});
+	});
+
+	afterEach(() => {
+		exitSpy?.mockRestore();
+		spyOn(console, "log").mockRestore();
+		spyOn(console, "error").mockRestore();
+	});
+
+	function dashboardDeps(overrides?: {
+		getDaemonStatus?: () => Promise<{
+			running: boolean;
+			pid: number | null;
+			uptime: number | null;
+			version: string | null;
+			host: string | null;
+			bindHost: string | null;
+			networkMode: string | null;
+		}>;
+		startDaemon?: () => Promise<boolean>;
+	}) {
+		return {
+			agentsDir: "/tmp/.agents",
+			defaultPort: 3850,
+			extractPathOption: () => null,
+			getDaemonStatus: async () => ({
+				running: true,
+				pid: 3046866,
+				uptime: 54,
+				version: "0.156.4",
+				host: "127.0.0.1",
+				bindHost: "127.0.0.1",
+				networkMode: "local",
+			}),
+			hasDaemonProcess: async () => false,
+			isDaemonRunning: async () => false,
+			normalizeAgentPath: (pathValue: string) => pathValue,
+			signetLogo: () => "signet",
+			sleep: async () => {},
+			startDaemon: async () => true,
+			stopDaemon: async () => true,
+			openUrl: async (url: string) => {
+				lines.push(`OPEN:${url}`);
+			},
+			...overrides,
+		};
+	}
+
+	// Regression (#1045): a healthy daemon must not be reported as stopped,
+	// started, or restarted by the dashboard command.
+	it("does not claim a start when the daemon is already running", async () => {
+		let startCalls = 0;
+		const deps = dashboardDeps({
+			startDaemon: async () => {
+				startCalls += 1;
+				return true;
+			},
+		});
+		await launchDashboard({}, deps);
+		expect(startCalls).toBe(0);
+		expect(lines.join("\n")).not.toContain("Daemon is not running");
+		expect(lines.join("\n")).not.toContain("Daemon started");
+		expect(lines.join("\n")).toContain("http://localhost:3850");
+	});
+
+	// Regression (#1045): the health probe can transiently false-negative while
+	// the daemon process is alive (same PID). startDaemon short-circuits to
+	// "already running", so the command must not claim it started the daemon.
+	it("does not claim a start when the probe false-negatives but the daemon process was alive the whole time", async () => {
+		let statusCalls = 0;
+		const deps = dashboardDeps({
+			getDaemonStatus: async () => {
+				statusCalls += 1;
+				if (statusCalls === 1) {
+					// Transient false negative: health probe failed, but the
+					// daemon process is alive and its PID is known.
+					return {
+						running: false,
+						pid: 3046866,
+						uptime: null,
+						version: null,
+						host: null,
+						bindHost: null,
+						networkMode: null,
+					};
+				}
+				// startDaemon short-circuited ("already-current"); the same
+				// process is still running moments later.
+				return {
+					running: true,
+					pid: 3046866,
+					uptime: 58,
+					version: "0.156.4",
+					host: "127.0.0.1",
+					bindHost: "127.0.0.1",
+					networkMode: "local",
+				};
+			},
+		});
+		await launchDashboard({}, deps);
+		expect(lines.join("\n")).toContain("Daemon is not running. Starting...");
+		expect(lines.join("\n")).not.toContain("Daemon started");
+		expect(lines.join("\n")).toContain("Daemon is running");
+		expect(statusCalls).toBe(2);
+	});
+
+	it("claims a start only when the daemon was genuinely absent before", async () => {
+		let statusCalls = 0;
+		const deps = dashboardDeps({
+			getDaemonStatus: async () => {
+				statusCalls += 1;
+				if (statusCalls === 1) {
+					return {
+						running: false,
+						pid: null,
+						uptime: null,
+						version: null,
+						host: null,
+						bindHost: null,
+						networkMode: null,
+					};
+				}
+				return {
+					running: true,
+					pid: 4242,
+					uptime: 1,
+					version: "0.156.4",
+					host: "127.0.0.1",
+					bindHost: "127.0.0.1",
+					networkMode: "local",
+				};
+			},
+		});
+		await launchDashboard({}, deps);
+		expect(lines.join("\n")).toContain("Daemon is not running. Starting...");
+		expect(lines.join("\n")).toContain("Daemon started");
+		expect(lines.join("\n")).toContain("OPEN:http://localhost:3850");
+	});
+
+	it("exits non-zero when the daemon still cannot be reached after start", async () => {
+		exitSpy = spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("EXIT_1");
+		});
+		const deps = dashboardDeps({
+			getDaemonStatus: async () => ({
+				running: false,
+				pid: null,
+				uptime: null,
+				version: null,
+				host: null,
+				bindHost: null,
+				networkMode: null,
+			}),
+		});
+		await expect(launchDashboard({}, deps)).rejects.toThrow("EXIT_1");
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(lines.join("\n")).toContain("Failed to start daemon");
 	});
 });

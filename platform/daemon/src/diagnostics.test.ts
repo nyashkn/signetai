@@ -81,7 +81,15 @@ function insertMemory(
 		);
 }
 
-function insertJob(raw: Database, id: string, memId: string, status: string, createdAt = now, updatedAt = now): void {
+function insertJob(
+	raw: Database,
+	id: string,
+	memId: string,
+	status: string,
+	createdAt = now,
+	updatedAt = now,
+	jobType = "document_ingest",
+): void {
 	raw
 		.prepare(
 			`INSERT INTO memory_jobs
@@ -89,7 +97,7 @@ function insertJob(raw: Database, id: string, memId: string, status: string, cre
 				 created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
-		.run(id, memId, "extract", status, 0, 3, createdAt, updatedAt);
+		.run(id, memId, jobType, status, 0, 3, createdAt, updatedAt);
 }
 
 function insertHistory(raw: Database, id: string, memId: string, event: string, createdAt = now): void {
@@ -154,6 +162,17 @@ describe("getQueueHealth", () => {
 		const result = getQueueHealth(asReadDb(db));
 		expect(result.deadRate).toBe(0);
 		expect(result.status).toBe("healthy");
+	});
+
+	test("excludes retired extraction jobs from live queue health", () => {
+		insertMemory(db, "mem-retired-extract");
+		insertJob(db, "job-retired-extract", "mem-retired-extract", "dead", now, now, "extract");
+
+		const result = getQueueHealth(asReadDb(db));
+		expect(result.depth).toBe(0);
+		expect(result.deadRate).toBe(0);
+		expect(result.status).toBe("healthy");
+		expect(getQueueDiagnosticsSnapshot(asReadDb(db), { fresh: true }).memory.dead).toBe(0);
 	});
 });
 
@@ -263,10 +282,9 @@ describe("getIndexHealth", () => {
 
 describe("getGraphHealth", () => {
 	test("small or empty graph state stays healthy while it is still inconclusive", () => {
-		const result = getGraphHealth(asReadDb(db), { graphExtractionWritesEnabled: false });
+		const result = getGraphHealth(asReadDb(db));
 		expect(result.status).toBe("healthy");
 		expect(result.score).toBe(1);
-		expect(result.extractionWritesEnabled).toBe(false);
 		expect(result.entityCount).toBe(0);
 		expect(result.quality).toBe("unknown");
 	});
@@ -276,9 +294,8 @@ describe("getGraphHealth", () => {
 			insertMemory(db, `mem-graph-flatline-${i}`);
 		}
 
-		const result = getGraphHealth(asReadDb(db), { graphExtractionWritesEnabled: false });
+		const result = getGraphHealth(asReadDb(db));
 		expect(result.entityCount).toBe(0);
-		expect(result.extractionWritesEnabled).toBe(false);
 		expect(result.status).toBe("degraded");
 		expect(result.score).toBeLessThan(0.8);
 	});
@@ -288,20 +305,19 @@ describe("getGraphHealth", () => {
 			insertMemory(db, `mem-graph-disabled-${i}`);
 		}
 
-		const result = getGraphHealth(asReadDb(db), { graphEnabled: false, graphExtractionWritesEnabled: false });
+		const result = getGraphHealth(asReadDb(db), { graphEnabled: false });
 		expect(result.entityCount).toBe(0);
-		expect(result.extractionWritesEnabled).toBe(false);
 		expect(result.status).toBe("healthy");
 		expect(result.score).toBe(1);
 	});
 
 	test("primary traversal with zero edges degrades graph health", () => {
-		const primary = getGraphHealth(asReadDb(db), { traversalPrimary: true, graphExtractionWritesEnabled: false });
+		const primary = getGraphHealth(asReadDb(db), { traversalPrimary: true });
 		expect(primary.edgeCount).toBe(0);
 		expect(primary.status).toBe("degraded");
 		expect(primary.score).toBeLessThan(1);
 
-		const secondary = getGraphHealth(asReadDb(db), { traversalPrimary: false, graphExtractionWritesEnabled: false });
+		const secondary = getGraphHealth(asReadDb(db), { traversalPrimary: false });
 		expect(secondary.edgeCount).toBe(0);
 		expect(secondary.status).toBe("healthy");
 		expect(secondary.score).toBe(1);
@@ -313,12 +329,9 @@ describe("getGraphHealth", () => {
 		}
 
 		const tracker = createProviderTracker();
-		const report = getDiagnostics(asReadDb(db), tracker, undefined, undefined, {
-			graphExtractionWritesEnabled: false,
-		});
+		const report = getDiagnostics(asReadDb(db), tracker);
 
 		expect(report.graph.status).toBe("degraded");
-		expect(report.graph.extractionWritesEnabled).toBe(false);
 		expect(report.composite.status).toBe("degraded");
 	});
 });

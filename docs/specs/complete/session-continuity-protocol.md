@@ -136,7 +136,6 @@ interface ContinuityState {
     promptCount: number;
     lastCheckpointAt: number;
     pendingQueries: string[];      // capped at 20
-    pendingRemembers: string[];    // capped at 10
     startedAt: number;
 }
 
@@ -146,7 +145,6 @@ const state = new Map<string, ContinuityState>();
 Exports:
 - `initContinuity(sessionKey, harness, project)` — called from session-start
 - `recordPrompt(sessionKey, queryTerms)` — increment count, push query
-- `recordRemember(sessionKey, content)` — push to pendingRemembers
 - `shouldCheckpoint(sessionKey, config)` — check prompt count + time threshold
 - `consumeState(sessionKey)` — returns accumulated state, resets pending arrays
 - `clearContinuity(sessionKey)` — called from session-end
@@ -235,7 +233,7 @@ state + runtime-provided sessionContext.
 - Check `shouldCheckpoint(sessionKey)` — if true, queue a buffered write
 
 **handleRemember** (modify):
-- After memory saved: call `recordRemember(sessionKey, content)`
+- Removed: no live caller; memory saves no longer tracked for checkpoints.
 
 **handleSessionEnd** (modify):
 - Flush any pending checkpoint writes

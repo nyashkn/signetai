@@ -9,6 +9,10 @@
 > owns the `/health/live` and `/health/ready` probes plus CLI liveness
 > labeling. This plan deliberately does **not** touch those routes or
 > labels; it adds its own surfaces for queue visibility and repair.
+>
+> **Superseded in part:** #946 retired the extraction queue slice described
+> below. Current queue diagnostics cover only live memory and summary work;
+> see `docs/PIPELINE.md` for the current response shape.
 
 ## Problem
 

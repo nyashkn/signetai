@@ -28,7 +28,11 @@ import {
 	type UninstallResult,
 	atomicWriteJson,
 	atomicWriteText,
+	buildSignetRuntimeEnv,
+	isJsonObject,
 	isSignetGeneratedFile,
+	readTrimmedEnv,
+	resolveRemoteDaemonUrl,
 	resolveSignetMcpCommand,
 } from "@signet/connector-base";
 import { parseLenientJsonObject } from "@signet/connector-base/lenient-json";
@@ -38,7 +42,6 @@ import {
 	expandHome,
 	hasValidIdentity,
 	loadIdentityMode,
-	resolveSignetDaemonUrl,
 } from "@signet/core";
 import { applyEdits, modify } from "jsonc-parser/lib/esm/main.js";
 import { PLUGIN_BUNDLE } from "./plugin-bundle.js";
@@ -51,28 +54,8 @@ type JsonObject = Record<string, unknown>;
 
 const API_KEY_FILE_NAME = ".signet-api-key";
 
-function isJsonObject(value: unknown): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readTrimmedEnv(name: string): string | undefined {
-	const value = process.env[name];
-	return typeof value === "string" && value.trim().length > 0 ? value.trim().replace(/[\r\n]+/g, "") : undefined;
-}
-
-function signetRuntimeEnv(): Record<string, string> {
-	const env: Record<string, string> = {};
-	const daemonUrl = configuredDaemonUrl();
-	const apiKey = readTrimmedEnv("SIGNET_API_KEY") ?? readTrimmedEnv("SIGNET_TOKEN");
-	const agentId = readTrimmedEnv("SIGNET_AGENT_ID");
-	if (daemonUrl) env.SIGNET_DAEMON_URL = daemonUrl;
-	if (apiKey) env.SIGNET_API_KEY = apiKey;
-	if (agentId) env.SIGNET_AGENT_ID = agentId;
-	return env;
-}
-
 function buildPluginBundle(apiKeyFilePath?: string): string {
-	const env = signetRuntimeEnv();
+	const env = buildSignetRuntimeEnv();
 	if (apiKeyFilePath) Reflect.deleteProperty(env, "SIGNET_API_KEY");
 	const assignments = Object.entries(env).map(
 		([key, value]) => `process.env[${JSON.stringify(key)}] = ${JSON.stringify(value)};`,
@@ -107,9 +90,7 @@ function writeConfigValue(configPath: string, path: readonly (string | number)[]
 }
 
 function configuredDaemonUrl(): string | undefined {
-	const daemonUrl = readTrimmedEnv("SIGNET_DAEMON_URL");
-	if (!daemonUrl) return undefined;
-	return resolveSignetDaemonUrl({ env: { SIGNET_DAEMON_URL: daemonUrl } });
+	return resolveRemoteDaemonUrl() ?? undefined;
 }
 
 // ============================================================================
@@ -454,7 +435,7 @@ export class OpenCodeConnector extends BaseConnector {
 
 		const resolvedMcp = resolveSignetMcpCommand();
 		const mcpCommand = [resolvedMcp.command, ...resolvedMcp.args];
-		const environment = signetRuntimeEnv();
+		const environment = buildSignetRuntimeEnv();
 		if (apiKeyFile) environment.SIGNET_API_KEY = `{file:${apiKeyFile}}`;
 		writeConfigValue(configPath, ["mcp", "signet"], {
 			type: "local",

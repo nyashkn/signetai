@@ -133,9 +133,12 @@ context, and no-hit handling. The tool still reads from
 
 ### memory_store
 
-Save a new memory to the database. Tags, structured graph payloads, hints,
-and transcripts are forwarded as request metadata instead of being folded into
-memory text. This keeps MCP aligned with CLI and harness remember behavior.
+Save a new memory as immutable episodic evidence. The memory is immediately
+retrievable via recall/search/list/get but is not written directly into the
+knowledge graph — Dreaming derives semantic state from episodic evidence. A
+`structured` payload, if supplied, is retained alongside the content as evidence
+but is not applied to the graph from this tool. Tags, hints, and transcripts are
+forwarded as request metadata.
 
 **Parameters:**
 
@@ -148,7 +151,7 @@ memory text. This keeps MCP aligned with CLI and harness remember behavior.
 | `pinned` | boolean | no | Pin this memory so it bypasses decay |
 | `hints` | string[] | no | Prospective recall hints and alternate phrasings |
 | `transcript` | string | no | Raw source text to preserve alongside the extracted memory |
-| `structured` | object | no | Pre-extracted entity/aspect/attribute graph data for structured remembering |
+| `structured` | object | no | Pre-extracted entity/aspect/attribute data retained as episodic evidence alongside the content; not applied directly to the knowledge graph from this tool |
 
 **Returns:** The created memory object with its assigned ID.
 

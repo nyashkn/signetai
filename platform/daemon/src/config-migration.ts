@@ -232,8 +232,7 @@ function writeAtomic(path: string, contents: string): void {
 // v4/v5: retire legacy pipelineV2 routing fields -> inference registry
 // ---------------------------------------------------------------------------
 // Compiles memory.pipelineV2.extraction/synthesis routing fields into the
-// inference.accounts/targets/workloads registry (mirroring the daemon's
-// compileLegacyRoutingConfig), then NULLS the legacy routing keys (provider,
+// inference.accounts/targets/workloads registry, then NULLS the legacy routing keys (provider,
 // model, endpoint, fallbackProvider, command) so the registry is the single
 // source of truth. Tuning fields (timeout, maxTokens, enabled) are preserved.
 //
@@ -449,5 +448,60 @@ export function migrateSessionSynthesisRoute(agentsDir: string): void {
 	writeAtomic(path, doc.toString());
 	if (mutations.length > 0) {
 		logger.info("config-migration", "Removed obsolete session synthesis route", { mutations, file: path });
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v7: remove retired extraction-worker write gate settings
+// ---------------------------------------------------------------------------
+// The write gate and durability settings belonged exclusively to the retired
+// extraction worker. Remove them before config validation so existing agent
+// files reach the canonical Dreaming-only configuration without a startup
+// failure. This is intentionally a one-time rewrite, not a runtime fallback.
+const RETIRED_EXTRACTION_WRITER_KEYS = [
+	"writeGate",
+	"durability",
+	"writeGateEnabled",
+	"writeGateThreshold",
+	"writeGateContinuityDiscount",
+] as const;
+
+export function migrateRetiredExtractionWriterConfig(agentsDir: string): void {
+	const path = findConfigPath(agentsDir);
+	if (!path) return;
+
+	let text: string;
+	try {
+		text = readFileSync(path, "utf-8");
+	} catch {
+		return;
+	}
+
+	const vMatch = /^configVersion:\s*(\d+)/m.exec(text);
+	if (vMatch && Number(vMatch[1]) >= 7) return;
+
+	const doc = parseDocument(text);
+	if (doc.errors.length > 0) {
+		logger.warn("config-migration", "Skipping retired writer config migration: agent.yaml has parse errors", {
+			file: path,
+			errors: doc.errors.map((error) => error.message).slice(0, 3),
+		});
+		return;
+	}
+
+	const pipeline = doc.getIn(["memory", "pipelineV2"], true);
+	const mutations: string[] = [];
+	if (isMap(pipeline)) {
+		for (const key of RETIRED_EXTRACTION_WRITER_KEYS) {
+			if (!pipeline.has(key)) continue;
+			pipeline.delete(key);
+			mutations.push(`removed memory.pipelineV2.${key}`);
+		}
+	}
+
+	stampConfigVersion(doc, 7);
+	writeAtomic(path, doc.toString());
+	if (mutations.length > 0) {
+		logger.info("config-migration", "Removed retired extraction writer configuration", { mutations, file: path });
 	}
 }

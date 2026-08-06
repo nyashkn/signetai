@@ -235,7 +235,6 @@ would do before enabling writes.
 | `shadowMode` | Extract and propose, never write |
 | `mutationsFrozen` | Reads only; pipeline stays quiet |
 | `graph.enabled` | Enable graph reads, traversal, and recall boosting |
-| `graph.extractionWritesEnabled` | Let background extraction persist graph entity triples |
 | `autonomous.enabled` | Allow scheduled maintenance and repair |
 | `autonomous.frozen` | Hard stop on autonomous maintenance actions |
 | `hints.enabled` | Run prospective hint generation at write time |
@@ -299,12 +298,15 @@ and a `confidence`. `memory_entity_mentions` is a junction table
 linking memories to the entities they mention, with optional
 `mention_text` and `confidence` provenance fields.
 
-**Graph extraction**: when the extractor returns entity triples
-(source, relationship, target), `txPersistEntities` is called inside
-its own `withWriteTx`. Entities are upserted by canonical name;
-relations are upserted by the (source, target, type) triplet with
-mention counts incremented. Mention links are inserted into
-`memory_entity_mentions`.
+**Graph extraction**: semantic graph authorship flows through the audited
+ontology apply path. The retired `txPersistEntities` / inline LLM extraction
+chain (`extractFactsAndEntities`) was removed under the Dreaming cutover
+(#946); the only retained write closure is `txDecrementEntityMentions`, used
+by the retention worker to decrement mention counts and delete orphaned
+entities (plus dangling relations) after a memory purge. Entities and
+relations are still upserted by canonical name and (source, target, type)
+triplet respectively by the retained audited writers; mention links are
+stored in `memory_entity_mentions`.
 
 **Traversal-primary search** (`memory-search.ts`,
 `graph-traversal.ts`): when `traversal.primary` is enabled (the
@@ -571,7 +573,7 @@ Database Schema
 SQLite with WAL mode. Migrations are numbered sequentially under
 `platform/core/src/migrations/`. Each migration is idempotent — safe
 to re-run against an existing database. Schema version is tracked in
-`schema_migrations`. The latest migration is `078-api-keys.ts`.
+`schema_migrations`. The latest migration is `096-retire-legacy-ingestion.ts`.
 
 **schema_migrations**
 
@@ -970,7 +972,7 @@ All endpoints are served by the Hono server on port 3850.
 | `/api/embeddings/projection` | GET | recall | UMAP 2D/3D projection |
 | `/api/hooks/session-start` | POST | remember | Inject context into session |
 | `/api/hooks/user-prompt-submit` | POST | recall | Per-prompt entity context load |
-| `/api/hooks/session-end` | POST | remember | Extract session memories |
+| `/api/hooks/session-end` | POST | remember | Capture immutable session evidence |
 | `/api/hooks/remember` | POST | remember | Save a memory via hook |
 | `/api/hooks/recall` | POST | recall | Search via hook |
 | `/api/hooks/pre-compaction` | POST | remember | Pre-compaction instructions |
@@ -1078,9 +1080,9 @@ platform/daemon/src/
 
     pipeline/
         worker.ts             Extraction job worker
-        extraction.ts         LLM fact + entity extraction
+        extraction.ts         Shared JSON recovery/parsing helpers
         decision.ts           LLM shadow decision engine
-        graph-transactions.ts txPersistEntities, entity decrement
+        graph-transactions.ts entity decrement (retention purge)
         graph-search.ts       Query-time graph boost (entity resolution)
         document-worker.ts    Document ingest job worker
         retention-worker.ts   Purge worker (6-step ordered purge)

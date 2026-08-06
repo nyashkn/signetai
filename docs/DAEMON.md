@@ -106,14 +106,10 @@ worker runs its own loop and stops cleanly when the daemon shuts down.
 ### Pipeline Workers
 
 The pipeline lives at `platform/daemon/src/pipeline/` and is managed
-by `startPipeline()` / `stopPipeline()`. Four workers run in parallel:
-
-**Extraction worker** (`worker.ts`) polls the `memory_jobs` queue for
-pending extraction jobs. Each job runs the conversation through the
-configured extraction provider (default `llama-cpp` with model
-`qwen3:4b`), then passes the result to the decision stage which
-decides whether to write, update, or skip. The provider and decision
-stages run outside write locks to keep contention low.
+by `startPipeline()` / `stopPipeline()`. The standalone extraction
+worker (`worker.ts`) and its decision/escalation stages were retired
+under the Dreaming cutover (#946); Dreaming now owns semantic writes.
+The remaining workers run in parallel:
 
 **Document worker** (`document-worker.ts`) polls `memory_jobs` for
 `document_ingest` jobs. It fetches remote URLs if needed, chunks the
@@ -266,12 +262,6 @@ GET /health
   "shuttingDown": false,
   "updateAvailable": false,
   "pendingRestart": false,
-  "pipeline": {
-    "extractionRunning": true,
-    "extractionStalled": false,
-    "extractionPending": 0,
-    "extractionBackoffMs": 0
-  },
   "resources": { "...": "..." }
 }
 ```

@@ -1293,7 +1293,7 @@ specs:
       - "Entity graph density increases (fewer entities, more attributes per entity) after a dreaming pass"
       - "Duplicate and near-duplicate entities are merged automatically"
       - "Stale or junk attributes are pruned without manual intervention"
-      - "Users without large-model access fall back to the existing extraction pipeline with no degradation"
+      - "Dreaming uses the daemon workload resolver and scoped capability registry without a parallel extraction writer"
       - "Token spend per dreaming pass is bounded and configurable"
       - "Dreaming uses DREAMING.md as its special-session prompt file instead of loading that prompt during ordinary startup context"
       - "Dreaming passes run as full sessions with transcript capture and self-improvement loop (Phase 2)"

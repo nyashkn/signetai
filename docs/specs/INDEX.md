@@ -456,8 +456,9 @@ cannot suppress them. This is a hard retrieval invariant.
 
 ### Dreaming Memory Consolidation <-> Knowledge Architecture
 
-- Dreaming reads the full entity graph (entities, aspects, attributes,
-  dependencies) as input to reasoning passes.
+- Dreaming navigates the scoped entity graph through the daemon capability
+  registry rather than receiving a truncated graph snapshot. It searches
+  entities, claim siblings, links, provenance, and episodic evidence as needed.
 - Dreaming writes graph mutations through the same KA schema: creates,
   merges, deletes entities; updates/deletes aspects; supersedes/creates/
   deletes attributes; rewrites dependency edges during merges.
@@ -470,24 +471,20 @@ cannot suppress them. This is a hard retrieval invariant.
 
 ### Dreaming Memory Consolidation <-> Session Continuity
 
-- Dreaming token accumulation hooks into the summary worker: each
-  session summary's transcript token count feeds `dreaming_state`.
-- Phase 2 will make dreaming passes into real sessions (session-start,
-  transcript, session-end summary), creating a self-improvement loop
-  where dream pass N+1 can review dream pass N's decisions.
-- Until Phase 2, dreaming passes are standalone LLM calls with no
-  session continuity or memory of prior passes.
+- Dreaming selects immutable episodic evidence directly across memories,
+  artifacts, transcripts, summaries, and compactions with a scoped temporal
+  cursor. It does not depend on a summary-worker token counter.
+- Each pass retains its audited operation and capability-call trace locally;
+  later maintenance can inspect that history without rewriting evidence.
 
 ### Dreaming Memory Consolidation <-> Pipeline V2
 
-- Phase 1: dreaming and Pipeline V2 can run concurrently. SQLite write
-  serialization prevents data corruption but not logical inconsistency
-  (extraction may create entities between dreaming's read and write).
-- Phase 2 contract: when `dreaming.enabled: true`, Pipeline V2
-  extraction workers should be OFF. One knowledge graph writer at a
-  time. Summary workers and retention continue regardless.
-- Pipeline V2 remains the default for users without dreaming configured.
-  Dreaming is opt-in and requires a capable model provider.
+- Dreaming is the sole automatic semantic writer. The retired extraction,
+  decision, structural, promotion, supersession, and dependency-synthesis
+  workers do not run alongside it; summary, retention, and document workers
+  continue to preserve episodic evidence and lifecycle behavior.
+- The executor is selected through the daemon inference router and only reasons
+  over daemon-owned tool capabilities; it does not receive direct SQLite access.
 
 ### Multi-Agent <-> All Specs
 

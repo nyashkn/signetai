@@ -343,6 +343,15 @@ export class Orchestrator {
 
     if (phases.includes("indexing")) {
       await runIndexingPhase(provider, checkpoint, this.checkpointManager, targetQuestionIds)
+
+      // Provider-wide derivations (notably Dreaming) must run only after the
+      // indexing barrier has confirmed every source session is durably captured.
+      // Running this from the ingest phase races deferred transcript capture and
+      // lets a pass observe a partial corpus.
+      await provider.finalizeIngest?.({
+        runId: checkpoint.runId,
+        dataSourceRunId: checkpoint.dataSourceRunId,
+      })
     }
 
     if (phases.includes("search")) {

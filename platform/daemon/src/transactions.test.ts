@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { runMigrations } from "../../core/src/migrations";
 import type { WriteDb } from "./db-accessor";
 import { beginEmbeddingIndexBuild, ensureEmbeddingIndexState } from "./embedding-index-state";
-import { txApplyDecision, txForgetMemory, txIngestEnvelope, txModifyMemory, txRecoverMemory } from "./transactions";
+import { txForgetMemory, txIngestEnvelope, txModifyMemory, txRecoverMemory } from "./transactions";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -151,6 +151,39 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 		expect(history.event).toBe("updated");
 		expect(history.changed_by).toBe("operator");
 		expect(history.reason).toBe("manual correction");
+	});
+
+	it("keeps a materialized semantic claim on the ontology write path", () => {
+		insertMemory(db, {
+			id: "semantic-claim",
+			content: "Signet is a memory system.",
+			contentHash: "semantic-claim-hash",
+			type: "semantic",
+		});
+		db.prepare("UPDATE memories SET memory_kind = 'derived', source_type = 'dreaming' WHERE id = ?").run(
+			"semantic-claim",
+		);
+		db.prepare(
+			`INSERT INTO entity_attributes
+			 (id, memory_id, agent_id, kind, content, normalized_content, confidence, importance, status)
+			 VALUES ('semantic-claim', 'semantic-claim', 'default', 'fact', ?, ?, 0.9, 0.9, 'active')`,
+		).run("Signet is a memory system.", "signet is a memory system.");
+
+		const result = txModifyMemory(asWriteDb(db), {
+			memoryId: "semantic-claim",
+			patch: {
+				content: "Signet is a search engine.",
+				normalizedContent: "signet is a search engine.",
+				contentHash: "semantic-claim-rewrite",
+			},
+			reason: "manual correction",
+			changedBy: "operator",
+			changedAt: new Date().toISOString(),
+		});
+		expect(result.status).toBe("semantic_projection_content_immutable");
+		expect(db.prepare("SELECT content FROM memories WHERE id = ?").get("semantic-claim")).toEqual({
+			content: "Signet is a memory system.",
+		});
 	});
 
 	it("returns duplicate_content_hash when another active memory already has the hash", () => {
@@ -371,7 +404,7 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 		]);
 	});
 
-	it("removes aggregate provenance links when a linked memory is forgotten", () => {
+	it("stales dependents while retaining source lineage when a memory is forgotten", () => {
 		insertMemory(db, {
 			id: "mem-aggregate",
 			content: "Aggregate content",
@@ -395,9 +428,9 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 
 		const now = new Date().toISOString();
 		const link = db.prepare(
-			`INSERT INTO aggregate_memory_sources (
-				aggregate_memory_id, source_memory_id, agent_id, created_at
-			) VALUES (?, ?, 'default', ?)`,
+			`INSERT INTO derived_memory_sources (
+				derived_memory_id, source_kind, source_id, source_path, agent_id, created_at
+			) VALUES (?, 'memory', ?, NULL, 'default', ?)`,
 		);
 		link.run("mem-aggregate", "mem-source", now);
 		link.run("mem-other-aggregate", "mem-aggregate", now);
@@ -414,15 +447,19 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 		expect(result.status).toBe("deleted");
 		const linkedRows = db
 			.prepare(
-				`SELECT aggregate_memory_id, source_memory_id
-				 FROM aggregate_memory_sources
-				 WHERE aggregate_memory_id = ? OR source_memory_id = ?`,
+				`SELECT derived_memory_id, source_id
+				 FROM derived_memory_sources
+				 WHERE derived_memory_id = ? OR source_id = ?
+				 ORDER BY derived_memory_id, source_id`,
 			)
 			.all("mem-aggregate", "mem-aggregate");
-		expect(linkedRows).toEqual([]);
-
-		const remaining = db.prepare("SELECT COUNT(*) AS count FROM aggregate_memory_sources").get() as { count: number };
-		expect(remaining.count).toBe(1);
+		expect(linkedRows).toEqual([
+			{ derived_memory_id: "mem-aggregate", source_id: "mem-source" },
+			{ derived_memory_id: "mem-other-aggregate", source_id: "mem-aggregate" },
+		]);
+		expect(db.prepare("SELECT stale_at FROM memories WHERE id = ?").get("mem-other-aggregate")).toMatchObject({
+			stale_at: now,
+		});
 	});
 
 	it("recovers a soft-deleted memory within retention window", () => {
@@ -557,182 +594,6 @@ describe("transactions: txModifyMemory + txForgetMemory + txRecoverMemory", () =
 			.prepare("SELECT dimensions FROM embeddings WHERE source_type = 'memory' AND source_id = ?")
 			.get("mem-race") as { dimensions?: number } | undefined;
 		expect(row?.dimensions).toBe(768);
-	});
-});
-
-describe("transactions: txApplyDecision soft-delete behavior", () => {
-	let db: Database;
-
-	beforeEach(() => {
-		db = new Database(":memory:");
-		runMigrations(db as unknown as Parameters<typeof runMigrations>[0]);
-	});
-
-	afterEach(() => {
-		db.close();
-	});
-
-	it("soft-deletes instead of hard-deleting for delete action", () => {
-		insertMemory(db, {
-			id: "mem-del",
-			content: "Delete me",
-			contentHash: "hash-del",
-		});
-
-		const now = new Date().toISOString();
-		txApplyDecision(asWriteDb(db), {
-			action: "delete",
-			memoryId: "mem-del",
-			updatedBy: "pipeline-v2",
-			updatedAt: now,
-		});
-
-		const row = db
-			.prepare(
-				`SELECT is_deleted, deleted_at, version
-				 FROM memories WHERE id = ?`,
-			)
-			.get("mem-del") as {
-			is_deleted: number;
-			deleted_at: string | null;
-			version: number;
-		};
-		// Row still exists (soft-delete, not hard-delete)
-		expect(row).toBeTruthy();
-		expect(row.is_deleted).toBe(1);
-		expect(row.deleted_at).toBeTruthy();
-		expect(row.version).toBe(2);
-
-		// History event was recorded
-		const history = db
-			.prepare(
-				`SELECT event, changed_by
-				 FROM memory_history
-				 WHERE memory_id = ? AND event = 'deleted'`,
-			)
-			.get("mem-del") as { event: string; changed_by: string };
-		expect(history.event).toBe("deleted");
-		expect(history.changed_by).toBe("pipeline-v2");
-	});
-
-	it("skips delete for pinned memories (spec 27.2)", () => {
-		insertMemory(db, {
-			id: "mem-pinned-del",
-			content: "Pinned content",
-			contentHash: "hash-pinned-del",
-			pinned: 1,
-		});
-
-		const now = new Date().toISOString();
-		txApplyDecision(asWriteDb(db), {
-			action: "delete",
-			memoryId: "mem-pinned-del",
-			updatedBy: "pipeline-v2",
-			updatedAt: now,
-		});
-
-		const row = db.prepare("SELECT is_deleted FROM memories WHERE id = ?").get("mem-pinned-del") as {
-			is_deleted: number;
-		};
-		expect(row.is_deleted).toBe(0);
-	});
-
-	it("soft-deletes merge source and updates merge target", () => {
-		insertMemory(db, {
-			id: "mem-merge-src",
-			content: "Source content",
-			contentHash: "hash-merge-src",
-		});
-		insertMemory(db, {
-			id: "mem-merge-tgt",
-			content: "Target content",
-			contentHash: "hash-merge-tgt",
-		});
-
-		const now = new Date().toISOString();
-		txApplyDecision(asWriteDb(db), {
-			action: "merge",
-			memoryId: "mem-merge-src",
-			mergeTargetId: "mem-merge-tgt",
-			content: "Merged content",
-			updatedBy: "pipeline-v2",
-			updatedAt: now,
-		});
-
-		// Source is soft-deleted
-		const source = db
-			.prepare(
-				`SELECT is_deleted, deleted_at, version
-				 FROM memories WHERE id = ?`,
-			)
-			.get("mem-merge-src") as {
-			is_deleted: number;
-			deleted_at: string | null;
-			version: number;
-		};
-		expect(source.is_deleted).toBe(1);
-		expect(source.deleted_at).toBeTruthy();
-
-		// Target has merged content
-		const target = db.prepare("SELECT content, version FROM memories WHERE id = ?").get("mem-merge-tgt") as {
-			content: string;
-			version: number;
-		};
-		expect(target.content).toBe("Merged content");
-		expect(target.version).toBe(2);
-
-		// History events recorded for both
-		const sourceHistory = db
-			.prepare(
-				`SELECT event FROM memory_history
-				 WHERE memory_id = 'mem-merge-src' AND event = 'deleted'`,
-			)
-			.get() as { event: string } | undefined;
-		expect(sourceHistory?.event).toBe("deleted");
-
-		const targetHistory = db
-			.prepare(
-				`SELECT event FROM memory_history
-				 WHERE memory_id = 'mem-merge-tgt' AND event = 'merged'`,
-			)
-			.get() as { event: string } | undefined;
-		expect(targetHistory?.event).toBe("merged");
-	});
-
-	it("records history events with version bump for update action", () => {
-		insertMemory(db, {
-			id: "mem-upd",
-			content: "Old content",
-			contentHash: "hash-upd",
-		});
-
-		const now = new Date().toISOString();
-		txApplyDecision(asWriteDb(db), {
-			action: "update",
-			memoryId: "mem-upd",
-			content: "New content",
-			importance: 0.9,
-			updatedBy: "pipeline-v2",
-			updatedAt: now,
-		});
-
-		const row = db.prepare("SELECT content, importance, version FROM memories WHERE id = ?").get("mem-upd") as {
-			content: string;
-			importance: number;
-			version: number;
-		};
-		expect(row.content).toBe("New content");
-		expect(row.importance).toBe(0.9);
-		expect(row.version).toBe(2);
-
-		const history = db
-			.prepare(
-				`SELECT event, changed_by
-				 FROM memory_history
-				 WHERE memory_id = ? AND event = 'updated'`,
-			)
-			.get("mem-upd") as { event: string; changed_by: string };
-		expect(history.event).toBe("updated");
 	});
 });
 

@@ -103,8 +103,13 @@ export class SignetClientP2 {
 	 */
 	async sessionEnd(opts: {
 		readonly sessionKey: string;
-		readonly summary?: string;
+		readonly harness: string;
 		readonly project?: string;
+		readonly transcriptPath?: string;
+		readonly transcript?: string;
+		readonly sessionId?: string;
+		readonly agentId?: string;
+		readonly capturedAt?: string;
 	}): Promise<SessionEndResponse> {
 		return this.transport.post<SessionEndResponse>("/api/hooks/session-end", opts);
 	}
@@ -119,6 +124,7 @@ export class SignetClientP2 {
 		readonly transcript?: string;
 		readonly sessionId?: string;
 		readonly cwd?: string;
+		readonly capturedAt?: string;
 		readonly reason?: string;
 		readonly runtimePath?: string;
 	}): void {
@@ -646,14 +652,6 @@ export class SignetClientP2 {
 
 	/**
 	 * @example
-	 * const result = await client.reclassifyEntities();
-	 */
-	async reclassifyEntities(): Promise<RepairActionResponse> {
-		return this.transport.post<RepairActionResponse>("/api/repair/reclassify-entities", {});
-	}
-
-	/**
-	 * @example
 	 * const result = await client.pruneChunkGroups();
 	 */
 	async pruneChunkGroups(): Promise<RepairActionResponse> {
@@ -668,14 +666,6 @@ export class SignetClientP2 {
 		readonly minMentions?: number;
 	}): Promise<RepairActionResponse> {
 		return this.transport.post<RepairActionResponse>("/api/repair/prune-singleton-entities", opts ?? {});
-	}
-
-	/**
-	 * @example
-	 * const result = await client.structuralBackfill();
-	 */
-	async structuralBackfill(): Promise<RepairActionResponse> {
-		return this.transport.post<RepairActionResponse>("/api/repair/structural-backfill", {});
 	}
 
 	// --- Cross-Agent ---

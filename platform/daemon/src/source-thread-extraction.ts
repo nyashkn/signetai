@@ -20,7 +20,6 @@ import { createHash } from "node:crypto";
 import { normalizeAndHashContent } from "./content-normalization";
 import { type WriteDb, getDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
-import { enqueueExtractionJobInTx } from "./pipeline/extraction-queue";
 import { txIngestEnvelope } from "./transactions";
 
 // ---------------------------------------------------------------------------
@@ -380,7 +379,13 @@ export function upsertThreadMemory(db: WriteDb, input: UpsertThreadMemoryInput):
 
 export const SOURCE_THREAD_UPDATED_BY = "source-thread-bridge";
 
-/** Enqueue inside the same transaction — used where the caller owns the tx. */
-export function enqueueThreadExtractionInTx(db: WriteDb, memoryIds: readonly string[]): void {
-	for (const memoryId of memoryIds) enqueueExtractionJobInTx(db, memoryId);
-}
+/*
+ * There is no enqueue step any more, and that is the whole change.
+ *
+ * The bridge used to push each thread memory onto the extraction queue. Upstream
+ * retired `extractFactsAndEntities` and its queue entirely: semantic work now
+ * flows through Dreaming's audited apply, which *pulls* new memories via the
+ * per-agent evidence cursor (migration 093) rather than being handed a job. So
+ * writing the memory is the complete handoff — an enqueue call would have to
+ * invent a queue that no longer exists.
+ */

@@ -59,6 +59,7 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
     case "rag":
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
     case "signet":
+    case "signet-dreaming":
     case "signet-supermemory-parity":
       return { apiKey: config.openaiApiKey, baseUrl: config.signetBaseUrl }
     default:

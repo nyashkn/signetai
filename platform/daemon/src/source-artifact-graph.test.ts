@@ -2,9 +2,21 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DreamingConfig } from "@signet/core";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { indexSourceArtifactStructure, purgeSourceArtifactStructure } from "./source-artifact-graph";
 import { purgeSourceOwnedRows } from "./source-purge";
+import { txIngestEnvelope } from "./transactions";
+import { runDreamingAgentPass } from "./pipeline/dreaming";
+
+const DREAMING_CONFIG: DreamingConfig = {
+	tokenThreshold: 1,
+	maxInterval: 6 * 60 * 60 * 1_000,
+	maxInputTokens: 32_000,
+	maxOutputTokens: 1_000,
+	timeout: 30_000,
+	backfillOnFirstRun: true,
+};
 
 describe("source artifact graph structure", () => {
 	let dir = "";
@@ -170,5 +182,173 @@ describe("source artifact graph structure", () => {
 			).count,
 		}));
 		expect(counts).toEqual({ entities: 0, aspects: 0, attrs: 0 });
+	});
+
+	it("purges dreaming-derived claim values stamped with the source entry id", () => {
+		// A Dreaming-derived entity_attribute carries the configured Signet source
+		// entry id in source_id (the purge key), not the episodic node identity.
+		const db = getDbAccessor();
+		db.withWriteTx((write) => {
+			write
+				.prepare(
+					`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+					 VALUES ('derived-entity', 'Derived', 'derived', 'project', 'default', 0, datetime('now'), datetime('now'))`,
+				)
+				.run();
+			txIngestEnvelope(write, {
+				id: "derived-claim",
+				content: "dreaming-derived claim",
+				normalizedContent: "dreaming-derived claim",
+				contentHash: "semantic-attribute:derived-claim",
+				who: "dreaming",
+				why: "Derived semantic attribute",
+				project: null,
+				importance: 0.5,
+				type: "semantic",
+				tags: "semantic,attribute",
+				pinned: 0,
+				extractionStatus: "completed",
+				updatedBy: "dreaming",
+				memoryKind: null,
+				sourceType: "dreaming",
+				sourceId: "obsidian:signet",
+				sourcePath: "vault/derived.md",
+				agentId: "default",
+				visibility: "global",
+				createdAt: new Date().toISOString(),
+			});
+			write
+				.prepare(
+					`INSERT INTO entity_aspects (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+					 VALUES ('derived-aspect', 'derived-entity', 'default', 'facts', 'facts', 0.5, datetime('now'), datetime('now'))`,
+				)
+				.run();
+			write
+				.prepare(
+					`INSERT INTO entity_attributes
+					 (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance, status,
+					  group_key, claim_key, version, created_at, updated_at, source_id, source_root)
+					 VALUES ('derived-claim', 'derived-aspect', 'default', 'attribute', 'dreaming-derived claim', 'dreaming-derived claim',
+					  0.8, 0.5, 'active', 'general', 'target', 1, datetime('now'), datetime('now'), 'obsidian:signet', 'dreaming')`,
+				)
+				.run();
+			write.prepare("UPDATE entity_attributes SET memory_id = ? WHERE id = ?").run("derived-claim", "derived-claim");
+			write
+				.prepare(
+					`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+					 VALUES ('other-entity', 'Other', 'other', 'project', 'default', 0, datetime('now'), datetime('now'))`,
+				)
+				.run();
+			write
+				.prepare(
+					`INSERT INTO entity_aspects (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
+					 VALUES ('other-aspect', 'other-entity', 'default', 'facts', 'facts', 0.5, datetime('now'), datetime('now'))`,
+				)
+				.run();
+			write
+				.prepare(
+					`INSERT INTO entity_attributes
+					 (id, aspect_id, agent_id, kind, content, normalized_content, confidence, importance, status,
+					  group_key, claim_key, version, created_at, updated_at, source_id)
+					 VALUES ('other-claim', 'other-aspect', 'default', 'attribute', 'unrelated claim', 'unrelated claim',
+					  0.8, 0.5, 'active', 'general', 'target', 1, datetime('now'), datetime('now'), 'other:source')`,
+				)
+				.run();
+		});
+
+		const purged = purgeSourceOwnedRows({ agentId: "default", sourceId: "obsidian:signet" });
+		expect(purged).toBeGreaterThan(0);
+		const counts = getDbAccessor().withReadDb((read) => ({
+			derived: (
+				read.prepare("SELECT COUNT(*) AS count FROM entity_attributes WHERE id = ?").get("derived-claim") as {
+					count: number;
+				}
+			).count,
+			other: (
+				read.prepare("SELECT COUNT(*) AS count FROM entity_attributes WHERE id = ?").get("other-claim") as {
+					count: number;
+				}
+			).count,
+			semanticMemory: (
+				read.prepare("SELECT is_deleted FROM memories WHERE id = ?").get("derived-claim") as { is_deleted: number }
+			).is_deleted,
+		}));
+		expect(counts).toEqual({ derived: 0, other: 1, semanticMemory: 1 });
+	});
+
+	it("stamps source-backed Dreaming writes with the purge key end to end", async () => {
+		const quote = "Nightly drift detection protects the edge fleet.";
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memory_artifacts
+				 (agent_id, source_path, source_sha256, source_kind, source_id, source_node_id,
+				  session_id, session_token, captured_at, content, updated_at, is_deleted)
+				 VALUES ('default', 'sources/nightly.md', 'nightly-sha', 'source_obsidian_markdown',
+				  'obsidian:nightly', 'note-node-1', 'source-session', 'source-token',
+				  datetime('now'), ?, datetime('now'), 0)`,
+			).run(quote);
+		});
+
+		const result = await runDreamingAgentPass(
+			getDbAccessor(),
+			{
+				async run(input) {
+					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
+					if (!apply) throw new Error("Missing apply_ontology_ops");
+					await apply.execute(
+						"source-owned-call",
+						{
+							operations: [
+								{
+									operation: "create_entity",
+									payload: { name: "Nightly Drift Detection", entity_type: "workflow" },
+									reason: "The source names a durable operational workflow.",
+									evidence: [
+										{
+											source_ref: "artifact:sources/nightly.md",
+											source_kind: "source_obsidian_markdown",
+											source_id: "note-node-1",
+											source_path: "sources/nightly.md",
+											quote,
+										},
+									],
+								},
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "Applied source-owned Dreaming entity" };
+				},
+			},
+			DREAMING_CONFIG,
+			dir,
+			"default",
+			"incremental",
+		);
+
+		expect(result).toMatchObject({ applied: 1, failed: 0 });
+		const derived = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare(
+					`SELECT source_id, source_kind, source_path, source_root
+					 FROM entities WHERE agent_id = 'default' AND name = 'Nightly Drift Detection'`,
+				)
+				.get(),
+		);
+		expect(derived).toEqual({
+			source_id: "obsidian:nightly",
+			source_kind: "source_obsidian_markdown",
+			source_path: "sources/nightly.md",
+			source_root: "dreaming",
+		});
+
+		purgeSourceOwnedRows({ agentId: "default", sourceId: "obsidian:nightly" });
+		expect(
+			getDbAccessor().withReadDb(
+				(db) => db.prepare("SELECT COUNT(*) AS count FROM entities WHERE name = ?").get("Nightly Drift Detection") as { count: number },
+			).count,
+		).toBe(0);
 	});
 });

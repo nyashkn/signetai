@@ -34,8 +34,9 @@ All domain functions are read-only. They accept a `ReadDb` handle or a
 
 ### queue
 
-Reflects the state of `memory_jobs` — the work queue for the extraction
-pipeline.
+Reflects the state of `memory_jobs` and `summary_jobs`, the live durable
+work queues for document/index maintenance and session summaries. Retired
+`extract` jobs are excluded from queue counts and readiness checks.
 
 Signals measured:
 
@@ -148,8 +149,8 @@ The seven domain scores are combined into a single weighted average:
 
 The result is clamped to [0, 1] and assigned the same status thresholds as
 individual domains. Queue and provider carry the most weight because
-extraction failures cascade — a stuck queue or an unavailable LLM will stall
-memory ingestion entirely.
+queue failures cascade — a stuck queue or an unavailable LLM will stall
+pipeline work entirely.
 
 
 API Endpoints
@@ -237,7 +238,9 @@ affected count, and message.
 ### POST /api/repair/requeue-dead
 
 Resets up to 50 dead-letter jobs back to `pending` with `attempts = 0`,
-allowing the extraction worker to retry them.
+allowing them to be retried. (Under the Dreaming cutover, the standalone
+extraction worker is retired; requeued legacy `extract` jobs are handled
+by the cutover sweep rather than a live worker.)
 
 - Cooldown: `repairRequeueCooldownMs` (default: 1 minute)
 - Hourly budget: `repairRequeueHourlyBudget` (default: 50)

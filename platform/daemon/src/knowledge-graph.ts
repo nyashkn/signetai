@@ -20,8 +20,9 @@ import type {
 	TaskMeta,
 	TaskStatus,
 } from "@signet/core";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
-import { requireDependencyReason } from "./dependency-history";
+import { SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES } from "@signet/core";
+import type { DbAccessor, ReadDb } from "./db-accessor";
+import { getDreamingEpisodicTokenBacklogInDb } from "./pipeline/dreaming";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -183,41 +184,6 @@ function rowToTaskMeta(r: Record<string, unknown>): TaskMeta {
 // Aspects
 // ---------------------------------------------------------------------------
 
-export interface UpsertAspectParams {
-	readonly entityId: string;
-	readonly agentId: string;
-	readonly name: string;
-	readonly weight?: number;
-}
-
-export function upsertAspect(accessor: DbAccessor, params: UpsertAspectParams): EntityAspect {
-	const canonical = toCanonicalName(params.name);
-	const ts = now();
-	const id = crypto.randomUUID();
-
-	return accessor.withWriteTx((db) => {
-		// Uses ON CONFLICT on the UNIQUE(entity_id, canonical_name) constraint
-		db.prepare(
-			`INSERT INTO entity_aspects
-			 (id, entity_id, agent_id, name, canonical_name, weight, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(entity_id, canonical_name) DO UPDATE SET
-			   name = excluded.name,
-			   weight = COALESCE(excluded.weight, entity_aspects.weight),
-			   updated_at = excluded.updated_at`,
-		).run(id, params.entityId, params.agentId, params.name, canonical, params.weight ?? 0.5, ts, ts);
-
-		// Read back the actual row (may have kept old id on conflict)
-		const row = db
-			.prepare(
-				`SELECT * FROM entity_aspects
-				 WHERE entity_id = ? AND canonical_name = ? AND agent_id = ?`,
-			)
-			.get(params.entityId, canonical, params.agentId) as Record<string, unknown>;
-		return rowToAspect(row);
-	});
-}
-
 export function getAspectsForEntity(accessor: DbAccessor, entityId: string, agentId: string): readonly EntityAspect[] {
 	return accessor.withReadDb((db) => {
 		const rows = db
@@ -232,77 +198,9 @@ export function getAspectsForEntity(accessor: DbAccessor, entityId: string, agen
 	});
 }
 
-export function deleteAspect(accessor: DbAccessor, aspectId: string, agentId: string): void {
-	accessor.withWriteTx((db) => {
-		db.prepare("DELETE FROM entity_aspects WHERE id = ? AND agent_id = ?").run(aspectId, agentId);
-	});
-}
-
 // ---------------------------------------------------------------------------
 // Attributes
 // ---------------------------------------------------------------------------
-
-export interface CreateAttributeParams {
-	readonly aspectId: string;
-	readonly agentId: string;
-	readonly memoryId?: string;
-	readonly kind: AttributeKind;
-	readonly content: string;
-	readonly confidence?: number;
-	readonly importance?: number;
-}
-
-export function createAttribute(accessor: DbAccessor, params: CreateAttributeParams): EntityAttribute {
-	const id = crypto.randomUUID();
-	const ts = now();
-	const normalized = params.content.trim().toLowerCase().replace(/\s+/g, " ");
-
-	return accessor.withWriteTx((db) => {
-		db.prepare(
-			`INSERT INTO entity_attributes
-			 (id, aspect_id, agent_id, memory_id, kind, content,
-			  normalized_content, confidence, importance, status,
-			  created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		).run(
-			id,
-			params.aspectId,
-			params.agentId,
-			params.memoryId ?? null,
-			params.kind,
-			params.content,
-			normalized,
-			params.confidence ?? 0.0,
-			params.importance ?? 0.5,
-			ts,
-			ts,
-		);
-
-		return {
-			id,
-			aspectId: params.aspectId,
-			agentId: params.agentId,
-			memoryId: params.memoryId ?? null,
-			kind: params.kind,
-			content: params.content,
-			normalizedContent: normalized,
-			groupKey: null,
-			claimKey: null,
-			confidence: params.confidence ?? 0.0,
-			importance: params.importance ?? 0.5,
-			status: "active" as const,
-			supersededBy: null,
-			sourceKind: null,
-			sourceId: null,
-			sourcePath: null,
-			sourceRoot: null,
-			proposalId: null,
-			proposalEvidence: [],
-			createdAt: ts,
-			updatedAt: ts,
-		};
-	});
-}
 
 export function getAttributesForAspect(
 	accessor: DbAccessor,
@@ -348,138 +246,9 @@ export function getConstraintsForEntity(
 	});
 }
 
-export function supersedeAttribute(accessor: DbAccessor, id: string, supersededById: string, agentId: string): void {
-	const ts = now();
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE entity_attributes
-			 SET status = 'superseded', superseded_by = ?, updated_at = ?
-			 WHERE id = ? AND agent_id = ?`,
-		).run(supersededById, ts, id, agentId);
-	});
-}
-
-export function deleteAttribute(accessor: DbAccessor, id: string, agentId: string): void {
-	const ts = now();
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE entity_attributes
-			 SET status = 'deleted', updated_at = ?
-			 WHERE id = ? AND agent_id = ?`,
-		).run(ts, id, agentId);
-	});
-}
-
 // ---------------------------------------------------------------------------
 // Dependencies
 // ---------------------------------------------------------------------------
-
-export interface UpsertDependencyParams {
-	readonly sourceEntityId: string;
-	readonly targetEntityId: string;
-	readonly agentId: string;
-	readonly aspectId?: string;
-	readonly dependencyType: DependencyType;
-	readonly strength?: number;
-	readonly confidence?: number;
-	readonly reason?: string;
-}
-
-export function upsertDependency(accessor: DbAccessor, params: UpsertDependencyParams): EntityDependency {
-	const ts = now();
-
-	return accessor.withWriteTx((db) => {
-		const existing = db
-			.prepare(
-				`SELECT * FROM entity_dependencies
-				 WHERE source_entity_id = ? AND target_entity_id = ?
-				   AND dependency_type = ? AND agent_id = ?`,
-			)
-			.get(params.sourceEntityId, params.targetEntityId, params.dependencyType, params.agentId) as
-			| Record<string, unknown>
-			| undefined;
-
-		if (existing) {
-			const changed =
-				params.strength !== undefined ||
-				params.aspectId !== undefined ||
-				params.confidence !== undefined ||
-				params.reason !== undefined;
-
-			if (!changed) {
-				return rowToDependency(existing);
-			}
-
-			const reason = requireDependencyReason(
-				params.dependencyType,
-				params.reason ?? (typeof existing.reason === "string" ? existing.reason : null),
-			);
-			const conf = params.confidence ?? (typeof existing.confidence === "number" ? existing.confidence : 0.7);
-			db.prepare(
-				`UPDATE entity_dependencies
-				 SET strength = ?, aspect_id = ?, reason = ?, confidence = ?, updated_at = ?
-				 WHERE id = ? AND agent_id = ?`,
-			).run(
-				params.strength ?? (existing.strength as number),
-				params.aspectId ?? (existing.aspect_id as string | null),
-				reason,
-				conf,
-				ts,
-				existing.id as string,
-				params.agentId,
-			);
-			return rowToDependency({
-				...existing,
-				strength: params.strength ?? (existing.strength as number),
-				aspect_id: params.aspectId ?? (existing.aspect_id as string | null),
-				reason,
-				confidence: conf,
-				updated_at: ts,
-			});
-		}
-
-		const id = crypto.randomUUID();
-		const reason = requireDependencyReason(params.dependencyType, params.reason);
-		const conf = params.confidence ?? 0.7;
-		db.prepare(
-			`INSERT INTO entity_dependencies
-			 (id, source_entity_id, target_entity_id, agent_id,
-			  aspect_id, dependency_type, strength, confidence, reason, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).run(
-			id,
-			params.sourceEntityId,
-			params.targetEntityId,
-			params.agentId,
-			params.aspectId ?? null,
-			params.dependencyType,
-			params.strength ?? 0.5,
-			conf,
-			reason,
-			ts,
-			ts,
-		);
-		return {
-			id,
-			sourceEntityId: params.sourceEntityId,
-			targetEntityId: params.targetEntityId,
-			agentId: params.agentId,
-			aspectId: params.aspectId ?? null,
-			dependencyType: params.dependencyType,
-			strength: params.strength ?? 0.5,
-			confidence: conf,
-			reason,
-			sourceKind: null,
-			sourceId: null,
-			sourcePath: null,
-			sourceRoot: null,
-			proposalId: null,
-			proposalEvidence: [],
-			createdAt: ts,
-			updatedAt: ts,
-		};
-	});
-}
 
 export function getEntityDependencyById(
 	accessor: DbAccessor,
@@ -537,40 +306,9 @@ export function getDependenciesTo(
 	});
 }
 
-export function deleteDependency(accessor: DbAccessor, id: string, agentId: string): void {
-	// History is written by the trg_entity_dependencies_audit_delete AFTER DELETE
-	// trigger (migration 050), which covers app deletes, FK cascades, and direct SQL.
-	// No app-layer history write here to avoid duplicate audit rows.
-	accessor.withWriteTx((db) => {
-		db.prepare("DELETE FROM entity_dependencies WHERE id = ? AND agent_id = ?").run(id, agentId);
-	});
-}
-
 // ---------------------------------------------------------------------------
 // Entity pinning
 // ---------------------------------------------------------------------------
-
-export function pinEntity(accessor: DbAccessor, entityId: string, agentId: string): void {
-	const ts = now();
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE entities
-			 SET pinned = 1, pinned_at = ?, updated_at = ?
-			 WHERE id = ? AND agent_id = ?`,
-		).run(ts, ts, entityId, agentId);
-	});
-}
-
-export function unpinEntity(accessor: DbAccessor, entityId: string, agentId: string): void {
-	const ts = now();
-	accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE entities
-			 SET pinned = 0, pinned_at = NULL, updated_at = ?
-			 WHERE id = ? AND agent_id = ?`,
-		).run(ts, entityId, agentId);
-	});
-}
 
 export function getPinnedEntities(accessor: DbAccessor, agentId: string): ReadonlyArray<PinnedEntitySummary> {
 	return accessor.withReadDb((db) => {
@@ -1032,69 +770,6 @@ export function listEntityAliases(
 	});
 }
 
-export function createEntityAlias(
-	accessor: DbAccessor,
-	params: {
-		readonly agentId: string;
-		readonly entityId: string;
-		readonly alias: string;
-		readonly aliasKind?: string | null;
-		readonly orgEntityId?: string | null;
-		readonly confidence?: number;
-		readonly source?: string | null;
-	},
-): EntityAlias {
-	const alias = params.alias.trim();
-	const canonical = toCanonicalName(alias);
-	if (canonical.length === 0) {
-		throw new Error("alias is required");
-	}
-	const confidence =
-		typeof params.confidence === "number" && Number.isFinite(params.confidence)
-			? Math.min(Math.max(params.confidence, 0), 1)
-			: 1;
-	const ts = now();
-	const id = crypto.randomUUID();
-	return accessor.withWriteTx((db) => {
-		const entity = db
-			.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status, 'active') = 'active'")
-			.get(params.entityId, params.agentId) as { id: string } | undefined;
-		if (!entity) throw new Error("Entity not found");
-		// org_entity_id declares REFERENCES entities(id), but nothing in this repo
-		// turns foreign keys on, so the constraint is decorative. Check it here or a
-		// typo silently writes an org pointer that resolves to nothing forever.
-		if (params.orgEntityId) {
-			const org = db
-				.prepare("SELECT id FROM entities WHERE id = ? AND agent_id = ? AND COALESCE(status, 'active') = 'active'")
-				.get(params.orgEntityId, params.agentId) as { id: string } | undefined;
-			if (!org) throw new Error("Organization entity not found");
-		}
-		db.prepare(
-			`INSERT INTO entity_aliases
-			 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, org_entity_id, confidence, source,
-			  status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		).run(
-			id,
-			params.entityId,
-			params.agentId,
-			alias,
-			canonical,
-			params.aliasKind ?? null,
-			params.orgEntityId ?? null,
-			confidence,
-			params.source ?? null,
-			ts,
-			ts,
-		);
-		const row = db.prepare("SELECT * FROM entity_aliases WHERE id = ? AND agent_id = ?").get(id, params.agentId) as
-			| Record<string, unknown>
-			| undefined;
-		if (!row) throw new Error("Alias not found after insert");
-		return rowToEntityAlias(row);
-	});
-}
-
 /**
  * Who currently answers to this handle. Exists so a 409 can name the holder:
  * "alias already exists" leaves the caller with no next move, and the next move
@@ -1120,29 +795,6 @@ export function findAliasHolder(
 		return row ? { entityId: row.entity_id, name: row.name } : null;
 	});
 }
-
-export function archiveEntityAlias(
-	accessor: DbAccessor,
-	params: {
-		readonly agentId: string;
-		readonly entityId: string;
-		readonly aliasId: string;
-	},
-): EntityAlias | null {
-	const ts = now();
-	return accessor.withWriteTx((db) => {
-		db.prepare(
-			`UPDATE entity_aliases
-			 SET status = 'archived', updated_at = ?
-			 WHERE id = ? AND entity_id = ? AND agent_id = ?`,
-		).run(ts, params.aliasId, params.entityId, params.agentId);
-		const row = db
-			.prepare("SELECT * FROM entity_aliases WHERE id = ? AND entity_id = ? AND agent_id = ?")
-			.get(params.aliasId, params.entityId, params.agentId) as Record<string, unknown> | undefined;
-		return row ? rowToEntityAlias(row) : null;
-	});
-}
-
 export function getEntityAspectsByName(
 	accessor: DbAccessor,
 	params: {
@@ -2127,7 +1779,7 @@ export interface ConstellationProposal {
 }
 
 export interface ConstellationDreamingSummary {
-	readonly tokensSinceLastPass: number;
+	readonly episodicTokensPending: number;
 	readonly consecutiveFailures: number;
 	readonly lastPassAt: string | null;
 	readonly lastPassId: string | null;
@@ -2231,29 +1883,15 @@ function resolveProposalTargetEntity(
 }
 
 function getConstellationDreamingSummary(db: ReadDb, agentId: string): ConstellationDreamingSummary {
-	const state = db
-		.prepare(
-			`SELECT tokens_since_last_pass, consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
-			 FROM dreaming_state WHERE agent_id = ?`,
-		)
-		.get(agentId) as
+	let state:
 		| {
-				tokens_since_last_pass: number;
 				consecutive_failures: number;
 				last_pass_at: string | null;
 				last_pass_id: string | null;
 				last_pass_mode: string | null;
 		  }
 		| undefined;
-	const latestPass = db
-		.prepare(
-			`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
-			 FROM dreaming_passes
-			 WHERE agent_id = ?
-			 ORDER BY created_at DESC
-			 LIMIT 1`,
-		)
-		.get(agentId) as
+	let latestPass:
 		| {
 				id: string;
 				mode: string;
@@ -2264,9 +1902,30 @@ function getConstellationDreamingSummary(db: ReadDb, agentId: string): Constella
 				mutations_failed: number | null;
 		  }
 		| undefined;
+	try {
+		state = db
+		.prepare(
+			`SELECT consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
+			 FROM dreaming_state WHERE agent_id = ?`,
+		)
+		.get(agentId) as typeof state;
+		latestPass = db
+		.prepare(
+			`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
+			 FROM dreaming_passes
+			 WHERE agent_id = ?
+			 ORDER BY created_at DESC
+			 LIMIT 1`,
+		)
+		.get(agentId) as typeof latestPass;
+	} catch {
+		// Dreaming metadata is optional until the workspace migration completes.
+		state = undefined;
+		latestPass = undefined;
+	}
 
 	return {
-		tokensSinceLastPass: Math.max(0, state?.tokens_since_last_pass ?? 0),
+		episodicTokensPending: getDreamingEpisodicTokenBacklogInDb(db, agentId),
 		consecutiveFailures: Math.max(0, state?.consecutive_failures ?? 0),
 		lastPassAt: state?.last_pass_at ?? null,
 		lastPassId: state?.last_pass_id ?? null,
@@ -2321,6 +1980,7 @@ export function getKnowledgeGraphForConstellation(
 	return accessor.withReadDb((db) => {
 		const visibleAgentIds = getConstellationVisibleAgentIds(db, agentId);
 		const agentPlaceholders = placeholders(visibleAgentIds.length);
+		const topologyPlaceholders = placeholders(SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES.length);
 		// Keep the dashboard read path bounded. The previous implementation loaded
 		// every aspect, active attribute, and dependency for the agent, then filtered
 		// in JS. Large real workspaces can turn a simple Ontology tab visit into an
@@ -2331,12 +1991,33 @@ export function getKnowledgeGraphForConstellation(
 				 FROM entities e
 				 WHERE e.agent_id IN (${agentPlaceholders})
 				   AND COALESCE(e.status, 'active') = 'active'
-				   AND LOWER(TRIM(e.entity_type)) IN ('person', 'project')
-				   AND (e.mentions > 0 OR e.pinned = 1)
+				   AND NOT (
+						LOWER(TRIM(e.entity_type)) IN (${topologyPlaceholders})
+						OR (LOWER(TRIM(e.entity_type)) = 'source' AND e.source_root IS NOT NULL)
+				   )
+				   -- Entity mentions are a legacy-memory projection. Dreaming writes
+				   -- semantic structure with episodic provenance directly, so a valid
+				   -- entity can have zero legacy mentions and any entity type.
+				   AND (
+						e.mentions > 0
+						OR e.pinned = 1
+						OR EXISTS (
+							SELECT 1 FROM entity_aspects asp
+							WHERE asp.entity_id = e.id
+							  AND asp.agent_id = e.agent_id
+							  AND COALESCE(asp.status, 'active') = 'active'
+						)
+						OR EXISTS (
+							SELECT 1 FROM entity_dependencies dep
+							WHERE dep.agent_id = e.agent_id
+							  AND COALESCE(dep.status, 'active') = 'active'
+							  AND (dep.source_entity_id = e.id OR dep.target_entity_id = e.id)
+						)
+				   )
 				 ORDER BY e.pinned DESC, e.mentions DESC, e.name ASC
 				 LIMIT ?`,
 			)
-			.all(...visibleAgentIds, limit) as Array<Record<string, unknown>>;
+			.all(...visibleAgentIds, ...SOURCE_NATIVE_TOPOLOGY_ENTITY_TYPES, limit) as Array<Record<string, unknown>>;
 
 		const entityIds = entityRows.map((r) => r.id as string).filter((id) => typeof id === "string");
 

@@ -1,52 +1,24 @@
 # Dreaming Skill Runbook
 
-This is the runnable dreaming path for promoting source-backed evidence into
-the ontology. Raw memories, transcripts, and source artifacts remain immutable
-evidence. Dreaming promotes only explicit, high-confidence statements into
-current attribute slots through apply-first audited operations. In the default
-non-provider path, plain
-natural-language preference extraction is limited to confidence-bearing memory
-rows. Memory artifacts and transcripts are still readable evidence sources, but
-embedded `set_claim_value` or `claim_values` JSON is preview-only because raw
-source JSON cannot self-attest confidence for direct apply. Plain prose in
-artifacts or transcripts needs `--use-provider`, an explicit assertion import,
-or a refactor proposal when the change is too broad to apply directly.
+Dreaming is the single automatic path from immutable episodic evidence to
+audited semantic memory. It reads selected artifacts, transcripts, summaries,
+compactions, and checkpoints; it does not rewrite them. The worker emits
+provenance-backed ontology operations through the shared daemon-owned writer.
 
-## Attribute Promotion Path
+## Worker Path
 
-Inspect the current graph write gates:
+Inspect the current graph write gates and worker state:
 
 ```bash
 signet ontology pipeline explain --json
+signet dream status
+signet dream trigger
+signet dream trigger --compact
 ```
 
-Preview promotions from all source evidence:
-
-```bash
-signet dream promote --from all --json
-```
-
-Preview a narrower source:
-
-```bash
-signet dream promote --from memories:recent --json
-signet dream promote --from memory:<id> --json
-signet dream promote --from artifact:<id> --json
-signet dream promote --from transcript:<session-key> --json
-```
-
-Apply accepted explicit promotions:
-
-```bash
-signet dream promote --from all --apply --json
-```
-
-The promotion endpoint emits direct `set_claim_value` operations. That
-operation updates the current value for a stable `(entity, aspect, group,
-claim, kind)` slot and supersedes the older active value in place.
-
-Low-confidence or ambiguous evidence is skipped or returned as a question. It
-is not stored as a pending proposal by default.
+Invalid or rejected operations are recorded without stalling the selected
+evidence cursor. Use an ontology proposal only for broad or explicitly reviewed
+semantic refactors.
 
 ## Epistemic Assertion Path
 
@@ -113,12 +85,11 @@ signet ontology reject <proposal-id> --reason "weak evidence" --actor operator -
 
 ## Rules
 
-- Dreaming promotion never rewrites raw memories, transcripts, or source
-  artifacts.
-- The default `signet dream promote` mode is a preview.
-- `--apply` uses audited ontology operation handlers, not Pipeline V2.
-- Ambiguous generated output is skipped or surfaced as a question.
+- Dreaming never rewrites episodic artifacts, transcripts, or summaries.
+- Dreaming is the only automatic episodic-to-semantic writer.
+- All semantic changes use audited ontology operation handlers.
+- Ambiguous generated output is discarded and recorded as a failed operation.
 - Pending proposals are for broad graph refactors and explicit review queues,
-  not the default dreaming promotion path.
+  not routine Dreaming consolidation.
 - Use epistemic assertions for attributed statements that should not become
   current truth yet.

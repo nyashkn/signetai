@@ -124,7 +124,6 @@ function pipelineCfg(hints = HINTS_CFG) {
 			maintenanceIntervalMs: 0,
 			maintenanceMode: "observe" as const,
 		},
-		structural: { ...DEFAULT_PIPELINE_V2.structural, enabled: false },
 		significance: { enabled: false, minTurns: 5, minEntityOverlap: 1, noveltyThreshold: 0.15 },
 		hints,
 	};

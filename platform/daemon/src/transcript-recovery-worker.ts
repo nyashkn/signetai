@@ -242,7 +242,7 @@ function enqueueRecoverySummary(
 	},
 ): "pending" | "skipped" | "not_requested" {
 	const config = loadMemoryConfig(basePath);
-	const pipelineEnabled = config.pipelineV2.enabled || config.pipelineV2.shadowMode || config.dreaming.enabled;
+	const pipelineEnabled = config.pipelineV2.enabled || config.pipelineV2.shadowMode;
 	if (!pipelineEnabled) return "not_requested";
 	if (
 		input.transcript.length < 500 ||

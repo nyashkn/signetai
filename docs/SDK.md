@@ -1467,14 +1467,6 @@ const result = await signet.deduplicateMemories({
 // result.merged — memories merged (execute mode)
 ```
 
-**`reclassifyEntities()`** — Re-classify entities with updated rules.
-
-```typescript
-const result = await signet.reclassifyEntities();
-// result.reclassified — entities updated
-// result.removed — invalid entities removed
-```
-
 **`pruneChunkGroups()`** — Prune chunk_group entities.
 
 ```typescript
@@ -1488,14 +1480,6 @@ const result = await signet.pruneChunkGroups();
 const result = await signet.pruneSingletonEntities();
 // result.pruned — singleton entities removed
 ```
-
-**`structuralBackfill()`** — Backfill missing relational data.
-
-```typescript
-const result = await signet.structuralBackfill();
-// result.backfilled — records updated
-```
-
 
 Cross-Agent Messaging
 ---

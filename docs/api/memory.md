@@ -123,20 +123,23 @@ may also supply the snake_case names inside a `metadata` object for
 compatibility.
 
 Structured callers may also pass `structured.entities`, `structured.aspects`,
-and `structured.hints`. Aspect attributes are persisted directly under
-`entity_attributes`. Include `groupKey` to create a navigable subgroup inside an
-aspect, and include `claimKey` when the claim can be updated over time.
-Supersession only runs within the same entity/aspect/groupKey/claimKey, so
-unrelated events under one aspect do not replace each other. Newer conflicting
-attributes on the same grouped claim can mark older attributes as `superseded`
-with `superseded_by` pointing at the replacement.
+and `structured.hints`. As of the episodic-evidence cutover, a `structured`
+payload is **retained as immutable episodic evidence** alongside the memory
+content but is **no longer applied directly to the knowledge graph** from the
+remember endpoint. The response includes `structured: true` and
+`structured_applied: false` to signal this explicitly. `structured.hints` are
+still written as prospective recall aids for the saved evidence. Only Dreaming
+derives semantic state (entities, aspects, attributes, links) from episodic
+evidence through the audited ontology control plane.
 
-When `structured` is omitted, the default remember path is deliberately
-conservative. It embeds and stores the memory, then links mentions to existing
-entities for the same `agentId` when they are mechanically recognizable. It does
-not create new entities, aspects, attributes, dependencies, or supersession
-claims from raw text. Use a structured payload when the caller intends to author
-or update the knowledge graph.
+All remember saves (plain, chunked, or structured) are immutable **episodic
+evidence** (`memory_kind = 'episodic'`). They are immediately retrievable via
+recall, search, list, and `GET /api/memory/:id`, and are selectable by Dreaming
+as evidence through the shared episodic-sources selector. The remember endpoint
+no longer performs any direct semantic side effects: it does not persist
+structured graph state, does not inline-link entities, and does not enqueue
+legacy extraction jobs. Extraction status is `none` — Dreaming owns semantic
+processing.
 
 **Response**
 
@@ -149,9 +152,18 @@ or update the knowledge graph.
   "importance": 0.9,
   "content": "User prefers vim keybindings",
   "embedded": true,
+  "entities_linked": 0,
+  "hints_written": 0,
+  "structured": false,
+  "structured_applied": false,
   "deduped": false
 }
 ```
+
+`entities_linked` is always `0` for remember saves (no direct graph writes).
+`structured_applied` is `false` even when a `structured` payload is supplied,
+signaling that it was retained as episodic evidence but not applied to the
+graph. If a structured payload was supplied, `structured` is `true`.
 
 If an identical memory (by `sourceId`, `idempotencyKey`, or content hash) already
 exists in the relevant scope, `deduped: true` is returned with the existing
@@ -323,12 +335,20 @@ Possible `status` values and their HTTP codes:
 
 ### PATCH /api/memory/:id
 
-Update a memory's fields. At least one of `content`, `type`, `tags`,
+Update a memory's metadata fields. At least one of `content`, `type`, `tags`,
 `importance`, or `pinned` must be provided. Requires `modify` permission.
 Rate-limited to 60/min.
 
 Scoped tokens in non-local mode have their project scope checked against the
 target memory's `project` field before the mutation is applied.
+
+**Episodic evidence immutability:** memories saved via remember (`memory_kind =
+'episodic'`) are immutable evidence. `content` and `type` cannot be changed on
+an episodic memory — attempts return `episodic_content_immutable` (409).
+Metadata fields (`tags`, `importance`, `pinned`) remain editable so curators can
+re-rank or re-label evidence without altering the originally recorded content.
+To correct episodic evidence, save a new memory and optionally supersede the old
+one.
 
 **Request body**
 
@@ -364,14 +384,15 @@ clear tags.
 
 Possible `status` values and their HTTP codes:
 
-| Status                  | Code | Meaning                                  |
-|-------------------------|------|------------------------------------------|
-| `updated`               | 200  | Success                                  |
-| `no_changes`            | 200  | Patch produced no diff                   |
-| `not_found`             | 404  | Memory does not exist                    |
-| `deleted`               | 409  | Cannot modify a deleted memory           |
-| `version_conflict`      | 409  | `if_version` mismatch                    |
-| `duplicate_content_hash`| 409  | New content matches an existing memory   |
+| Status                       | Code | Meaning                                  |
+|------------------------------|------|------------------------------------------|
+| `updated`                    | 200  | Success                                  |
+| `no_changes`                 | 200  | Patch produced no diff                   |
+| `not_found`                  | 404  | Memory does not exist                    |
+| `deleted`                    | 409  | Cannot modify a deleted memory           |
+| `version_conflict`           | 409  | `if_version` mismatch                    |
+| `duplicate_content_hash`     | 409  | New content matches an existing memory   |
+| `episodic_content_immutable` | 409  | Episodic evidence content/type protected |
 
 ### DELETE /api/memory/:id
 

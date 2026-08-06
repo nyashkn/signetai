@@ -29,6 +29,7 @@ import {
 	requeueDeadJobs,
 	triggerRetentionSweep,
 } from "../repair-actions";
+import { isSystemPressureHigh } from "../system-pressure";
 import { decayAspectWeights, recordFeedbackTelemetry } from "./aspect-feedback";
 import { invalidateTraversalCache } from "./graph-traversal";
 import { checkAndCondense } from "./summary-condensation";
@@ -127,15 +128,6 @@ function getGraphAgentIds(accessor: DbAccessor): readonly string[] {
 }
 
 /**
- * Retroactive supersession sweep for a single agent.
- *
- * Opportunistic and best-effort: it must never abort the maintenance
- * cycle. If no inference provider is configured (e.g. the resolver has
- * not been initialised yet) or the sweep itself fails, the error is
- * logged and skipped — consistent with the summary-condensation block
- * below, which is also a non-fatal retroactive LLM pass.
- */
-/**
  * Look for entities that resolve to one identity and queue merges for review.
  *
  * Not driven by `buildRecommendations`, because there is no health metric to
@@ -172,26 +164,6 @@ async function runEntityMergeScan(
 			affected: 0,
 			message: `entity merge scan failed: ${error}`,
 			details: { agentId },
-		});
-	}
-}
-
-async function runSupersessionSweep(accessor: DbAccessor, agentId: string, cfg: PipelineV2Config): Promise<void> {
-	if (!cfg.structural.supersessionSweepEnabled) return;
-	try {
-		const { sweepRetroactiveSupersession } = await import("./supersession");
-		const sweep = await sweepRetroactiveSupersession(accessor, agentId, cfg, getLlmProvider());
-		if (sweep.candidates.length > 0) {
-			logger.info("maintenance", "Supersession sweep", {
-				agentId,
-				superseded: sweep.superseded,
-				proposals: sweep.candidates.length,
-			});
-		}
-	} catch (e) {
-		logger.warn("maintenance", "Supersession sweep skipped (non-fatal)", {
-			agentId,
-			error: e instanceof Error ? e.message : String(e),
 		});
 	}
 }
@@ -287,6 +259,10 @@ export function startMaintenanceWorker(
 	};
 
 	async function doTick(): Promise<MaintenanceCycleResult> {
+		if (isSystemPressureHigh()) {
+			const report = accessor.withReadDb((db) => getDiagnostics(db, tracker));
+			return { report, recommendations: [], executed: [], feedbackDecayedAspects: 0, feedbackPropagatedAttributes: 0 };
+		}
 		const report = accessor.withReadDb((db) => getDiagnostics(db, tracker));
 		const ctx: RepairContext = {
 			reason: "autonomous maintenance",
@@ -320,8 +296,6 @@ export function startMaintenanceWorker(
 						});
 					}
 					feedbackPropagatedAttributes += propagateMemoryStatus(accessor, agentId);
-
-					await runSupersessionSweep(accessor, agentId, cfg);
 				}
 				recordFeedbackTelemetry({
 					feedbackDecayedAspects,
@@ -396,8 +370,6 @@ export function startMaintenanceWorker(
 					});
 				}
 				feedbackPropagatedAttributes += propagateMemoryStatus(accessor, agentId);
-
-				await runSupersessionSweep(accessor, agentId, cfg);
 			}
 			recordFeedbackTelemetry({
 				feedbackDecayedAspects,

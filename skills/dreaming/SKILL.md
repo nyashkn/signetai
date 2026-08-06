@@ -36,6 +36,7 @@ Gather enough source evidence and graph context to infer useful ontology
 structure. Prefer recent transcript and memory-artifact windows first, then
 expand to bulk source sets when requested.
 
+- recently saved memories (remember/CLI/MCP/plugin saves are immutable episodic evidence)
 - recent session summaries
 - raw transcripts and transcript artifacts
 - recently saved memory artifacts
@@ -150,6 +151,15 @@ signet ontology entity merge-plan "Canonical Entity" "Duplicate Entity" --propos
 For large ingests, split work into coherent batches. Prefer fewer,
 high-confidence changes with direct evidence quotes over broad speculative
 coverage.
+
+Episodic memories may carry a structured payload (entities/aspects) preserved
+verbatim from a structured remember save. That structured evidence renders into
+the dreaming context alongside the memory content and is genuinely citable:
+cite a quote drawn from the rendered structured form (for example an entity
+relationship line) when a fact lives only in the structured payload. Every
+evidence quote is validated against exactly the rendered source text the agent
+saw, so quote from the rendered form — never paraphrase, and never cite text
+that does not appear there.
 
 ## Routing Rules
 
