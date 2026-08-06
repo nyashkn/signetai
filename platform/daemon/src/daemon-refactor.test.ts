@@ -46,6 +46,10 @@ describe("daemon route extraction refactor", () => {
 		} else {
 			expect(state.authSecret).not.toBeNull();
 		}
+
+		// Loaded from the machine's real agent.yaml, so leaving it in place makes
+		// every later file in the run depend on this developer's configuration.
+		state.resetAuthStateForTests();
 	});
 
 	// Exercises the non-local auth path (token mode) end-to-end:
@@ -93,7 +97,10 @@ describe("daemon route extraction refactor", () => {
 		try {
 			expect(() => state.reloadAuthState(tmpDir)).not.toThrow();
 		} finally {
-			state.reloadAuthState(state.AGENTS_DIR);
+			// Restore the process default rather than the machine's real
+			// `agent.yaml`: reloading from AGENTS_DIR made every later file in the
+			// run inherit whatever mode this developer happens to have configured.
+			state.resetAuthStateForTests();
 			rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});

@@ -160,6 +160,10 @@ beforeEach(() => {
 
 afterAll(() => {
 	closeDbAccessor();
+	// `makeApp("team")` writes the process-global auth config, and `bun test`
+	// shares one process across files: left in team mode it made nine assertions
+	// in `secrets-routes.test.ts` fail with 403 in a full run and pass alone.
+	state.resetAuthStateForTests();
 	if (previousSignetPath === undefined) Reflect.deleteProperty(process.env, "SIGNET_PATH");
 	else process.env.SIGNET_PATH = previousSignetPath;
 	rmSync(agentsDir, { recursive: true, force: true });

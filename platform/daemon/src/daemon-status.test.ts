@@ -50,6 +50,10 @@ describe("daemon status contract", () => {
 			await daemon.stopDaemonRuntimeForTests();
 			closeDbAccessor();
 		} catch {}
+		// Reloaded auth from this suite's temp dir — hand the next file the
+		// process default back rather than whatever this one configured.
+		const state = await import("./routes/state.js");
+		state.resetAuthStateForTests();
 		if (prev === undefined) {
 			Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		}

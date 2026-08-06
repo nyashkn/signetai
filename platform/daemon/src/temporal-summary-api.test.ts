@@ -64,8 +64,13 @@ describe("temporal summary API auth", () => {
 		closeDbAccessor();
 	});
 
-	afterAll(() => {
+	afterAll(async () => {
 		closeDbAccessor();
+		// This suite reloads auth from its own temp dir; leaving the result in
+		// place hands the next file a config it never chose (see
+		// `resetAuthStateForTests`).
+		const state = await import("./routes/state");
+		state.resetAuthStateForTests();
 		if (prev === undefined) {
 			Reflect.deleteProperty(process.env, "SIGNET_PATH");
 		} else {
