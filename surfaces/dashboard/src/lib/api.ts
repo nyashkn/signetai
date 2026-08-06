@@ -215,6 +215,11 @@ export interface KnowledgeConstellation {
 		entityType: string;
 		mentions: number;
 		pinned: boolean;
+		/** Active handles this entity answers to. */
+		aliasCount?: number;
+		/** Set when this row's own name is another entity's alias — it is a
+		 *  spelling, and that entity is the identity. */
+		resolvesToEntityId?: string | null;
 		aspects: Array<{
 			id: string;
 			name: string;

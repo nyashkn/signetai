@@ -1,5 +1,6 @@
 import { yieldEvery } from "../async-yield";
 import type { ReadDb } from "../db-accessor";
+import { expandEntityIdsThroughAliases } from "../knowledge-trail";
 
 /**
  * Yield cadence for long row loops inside the traversal. Row work is cheap
@@ -300,7 +301,14 @@ export function resolveFocalEntities(
 			source = "session_key";
 		}
 
-		const entityIds = sanitizeEntityIds([...pinnedEntityIds, ...resolvedEntityIds]);
+		// Fold in every row the alias table says is the same thing. Focal
+		// resolution matches names and tokens, so a linked-but-unmerged pair
+		// resolved to whichever spelling the query happened to use and the
+		// traversal started from half the person. `what_touched` has folded them
+		// since P5; this is the same identity, arrived at from the other side.
+		const entityIds = sanitizeEntityIds(
+			expandEntityIdsThroughAliases(db, agentId, [...pinnedEntityIds, ...resolvedEntityIds]),
+		);
 		return {
 			entityIds,
 			entityNames: getEntityNames(db, entityIds),
@@ -705,7 +713,12 @@ export async function traverseKnowledgeGraph(
 						if (!source) continue;
 						// Check if the memory path involves this hop entity
 						if (existingPath.entityIds.includes(hopId) && !existingPath.dependencyIds.length) {
-							const upgraded = toPathStatic(hopId, source.sourceEntityId, existingPath.aspectIds[0], source.dependencyId);
+							const upgraded = toPathStatic(
+								hopId,
+								source.sourceEntityId,
+								existingPath.aspectIds[0],
+								source.dependencyId,
+							);
 							if (pathSize(upgraded) > pathSize(existingPath)) {
 								phase1.memoryPaths.set(mid, upgraded);
 							}

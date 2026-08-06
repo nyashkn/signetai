@@ -111,9 +111,9 @@ const MAX_ALIAS_HOPS = 8;
  * The expansion runs in both directions at each hop: the rows an alias points
  * at, and the rows whose canonical name an alias spells.
  */
-function expandAliasCluster(db: ReadDb, agentId: string, rootId: string): EntityRow[] {
+function expandAliasCluster(db: ReadDb, agentId: string, rootIds: readonly string[]): EntityRow[] {
 	const found = new Map<string, EntityRow>();
-	let frontier: string[] = [rootId];
+	let frontier: string[] = [...new Set(rootIds)];
 
 	for (let hop = 0; hop < MAX_ALIAS_HOPS && frontier.length > 0; hop++) {
 		const seedRows = frontier.map(() => "SELECT ? AS id").join(" UNION ALL ");
@@ -185,7 +185,7 @@ export function resolveIdentityInTx(db: ReadDb, agentId: string, selector: strin
 	const rootId = seed?.id ?? aliasSeedId;
 	if (rootId === null || rootId === undefined) return { entityIds: [], names: [], matchedVia: "none" };
 
-	const cluster = expandAliasCluster(db, agentId, rootId);
+	const cluster = expandAliasCluster(db, agentId, [rootId]);
 	const rows = cluster.length > 0 ? cluster : seed ? [seed] : [];
 	return {
 		entityIds: rows.map((row) => row.id),
@@ -412,4 +412,20 @@ export function trailFrom(options: TrailOptions): {
 		paths.sort((a, b) => a.depth - b.depth || b.strength - a.strength);
 		return { identity, paths: paths.slice(0, limit) };
 	});
+}
+
+/**
+ * Widen a set of entity ids to every row the alias table says is the same
+ * thing. Read paths that resolve entities by name or token are otherwise
+ * alias-blind: `what_touched` folds a linked pair into one identity while
+ * recall and traversal still treat them as two unrelated people, so browsing
+ * contradicts querying.
+ *
+ * Ids that resolve to nothing are preserved rather than dropped — a caller
+ * that passes an id this function does not recognise should get it back.
+ */
+export function expandEntityIdsThroughAliases(db: ReadDb, agentId: string, ids: readonly string[]): string[] {
+	if (ids.length === 0) return [];
+	const expanded = expandAliasCluster(db, agentId, ids).map((row) => row.id);
+	return [...new Set([...ids, ...expanded])];
 }

@@ -1750,6 +1750,15 @@ export interface ConstellationEntity {
 	readonly pinned: boolean;
 	readonly status: "active" | "archived";
 	readonly proposalId: string | null;
+	/** Active handles this row answers to. Zero for most rows. */
+	readonly aliasCount: number;
+	/**
+	 * Set when this row's own name is held as another entity's active alias:
+	 * the row is a spelling, and that other entity is the identity. Without it
+	 * a linked-but-unmerged pair browses as two unrelated people while
+	 * `what_touched` has folded them since P5.
+	 */
+	readonly resolvesToEntityId: string | null;
 	readonly aspects: readonly ConstellationAspect[];
 }
 
@@ -1904,20 +1913,20 @@ function getConstellationDreamingSummary(db: ReadDb, agentId: string): Constella
 		| undefined;
 	try {
 		state = db
-		.prepare(
-			`SELECT consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
+			.prepare(
+				`SELECT consecutive_failures, last_pass_at, last_pass_id, last_pass_mode
 			 FROM dreaming_state WHERE agent_id = ?`,
-		)
-		.get(agentId) as typeof state;
+			)
+			.get(agentId) as typeof state;
 		latestPass = db
-		.prepare(
-			`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
+			.prepare(
+				`SELECT id, mode, status, completed_at, mutations_applied, mutations_skipped, mutations_failed
 			 FROM dreaming_passes
 			 WHERE agent_id = ?
 			 ORDER BY created_at DESC
 			 LIMIT 1`,
-		)
-		.get(agentId) as typeof latestPass;
+			)
+			.get(agentId) as typeof latestPass;
 	} catch {
 		// Dreaming metadata is optional until the workspace migration completes.
 		state = undefined;
@@ -2132,6 +2141,32 @@ export function getKnowledgeGraphForConstellation(
 
 		const entitiesById = new Map<string, string>();
 		const entitiesByName = new Map<string, string>();
+		// One pass for the whole page rather than two subqueries per row: the
+		// constellation is a dashboard read and already bounded to 300 entities.
+		const aliasCountById = new Map<string, number>();
+		const resolvesToById = new Map<string, string>();
+		for (const row of db
+			.prepare(
+				`SELECT entity_id, COUNT(*) AS n FROM entity_aliases
+				 WHERE agent_id IN (${agentPlaceholders}) AND status = 'active'
+				   AND entity_id IN (${entityIdPlaceholders})
+				 GROUP BY entity_id`,
+			)
+			.all(...visibleAgentIds, ...entityIds) as Array<{ entity_id: string; n: number }>) {
+			aliasCountById.set(row.entity_id, row.n);
+		}
+		for (const row of db
+			.prepare(
+				`SELECT e.id AS id, a.entity_id AS holder FROM entities e
+				 JOIN entity_aliases a
+				   ON a.canonical_alias = e.canonical_name AND a.agent_id = e.agent_id AND a.status = 'active'
+				 WHERE e.agent_id IN (${agentPlaceholders}) AND e.id IN (${entityIdPlaceholders})
+				   AND a.entity_id <> e.id`,
+			)
+			.all(...visibleAgentIds, ...entityIds) as Array<{ id: string; holder: string }>) {
+			resolvesToById.set(row.id, row.holder);
+		}
+
 		const entities: ConstellationEntity[] = entityRows.map((row) => {
 			const eid = row.id as string;
 			const name = row.name as string;
@@ -2153,6 +2188,8 @@ export function getKnowledgeGraphForConstellation(
 				pinned: row.pinned === 1,
 				status: row.status === "archived" ? "archived" : "active",
 				proposalId: typeof row.proposal_id === "string" ? row.proposal_id : null,
+				aliasCount: aliasCountById.get(eid) ?? 0,
+				resolvesToEntityId: resolvesToById.get(eid) ?? null,
 				aspects,
 			};
 		});

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { trailFrom, whatTouched } from "./knowledge-trail";
+import { resolveFocalEntities } from "./pipeline/graph-traversal";
 
 describe("trail queries", () => {
 	let dir = "";
@@ -173,6 +174,34 @@ describe("trail queries", () => {
 			const identity = whatTouched({ agentId: "default", selector }).identity;
 			expect({ selector, ids: [...identity.entityIds].sort() }).toEqual({ selector, ids: expected });
 		}
+	});
+
+	it("starts a traversal from the whole identity, not the spelling that matched", () => {
+		// Focal resolution matches names and tokens, so a linked-but-unmerged pair
+		// resolved to whichever spelling the query used and the walk began from
+		// half the person. `what_touched` has folded them since P5 — browsing the
+		// graph contradicted querying it. Recall shares this resolver, so both
+		// read paths move together.
+		//
+		// The two spellings share no token on purpose: `matt@dock-blocks.com` FTS
+		// -tokenizes to `matt`, so a Matt fixture would pass without any expansion
+		// at all and prove nothing.
+		entity("ent-russ", "Russ Watts", "person");
+		entity("ent-russ-addr", "rwatts@example.com", "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES ('al-russ', 'ent-russ-addr', 'default', 'Russ Watts', 'russ watts', 'display_name', 1.0,
+				         'user-asserted: From header', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			).run();
+		});
+
+		const focal = getDbAccessor().withReadDb((db) =>
+			resolveFocalEntities(db, "default", { queryTokens: ["russ", "watts"], includePinned: false }),
+		);
+		expect(focal.entityIds).toContain("ent-russ");
+		expect(focal.entityIds).toContain("ent-russ-addr");
 	});
 
 	it("returns an empty answer rather than throwing for an unknown selector", () => {
