@@ -908,12 +908,68 @@ function applyRenameEntity(
 			409,
 		);
 	}
+	// An alias is as much a claim on a name as an entity row is: resolveIdentityInTx
+	// expands aliases in both directions, so renaming onto one folds two identities
+	// into one — silently, and without the review a merge would have gone through.
+	const aliasHolder = db
+		.prepare(
+			`SELECT e.id, e.name FROM entity_aliases a
+			 JOIN entities e ON e.id = a.entity_id
+			 WHERE a.agent_id = ? AND a.canonical_alias = ? AND a.status = 'active' AND a.entity_id != ?
+			 LIMIT 1`,
+		)
+		.get(agentId, key, entity.id) as { id: string; name: string } | undefined;
+	if (aliasHolder) {
+		throw new OntologyProposalError(
+			`Name "${name}" is an active alias of "${aliasHolder.name}". Use merge_entities instead.`,
+			409,
+		);
+	}
 	db.prepare(
 		`UPDATE entities
 		 SET name = ?, canonical_name = ?, proposal_id = ?, proposal_evidence = ?, updated_at = datetime('now')
 		 WHERE id = ? AND agent_id = ?`,
 	).run(name, key, proposal.id, JSON.stringify(proposalAuditEvidence(proposal)), entity.id, agentId);
-	return { entityId: entity.id, oldName: entity.name, newName: name };
+	// The old spelling is what every trail, memory and header already used. Keep it
+	// resolvable — same reasoning as the merge fix, and user-asserted either way.
+	const oldKey = canonical(entity.name);
+	const aliasesWritten = oldKey.length > 0 && oldKey !== key ? keepNameResolvable(db, agentId, entity, oldKey) : 0;
+	return { entityId: entity.id, oldName: entity.name, newName: name, aliasesWritten };
+}
+
+/**
+ * Record `entity`'s current spelling as one of its own aliases.
+ *
+ * Returns 0 rather than throwing when another entity already holds the name:
+ * first claimant wins, and a rename is not evidence that the two are the same
+ * person.
+ */
+function keepNameResolvable(
+	db: WriteDb,
+	agentId: string,
+	entity: { readonly id: string; readonly name: string },
+	canonicalName: string,
+): number {
+	const holder = db
+		.prepare(
+			"SELECT entity_id FROM entity_aliases WHERE agent_id = ? AND canonical_alias = ? AND status = 'active' LIMIT 1",
+		)
+		.get(agentId, canonicalName) as { entity_id: string } | undefined;
+	if (holder) return 0;
+	db.prepare(
+		`INSERT INTO entity_aliases
+		 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, 'active', datetime('now'), datetime('now'))`,
+	).run(
+		crypto.randomUUID(),
+		entity.id,
+		agentId,
+		entity.name,
+		canonicalName,
+		ADDRESS_SHAPE.test(canonicalName) ? "email" : "display_name",
+		"user-asserted: name before rename",
+	);
+	return 1;
 }
 
 function applyArchiveEntity(

@@ -1106,6 +1106,53 @@ describe("ontology proposals", () => {
 		]);
 	});
 
+	it("refuses a rename onto a name another entity already answers to", () => {
+		// resolveIdentityInTx expands aliases in both directions, so letting this
+		// through would silently fold Matt Damon's history into Matt West's — the
+		// same two-identities-become-one failure merge is a pending proposal for.
+		insertEntity("ent-west", "westmatt81@gmail.com", "westmatt81@gmail.com", "ant", 9, false, "person");
+		insertEntity("ent-other", "Matt Damon", "matt damon", "ant", 2, false, "person");
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES ('al-matt', 'ent-other', 'ant', 'Matt', 'matt', 'display_name', 1.0,
+				         'user-asserted', 'active', '2026-05-06T00:00:00.000Z', '2026-05-06T00:00:00.000Z')`,
+			).run();
+		});
+
+		const rename = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "rename_entity",
+			payload: { entity_id: "ent-west", new_name: "Matt" },
+		});
+		expect(() => applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: rename.id, actor: "test" })).toThrow(
+			'Name "Matt" is an active alias of "Matt Damon"',
+		);
+		const name = getDbAccessor().withReadDb(
+			(db) => db.prepare("SELECT name FROM entities WHERE id = 'ent-west'").get() as { name: string },
+		);
+		expect(name.name).toBe("westmatt81@gmail.com");
+	});
+
+	it("keeps the old name resolvable after a rename", () => {
+		// The old spelling is what every existing trail, memory and header used. A
+		// rename that drops it makes what_touched("<old name>") stop answering.
+		insertEntity("ent-west", "Matt West", "matt west", "ant", 9, false, "person");
+
+		const rename = createOntologyProposal(getDbAccessor(), {
+			agentId: "ant",
+			operation: "rename_entity",
+			payload: { entity_id: "ent-west", new_name: "Matthew West" },
+		});
+		const applied = applyOntologyProposal(getDbAccessor(), { agentId: "ant", id: rename.id, actor: "test" });
+
+		expect(applied.status).toBe("applied");
+		expect(activeAliases("ant")).toEqual([
+			{ canonical_alias: "matt west", entity_id: "ent-west", alias_kind: "display_name" },
+		]);
+	});
+
 	it("applies ID-first merge_entities when entity names are ambiguous", () => {
 		const target = createOntologyProposal(getDbAccessor(), {
 			agentId: "ant",
