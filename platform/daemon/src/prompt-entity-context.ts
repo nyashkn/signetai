@@ -234,20 +234,32 @@ function isPromptGenericContextQuery(promptTerms: ReadonlyArray<string>): boolea
 	return promptTerms.length > 0 && promptTerms.every((term) => PROMPT_GENERIC_CONTEXT_QUERY_TERMS.has(term));
 }
 
-function scorePromptEntityCandidate(row: {
+/** Full penalty for an alias nobody vouched for; scaled down by its confidence. */
+const ALIAS_MATCH_PENALTY = 0.25;
+
+/** Exported for tests: pure, and the alias penalty is the whole behaviour. */
+export function scorePromptEntityCandidate(row: {
 	readonly match_source: "name" | "alias";
 	readonly matched_text: string;
 	readonly mentions: number;
 	readonly pinned: number;
+	readonly alias_confidence: number;
 }): number {
 	const phrase = normalizePromptEntityText(row.matched_text);
 	const phraseTerms = promptEntityTerms(row.matched_text);
+	// The penalty used to be flat, which made sense when an alias was something
+	// the pipeline had guessed. Linking is deliberate now: a handle a person
+	// declared, a header asserted, or an approved merge wrote arrives at 1.0 and
+	// is exactly as good a name as the canonical one. An inferred alias — an
+	// unambiguous first name at 0.6, a local part at 0.5 — still ranks below it.
+	const aliasPenalty =
+		row.match_source === "alias" ? ALIAS_MATCH_PENALTY * (1 - Math.min(1, Math.max(0, row.alias_confidence))) : 0;
 	return (
 		phraseTerms.length * 8 +
 		phrase.length * 0.35 +
 		Math.log1p(Math.max(0, row.mentions)) +
-		Math.min(Math.max(0, row.pinned), 1) * 8 +
-		(row.match_source === "alias" ? -0.25 : 0)
+		Math.min(Math.max(0, row.pinned), 1) * 8 -
+		aliasPenalty
 	);
 }
 
@@ -263,7 +275,8 @@ function resolvePromptEntityMatches(db: ReadDb, agentId: string, userMessage: st
 			   COALESCE(e.canonical_name, LOWER(e.name)) AS matched_text,
 			   'name' AS match_source,
 			   COALESCE(e.mentions, 0) AS mentions,
-			   COALESCE(e.pinned, 0) AS pinned
+			   COALESCE(e.pinned, 0) AS pinned,
+			   1.0 AS alias_confidence
 			 FROM entities e
 			 WHERE e.agent_id = ?
 			   AND COALESCE(e.status, 'active') = 'active'
@@ -276,7 +289,8 @@ function resolvePromptEntityMatches(db: ReadDb, agentId: string, userMessage: st
 			   a.alias AS matched_text,
 			   'alias' AS match_source,
 			   COALESCE(e.mentions, 0) AS mentions,
-			   COALESCE(e.pinned, 0) AS pinned
+			   COALESCE(e.pinned, 0) AS pinned,
+			   COALESCE(a.confidence, 1.0) AS alias_confidence
 			 FROM entity_aliases a
 			 JOIN entities e ON e.id = a.entity_id AND e.agent_id = a.agent_id
 			 WHERE a.agent_id = ?
@@ -292,6 +306,7 @@ function resolvePromptEntityMatches(db: ReadDb, agentId: string, userMessage: st
 		match_source: "name" | "alias";
 		mentions: number;
 		pinned: number;
+		alias_confidence: number;
 	}>;
 
 	const candidatesByPhrase = new Map<string, PromptEntityCandidate[]>();

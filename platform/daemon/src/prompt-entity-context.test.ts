@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor, initDbAccessorAsync } from "./db-accessor";
 import type { EmbeddingConfig } from "./memory-config";
-import { buildEntityPromptContext, promptPhraseSpan } from "./prompt-entity-context";
+import { buildEntityPromptContext, promptPhraseSpan, scorePromptEntityCandidate } from "./prompt-entity-context";
 
 let dir = "";
 let prev: string | undefined;
@@ -182,5 +182,31 @@ describe("prompt entity context scaling (#1059)", () => {
 			expect(promptPhraseSpan(promptTerms, "ok")).toBeNull();
 			expect(promptPhraseSpan(promptTerms, "nicholai and the signet project plus extra")).toBeNull();
 		});
+	});
+});
+
+describe("alias match penalty", () => {
+	const base = { matched_text: "Matt West", mentions: 10, pinned: 0 } as const;
+
+	it("does not penalise a handle someone actually asserted", () => {
+		const byName = scorePromptEntityCandidate({ ...base, match_source: "name", alias_confidence: 1 });
+		// A declared handle, a header-asserted pairing, and an alias written by an
+		// approved merge all arrive at 1.0. They are exactly as good a name as the
+		// canonical one, and the flat penalty was written when an alias was
+		// something the pipeline had guessed.
+		const byAssertedAlias = scorePromptEntityCandidate({ ...base, match_source: "alias", alias_confidence: 1 });
+		expect(byAssertedAlias).toBe(byName);
+	});
+
+	it("still ranks an inferred alias below the canonical name", () => {
+		const byName = scorePromptEntityCandidate({ ...base, match_source: "name", alias_confidence: 1 });
+		// 0.6 is generator 3 (unambiguous first name), 0.5 is generator 4 (local part).
+		const firstName = scorePromptEntityCandidate({ ...base, match_source: "alias", alias_confidence: 0.6 });
+		const localPart = scorePromptEntityCandidate({ ...base, match_source: "alias", alias_confidence: 0.5 });
+		expect(firstName).toBeLessThan(byName);
+		expect(localPart).toBeLessThan(firstName);
+		// The floor is the old flat penalty, so nothing ranks worse than it used to.
+		const unvouched = scorePromptEntityCandidate({ ...base, match_source: "alias", alias_confidence: 0 });
+		expect(byName - unvouched).toBeCloseTo(0.25, 10);
 	});
 });
