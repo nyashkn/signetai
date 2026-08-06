@@ -64,6 +64,9 @@ export interface TrailOptions {
 	readonly limit?: number;
 	/** Only return paths that end on one of these entity types. */
 	readonly targetTypes?: readonly string[];
+	/** ISO bounds on when the connecting artifact was captured. */
+	readonly since?: string;
+	readonly until?: string;
 }
 
 const DEFAULT_DEPTH = 4;
@@ -216,6 +219,8 @@ export function whatTouched(options: TrailOptions): {
 } {
 	const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIMIT, 1), 500);
 	const minStrength = options.minStrength ?? DEFAULT_MIN_STRENGTH;
+	const since = options.since ?? null;
+	const until = options.until ?? null;
 
 	return getDbAccessor().withReadDb((db) => {
 		const identity = resolveIdentityInTx(db, options.agentId, options.selector);
@@ -242,11 +247,13 @@ export function whatTouched(options: TrailOptions): {
 				        OR d.source_entity_id IN (${placeholders(ids.length)}))
 				   AND other.id NOT IN (${placeholders(ids.length)})
 				   AND COALESCE(other.status, 'active') = 'active'
+				   AND (? IS NULL OR COALESCE(a.captured_at, d.created_at) >= ?)
+				   AND (? IS NULL OR COALESCE(a.captured_at, d.created_at) <= ?)
 				 GROUP BY other.id, d.dependency_type, d.source_path
 				 ORDER BY occurred_at DESC, other.name
 				 LIMIT ?`,
 			)
-			.all(...ids, options.agentId, minStrength, ...ids, ...ids, ...ids, limit) as Array<{
+			.all(...ids, options.agentId, minStrength, ...ids, ...ids, ...ids, since, since, until, until, limit) as Array<{
 			entity_id: string;
 			name: string;
 			entity_type: string;
@@ -428,4 +435,122 @@ export function expandEntityIdsThroughAliases(db: ReadDb, agentId: string, ids: 
 	if (ids.length === 0) return [];
 	const expanded = expandAliasCluster(db, agentId, ids).map((row) => row.id);
 	return [...new Set([...ids, ...expanded])];
+}
+
+/** Entity types that answer "who". Organizations count: "who has seen this" is
+ *  as often a company as a person, and P4a mints both. */
+const ACTOR_ENTITY_TYPES = new Set(["person", "organization"]);
+
+export interface TouchedActor {
+	readonly entityId: string;
+	readonly name: string;
+	readonly entityType: string;
+	/** Every distinct relation this actor has to the thing, strongest first. */
+	readonly relations: readonly string[];
+	readonly strength: number;
+	readonly lastAt: string | null;
+	readonly deepLink: string | null;
+}
+
+/**
+ * The inverse of `what_touched`, and deliberately a wrapper rather than a
+ * second query: the underlying walk is already symmetric — it returns whatever
+ * sits on the other end of an edge — so "who touched this thing" is the same
+ * traversal with an actor filter and a per-actor rollup.
+ *
+ * Rolling up matters. A person on a twelve-message thread is one answer to
+ * "who touched this", not twelve; the raw rows are the trail, not the roster.
+ */
+export function whoTouched(options: TrailOptions): {
+	readonly identity: ResolvedIdentity;
+	readonly actors: readonly TouchedActor[];
+} {
+	const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIMIT, 1), 500);
+	// Over-fetch before filtering: the actor rows are a minority of a thread's
+	// edges, so filtering a limit-sized page would return almost nobody.
+	const raw = whatTouched({ ...options, limit: Math.min(500, limit * 8) });
+
+	const byActor = new Map<string, { actor: TouchedActor; relations: Set<string> }>();
+	for (const item of raw.items) {
+		if (!ACTOR_ENTITY_TYPES.has(item.entityType.toLowerCase())) continue;
+		const existing = byActor.get(item.entityId);
+		if (existing) {
+			existing.relations.add(item.relation);
+			const strength = Math.max(existing.actor.strength, item.strength);
+			const lastAt =
+				existing.actor.lastAt === null || (item.occurredAt !== null && item.occurredAt > existing.actor.lastAt)
+					? (item.occurredAt ?? existing.actor.lastAt)
+					: existing.actor.lastAt;
+			byActor.set(item.entityId, {
+				relations: existing.relations,
+				actor: { ...existing.actor, strength, lastAt, deepLink: existing.actor.deepLink ?? item.deepLink },
+			});
+			continue;
+		}
+		byActor.set(item.entityId, {
+			relations: new Set([item.relation]),
+			actor: {
+				entityId: item.entityId,
+				name: item.name,
+				entityType: item.entityType,
+				relations: [],
+				strength: item.strength,
+				lastAt: item.occurredAt,
+				deepLink: item.deepLink,
+			},
+		});
+	}
+
+	const actors = [...byActor.values()]
+		.map(({ actor, relations }) => ({ ...actor, relations: [...relations].sort() }))
+		.sort(
+			(a, b) =>
+				b.strength - a.strength || (b.lastAt ?? "").localeCompare(a.lastAt ?? "") || a.name.localeCompare(b.name),
+		)
+		.slice(0, limit);
+
+	return { identity: raw.identity, actors };
+}
+
+export interface TimelineEntry {
+	readonly at: string;
+	readonly entityId: string;
+	readonly name: string;
+	readonly entityType: string;
+	readonly relation: string;
+	readonly sourceKind: string | null;
+	readonly deepLink: string | null;
+}
+
+/**
+ * One identity's activity across every connected source, oldest first.
+ *
+ * No new storage: `what_touched` already carries each edge's capture time from
+ * the artifact it came from, so a timeline is that same set under a date window
+ * and read forwards. Sources interleave by construction — an email and a
+ * ClickUp comment on the same afternoon land next to each other because both
+ * carry a real `captured_at`, which is the whole point of asking.
+ *
+ * Entries with no timestamp are dropped rather than bucketed at the epoch: an
+ * undated row at the head of a timeline reads as the oldest event, and it is
+ * really an unknown one.
+ */
+export function identityTimeline(options: TrailOptions): {
+	readonly identity: ResolvedIdentity;
+	readonly entries: readonly TimelineEntry[];
+} {
+	const result = whatTouched(options);
+	const entries = result.items
+		.filter((item): item is typeof item & { occurredAt: string } => item.occurredAt !== null)
+		.map((item) => ({
+			at: item.occurredAt,
+			entityId: item.entityId,
+			name: item.name,
+			entityType: item.entityType,
+			relation: item.relation,
+			sourceKind: item.sourceKind,
+			deepLink: item.deepLink,
+		}))
+		.sort((a, b) => a.at.localeCompare(b.at));
+	return { identity: result.identity, entries };
 }

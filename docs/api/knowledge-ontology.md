@@ -129,6 +129,45 @@ in a memory that is not yet linked. This endpoint does not mutate graph data.
 
 MCP exposes the same report as `knowledge_hygiene_report`.
 
+## Identity trail
+
+Every route here resolves its subject through the alias table first, so any
+spelling — a display name, an email address, a raw entity id — reaches the same
+identity. `agent_id` defaults to `default`, `limit` to 50, `min_strength` to
+0.3.
+
+### GET /api/knowledge/touched
+
+Everything one person or thing is attached to, one row per edge, each with a
+`deepLink` to the artifact it came from.
+
+Query: `who` (required), `limit`, `min_strength`, `since`, `until`, `agent_id`.
+
+### GET /api/knowledge/who-touched
+
+The inverse: the people and organizations attached to a thing, rolled up to one
+row per actor with every distinct `relation` they hold. A person on a
+twelve-message thread is one answer, not twelve.
+
+Query: `thing` (required), `limit`, `min_strength`, `since`, `until`, `agent_id`.
+
+### GET /api/knowledge/timeline
+
+One identity's activity across every connected source, oldest first. No new
+storage — each edge already carries the capture time of the artifact it came
+from, so email and ClickUp interleave by real time. Entries with no timestamp
+are omitted rather than bucketed at the epoch.
+
+Query: `who` (required), `since`, `until`, `limit`, `min_strength`, `agent_id`.
+
+### GET /api/knowledge/trail
+
+Ordered provenance chains out of a person or thing, each hop naming the
+relationship that led there.
+
+Query: `thing` (required), `depth` (1..6, default 4), `types` (comma-separated
+entity types the chain must end on), `limit`, `min_strength`, `agent_id`.
+
 ## Entity aliases
 
 Entity aliases are reviewed ontology metadata used by prompt-submit entity

@@ -24,7 +24,7 @@ import {
 	resolveNamedEntity,
 } from "../knowledge-graph";
 import { getKnowledgeHygieneReport } from "../knowledge-graph-hygiene";
-import { trailFrom, whatTouched } from "../knowledge-trail";
+import { identityTimeline, trailFrom, whatTouched, whoTouched } from "../knowledge-trail";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "../memory-config";
 import { OntologyProposalError, applyOntologyOperation } from "../ontology-proposals";
 import { getTraversalStatus, resolveFocalEntities, traverseKnowledgeGraph } from "../pipeline/graph-traversal";
@@ -397,6 +397,36 @@ export function registerKnowledgeRoutes(app: Hono): void {
 				selector: who,
 				limit: positiveInt(c.req.query("limit")),
 				minStrength: ratio(c.req.query("min_strength")),
+			}),
+		);
+	});
+
+	app.get("/api/knowledge/who-touched", (c) => {
+		const thing = c.req.query("thing")?.trim() ?? "";
+		if (thing.length === 0) return c.json({ error: "thing is required" }, 400);
+		return c.json(
+			whoTouched({
+				agentId: c.req.query("agent_id") ?? "default",
+				selector: thing,
+				limit: positiveInt(c.req.query("limit")),
+				minStrength: ratio(c.req.query("min_strength")),
+				since: c.req.query("since")?.trim() || undefined,
+				until: c.req.query("until")?.trim() || undefined,
+			}),
+		);
+	});
+
+	app.get("/api/knowledge/timeline", (c) => {
+		const who = c.req.query("who")?.trim() ?? "";
+		if (who.length === 0) return c.json({ error: "who is required" }, 400);
+		return c.json(
+			identityTimeline({
+				agentId: c.req.query("agent_id") ?? "default",
+				selector: who,
+				limit: positiveInt(c.req.query("limit")),
+				minStrength: ratio(c.req.query("min_strength")),
+				since: c.req.query("since")?.trim() || undefined,
+				until: c.req.query("until")?.trim() || undefined,
 			}),
 		);
 	});

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
-import { trailFrom, whatTouched } from "./knowledge-trail";
+import { identityTimeline, trailFrom, whatTouched, whoTouched } from "./knowledge-trail";
 import { resolveFocalEntities } from "./pipeline/graph-traversal";
 
 describe("trail queries", () => {
@@ -202,6 +202,31 @@ describe("trail queries", () => {
 		);
 		expect(focal.entityIds).toContain("ent-russ");
 		expect(focal.entityIds).toContain("ent-russ-addr");
+	});
+
+	it("answers who touched a thing with one row per actor", () => {
+		// The message has two people on it and the artifact rows besides. A person
+		// on a twelve-message thread is one answer to "who touched this", not
+		// twelve, so the rollup is the point rather than a formatting nicety.
+		const result = whoTouched({ agentId: "default", selector: "Sales Cycle Time" });
+
+		expect(result.actors.map((actor) => actor.name).sort()).toEqual(["Alecia", "matt@dock-blocks.com"]);
+		const matt = result.actors.find((actor) => actor.name === "matt@dock-blocks.com");
+		expect(matt?.relations).toEqual(["authored_by"]);
+		// Source documents are on the other end of those edges too and are not actors.
+		expect(result.actors.every((actor) => actor.entityType === "person")).toBe(true);
+	});
+
+	it("reads one identity's activity forwards across sources", () => {
+		const result = identityTimeline({ agentId: "default", selector: "Matt West" });
+
+		expect(result.entries.map((entry) => entry.name)).toEqual(["Sales Cycle Time"]);
+		expect(result.entries[0]?.at).toBe("2026-07-10T09:00:00.000Z");
+		expect(result.entries[0]?.deepLink).toBe("message://%3cm1%40dock-blocks.com%3e");
+
+		// A window that excludes the only dated edge returns nothing rather than
+		// falling back to everything.
+		expect(identityTimeline({ agentId: "default", selector: "Matt West", until: "2026-01-01" }).entries).toEqual([]);
 	});
 
 	it("returns an empty answer rather than throwing for an unknown selector", () => {

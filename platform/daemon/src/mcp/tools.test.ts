@@ -285,7 +285,7 @@ describe("createMcpServer", () => {
 		for (const alias of GRAPHIQ_COMPAT_ALIASES) {
 			expect(names).toContain(alias);
 		}
-		expect(names.length).toBe(64);
+		expect(names.length).toBe(66);
 	});
 
 	describe("identity write tools", () => {
