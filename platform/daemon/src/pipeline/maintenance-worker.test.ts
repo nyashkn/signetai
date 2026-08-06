@@ -1,10 +1,10 @@
-import { describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
+import { describe, expect, it } from "bun:test";
 import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
+import { createProviderTracker } from "../diagnostics";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
 import type { PipelineV2Config } from "../memory-config";
-import { createProviderTracker } from "../diagnostics";
 import { startMaintenanceWorker } from "./maintenance-worker";
 
 // ---------------------------------------------------------------------------
@@ -285,6 +285,67 @@ describe("maintenance-worker", () => {
 		const result = await handle.tick();
 		expect(result.recommendations.length).toBeGreaterThan(0);
 		expect(result.executed.length).toBeGreaterThan(0);
+		db.close();
+	});
+
+	it("queues duplicate identities for review on a healthy graph", async () => {
+		// The generator has existed since P4 and nothing ever ran it: it defaults to
+		// a dry run whose candidates are discarded. That is why a corpus can hold a
+		// dozen obvious duplicates and zero proposal rows. There is also no health
+		// metric for this — the report below is "healthy" and the graph still has
+		// two rows for one person — so it cannot hang off buildRecommendations.
+		const db = freshDb();
+		const accessor = asAccessor(db);
+		const tracker = createProviderTracker();
+
+		for (const [id, name] of [
+			["ent-a", "Matt West"],
+			["ent-b", "matt west"],
+		] as const) {
+			db.prepare(
+				`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+				 VALUES (?, ?, 'matt west', 'person', 'default', 4, ?, ?)`,
+			).run(id, name, now, now);
+		}
+
+		const handle = startMaintenanceWorker(accessor, BASE_CFG, tracker, null);
+		handle.stop();
+
+		const result = await handle.tick();
+		expect(result.report.composite.status).toBe("healthy");
+		expect(result.executed.map((r) => r.action)).toContain("proposeEntityMerges");
+
+		const proposals = db
+			.prepare("SELECT operation, status FROM ontology_proposals WHERE agent_id = 'default'")
+			.all() as Array<{ operation: string; status: string }>;
+		expect(proposals).toEqual([{ operation: "merge_entities", status: "pending" }]);
+		db.close();
+	});
+
+	it("reports blocked candidates rather than folding them into nothing-found", async () => {
+		// A blocked candidate is the generator refusing an unsafe merge — here a
+		// type mismatch. Counting it as zero reads as "nothing to do" when the truth
+		// is "something needs you".
+		const db = freshDb();
+		const accessor = asAccessor(db);
+		const tracker = createProviderTracker();
+
+		db.prepare(
+			`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+			 VALUES ('ent-p', 'Caveman', 'caveman', 'person', 'default', 4, ?, ?)`,
+		).run(now, now);
+		db.prepare(
+			`INSERT INTO entities (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+			 VALUES ('ent-t', 'caveman', 'caveman', 'tool', 'default', 2, ?, ?)`,
+		).run(now, now);
+
+		const handle = startMaintenanceWorker(accessor, BASE_CFG, tracker, null);
+		handle.stop();
+
+		const result = await handle.tick();
+		const scan = result.executed.find((r) => r.action === "proposeEntityMerges");
+		expect(scan?.message).toContain("blocked");
+		expect(scan?.affected).toBe(0);
 		db.close();
 	});
 });

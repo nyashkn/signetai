@@ -16,14 +16,15 @@ import { getLlmProvider } from "../llm";
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
 import {
-	type RateLimiter,
 	DEAD_MEMORY_DEFAULT_ACCESS_DAYS,
 	DEAD_MEMORY_DEFAULT_CONFIDENCE,
+	type RateLimiter,
 	type RepairContext,
 	type RepairResult,
 	checkFtsConsistency,
 	createRateLimiter,
 	deduplicateMemories,
+	proposeEntityMerges,
 	releaseStaleLeases,
 	requeueDeadJobs,
 	triggerRetentionSweep,
@@ -134,6 +135,38 @@ function getGraphAgentIds(accessor: DbAccessor): readonly string[] {
  * logged and skipped — consistent with the summary-condensation block
  * below, which is also a non-fatal retroactive LLM pass.
  */
+/**
+ * Look for entities that resolve to one identity and queue merges for review.
+ *
+ * Not driven by `buildRecommendations`, because there is no health metric to
+ * trigger on: duplicate identities do not degrade the composite score, and a
+ * graph can be perfectly healthy and still hold two rows for the same person.
+ * It runs every cycle instead, gated by the repair rate limiter, and writes
+ * only pending proposals — the operator decides, since a merge is irreversible.
+ *
+ * Best-effort like the supersession sweep above: never aborts the cycle.
+ */
+async function runEntityMergeScan(
+	accessor: DbAccessor,
+	agentId: string,
+	cfg: PipelineV2Config,
+	limiter: RateLimiter,
+	ctx: RepairContext,
+	executed: RepairResult[],
+): Promise<void> {
+	try {
+		const result = await proposeEntityMerges(accessor, cfg, ctx, limiter, { agentId });
+		if (result.success && (result.affected > 0 || (result.totalMatching ?? 0) > 0)) {
+			executed.push(result);
+		}
+	} catch (e) {
+		logger.warn("maintenance", "Entity merge scan skipped (non-fatal)", {
+			agentId,
+			error: e instanceof Error ? e.message : String(e),
+		});
+	}
+}
+
 async function runSupersessionSweep(accessor: DbAccessor, agentId: string, cfg: PipelineV2Config): Promise<void> {
 	if (!cfg.structural.supersessionSweepEnabled) return;
 	try {
@@ -246,11 +279,25 @@ export function startMaintenanceWorker(
 
 	async function doTick(): Promise<MaintenanceCycleResult> {
 		const report = accessor.withReadDb((db) => getDiagnostics(db, tracker));
+		const ctx: RepairContext = {
+			reason: "autonomous maintenance",
+			actor: "maintenance-worker",
+			actorType: "daemon",
+		};
 
 		const recommendations = buildRecommendations(report);
 		const executed: RepairResult[] = [];
 		let feedbackDecayedAspects = 0;
 		let feedbackPropagatedAttributes = 0;
+
+		// Gated on the graph alone, not on feedback: two rows for one person is a
+		// graph defect whether or not aspect decay is switched on.
+		async function scanForDuplicateIdentities(): Promise<void> {
+			if (!cfg.graph.enabled) return;
+			for (const agentId of getGraphAgentIds(accessor)) {
+				await runEntityMergeScan(accessor, agentId, cfg, limiter, ctx, executed);
+			}
+		}
 
 		if (recommendations.length === 0) {
 			haltTracker.reset();
@@ -272,6 +319,7 @@ export function startMaintenanceWorker(
 					feedbackPropagatedAttributes,
 				});
 			}
+			await scanForDuplicateIdentities();
 			return {
 				report,
 				recommendations,
@@ -296,12 +344,6 @@ export function startMaintenanceWorker(
 		}
 
 		// Execute mode
-		const ctx: RepairContext = {
-			reason: "autonomous maintenance",
-			actor: "maintenance-worker",
-			actorType: "daemon",
-		};
-
 		const preScore = report.composite.score;
 
 		for (const rec of recommendations) {
@@ -353,6 +395,8 @@ export function startMaintenanceWorker(
 				feedbackPropagatedAttributes,
 			});
 		}
+
+		await scanForDuplicateIdentities();
 
 		// Check for summary condensation opportunities (session -> arc -> epoch)
 		try {

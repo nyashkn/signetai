@@ -2902,3 +2902,75 @@ export function pruneTerminalJobs(
 		totalMatching: dryRun ? result.totalMatching : undefined,
 	};
 }
+
+/**
+ * Write pending merge proposals for entities that resolve to the same identity.
+ *
+ * The generator has existed since P4 and nothing ever ran it: it defaults to a
+ * dry run whose candidates are discarded, and no scheduler called it. That is
+ * why the live corpus held twelve obvious duplicates and zero proposal rows —
+ * every one of them found, every one thrown away.
+ *
+ * It writes proposals, never merges. A merge hard-deletes the source entity and
+ * there is no lineage table, so the operator decides.
+ *
+ * Blocked candidates are reported separately from "nothing new". Blocked means
+ * the generator refused an unsafe merge — usually mismatched entity types —
+ * and folding that into a zero reads as a silent failure.
+ */
+export async function proposeEntityMerges(
+	accessor: DbAccessor,
+	cfg: PipelineV2Config,
+	ctx: RepairContext,
+	limiter: RateLimiter,
+	options?: {
+		readonly agentId?: string;
+		readonly limit?: number;
+		readonly dryRun?: boolean;
+	},
+): Promise<RepairResult> {
+	const action = "proposeEntityMerges";
+	// Reuses the dedup budget rather than adding a config key: this runs on the
+	// same cycle, is the same kind of consolidation work, and a second knob for
+	// it would be one more thing to tune wrong.
+	const gate = checkRepairGate(cfg, ctx, limiter, action, cfg.repair.dedupCooldownMs, cfg.repair.dedupHourlyBudget);
+	if (!gate.allowed) {
+		return { action, success: false, affected: 0, message: gate.reason ?? "denied by policy gate" };
+	}
+
+	const { proposeDuplicateEntityMerges } = await import("./ontology-proposals");
+	const agentId = options?.agentId ?? "default";
+	const dryRun = options?.dryRun ?? false;
+	const scan = proposeDuplicateEntityMerges(accessor, {
+		agentId,
+		limit: options?.limit ?? 25,
+		writeProposals: !dryRun,
+	});
+	limiter.record(action);
+
+	const blocked = scan.items.filter((item) => item.blocked).length;
+	const written = scan.writtenCount;
+	if (written > 0 || blocked > 0) {
+		logger.info("pipeline", "repair: proposed entity merges", {
+			agentId,
+			written,
+			blocked,
+			candidates: scan.count,
+			dryRun,
+			actor: ctx.actor,
+			reason: ctx.reason,
+		});
+	}
+
+	const blockedNote = blocked > 0 ? `, ${blocked} blocked` : "";
+	return {
+		action,
+		success: true,
+		affected: written,
+		message: dryRun
+			? `dry-run: ${scan.count} duplicate identity candidate(s)${blockedNote}`
+			: `proposed ${written} entity merge(s) for review${blockedNote}`,
+		totalMatching: scan.count,
+		details: { agentId, blocked, candidates: scan.count },
+	};
+}
