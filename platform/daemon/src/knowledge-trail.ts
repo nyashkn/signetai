@@ -92,6 +92,65 @@ interface EntityRow {
  * the same set, or a trail depends on which spelling the caller happened to
  * know.
  */
+/**
+ * Guard, not a limit anyone should reach. Identity clusters are a handful of
+ * spellings; a run this deep means the alias table has a cycle worth noticing
+ * rather than a person worth resolving.
+ */
+const MAX_ALIAS_HOPS = 8;
+
+/**
+ * Every entity reachable from `rootId` through the alias table, to a fixpoint.
+ *
+ * Aliases chain. A principal declaration puts `KN` beside two addresses while a
+ * header puts `Njui` beside one of them — one hop from `KN` never reaches
+ * `Njui`, so `what_touched` returned a different set depending on which
+ * spelling the caller happened to type. P4 solved this at proposal-generation
+ * time ("transitive collapse") and the resolver never got it.
+ *
+ * The expansion runs in both directions at each hop: the rows an alias points
+ * at, and the rows whose canonical name an alias spells.
+ */
+function expandAliasCluster(db: ReadDb, agentId: string, rootId: string): EntityRow[] {
+	const found = new Map<string, EntityRow>();
+	let frontier: string[] = [rootId];
+
+	for (let hop = 0; hop < MAX_ALIAS_HOPS && frontier.length > 0; hop++) {
+		const seedRows = frontier.map(() => "SELECT ? AS id").join(" UNION ALL ");
+		const rows = db
+			.prepare(
+				`WITH seed AS (${seedRows})
+				 SELECT e.id, e.name, e.entity_type, e.canonical_name FROM entities e
+				 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active'
+				   AND (
+				     e.id IN (SELECT id FROM seed)
+				     OR e.canonical_name IN (
+				       SELECT a.canonical_alias FROM entity_aliases a
+				       WHERE a.agent_id = ? AND a.status = 'active' AND a.entity_id IN (SELECT id FROM seed)
+				     )
+				     OR e.id IN (
+				       SELECT a.entity_id FROM entity_aliases a
+				       WHERE a.agent_id = ? AND a.status = 'active'
+				         AND a.canonical_alias IN (SELECT canonical_name FROM entities WHERE id IN (SELECT id FROM seed))
+				     )
+				   )`,
+			)
+			.all(...frontier, agentId, agentId, agentId) as EntityRow[];
+
+		// Only genuinely new rows extend the frontier, so a cycle terminates on
+		// its own rather than on the hop guard.
+		const next: string[] = [];
+		for (const row of rows) {
+			if (found.has(row.id)) continue;
+			found.set(row.id, row);
+			next.push(row.id);
+		}
+		frontier = next;
+	}
+
+	return [...found.values()];
+}
+
 export function resolveIdentityInTx(db: ReadDb, agentId: string, selector: string): ResolvedIdentity {
 	const raw = selector.trim();
 	if (raw.length === 0) return { entityIds: [], names: [], matchedVia: "none" };
@@ -126,28 +185,7 @@ export function resolveIdentityInTx(db: ReadDb, agentId: string, selector: strin
 	const rootId = seed?.id ?? aliasSeedId;
 	if (rootId === null || rootId === undefined) return { entityIds: [], names: [], matchedVia: "none" };
 
-	// Everything the alias table ties to this row, in both directions: the rows
-	// an alias points at, and the rows whose canonical name an alias spells.
-	const cluster = db
-		.prepare(
-			`WITH seed AS (SELECT ? AS id)
-			 SELECT e.id, e.name, e.entity_type, e.canonical_name FROM entities e
-			 WHERE e.agent_id = ? AND COALESCE(e.status, 'active') = 'active'
-			   AND (
-			     e.id IN (SELECT id FROM seed)
-			     OR e.canonical_name IN (
-			       SELECT a.canonical_alias FROM entity_aliases a
-			       WHERE a.agent_id = ? AND a.status = 'active' AND a.entity_id IN (SELECT id FROM seed)
-			     )
-			     OR e.id IN (
-			       SELECT a.entity_id FROM entity_aliases a
-			       WHERE a.agent_id = ? AND a.status = 'active'
-			         AND a.canonical_alias IN (SELECT canonical_name FROM entities WHERE id IN (SELECT id FROM seed))
-			     )
-			   )`,
-		)
-		.all(rootId, agentId, agentId, agentId) as EntityRow[];
-
+	const cluster = expandAliasCluster(db, agentId, rootId);
 	const rows = cluster.length > 0 ? cluster : seed ? [seed] : [];
 	return {
 		entityIds: rows.map((row) => row.id),

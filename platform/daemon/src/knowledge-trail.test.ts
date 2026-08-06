@@ -147,6 +147,34 @@ describe("trail queries", () => {
 		}
 	});
 
+	it("resolves a chained alias cluster the same way from either end", () => {
+		// Aliases chain: a principal declaration puts "KN" beside one address
+		// while a header puts a second address beside the first. One hop from
+		// "KN" never reaches the far end, so the answer used to depend on which
+		// spelling the caller happened to type.
+		entity("ent-kn", "KN", "person");
+		entity("ent-pvt", "njui@pivotplanit.com", "person");
+		entity("ent-gmail", "nyashkn@gmail.com", "person");
+		getDbAccessor().withWriteTx((db) => {
+			const insert = db.prepare(
+				`INSERT INTO entity_aliases
+				 (id, entity_id, agent_id, alias, canonical_alias, alias_kind, confidence, source, status, created_at, updated_at)
+				 VALUES (?, ?, 'default', ?, ?, 'email', 1.0, 'user-asserted: test', 'active',
+				         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+			);
+			// KN -> njui@pivotplanit.com
+			insert.run("al-kn", "ent-kn", "njui@pivotplanit.com", "njui@pivotplanit.com");
+			// njui@pivotplanit.com -> nyashkn@gmail.com
+			insert.run("al-pvt", "ent-pvt", "nyashkn@gmail.com", "nyashkn@gmail.com");
+		});
+
+		const expected = ["ent-gmail", "ent-kn", "ent-pvt"];
+		for (const selector of ["KN", "njui@pivotplanit.com", "nyashkn@gmail.com", "ent-gmail"]) {
+			const identity = whatTouched({ agentId: "default", selector }).identity;
+			expect({ selector, ids: [...identity.entityIds].sort() }).toEqual({ selector, ids: expected });
+		}
+	});
+
 	it("returns an empty answer rather than throwing for an unknown selector", () => {
 		const result = whatTouched({ agentId: "default", selector: "nobody at all" });
 		expect(result.identity.matchedVia).toBe("none");
