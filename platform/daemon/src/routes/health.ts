@@ -9,8 +9,9 @@ import {
 	type QueueHealth,
 	getQueueHealth,
 } from "../diagnostics";
+import { type EmbeddingProviderConflict, describeEmbeddingProviderConflict } from "../embedding-index-state";
 import { getAllFeatureFlags } from "../feature-flags";
-import { loadMemoryConfig } from "../memory-config";
+import { type EmbeddingConfig, loadMemoryConfig } from "../memory-config";
 import { getResourceSnapshot } from "../resource-monitor";
 import { getUpdateState } from "../update-system";
 import {
@@ -86,6 +87,21 @@ interface EmbeddingCheck {
 	readonly note?: string;
 	readonly error?: string;
 	readonly checkedAt?: string;
+	/**
+	 * Present only when the active profile is overriding the configured provider.
+	 * `provider` above is what was configured, so without this a health check
+	 * reports a provider that is not the one serving recall.
+	 */
+	readonly providerConflict?: EmbeddingProviderConflict;
+}
+
+/** Never fail a health check because the conflict probe could not read the DB. */
+function readEmbeddingProviderConflict(cfg: EmbeddingConfig): EmbeddingProviderConflict | null {
+	try {
+		return getDbAccessor().withReadDb((db) => describeEmbeddingProviderConflict(db, cfg));
+	} catch {
+		return null;
+	}
 }
 
 /** Embedding gates readiness when a provider is configured; "none" means intentionally disabled. */
@@ -112,17 +128,31 @@ async function checkEmbedding(): Promise<{ ok: boolean; detail: EmbeddingCheck; 
 			EMBEDDING_CHECK_TIMEOUT_MS,
 			new Error("embedding check timed out"),
 		);
+		const conflict = readEmbeddingProviderConflict(cfg);
 		if (status.available) {
 			return {
 				ok: true,
-				detail: { provider: status.provider, available: true, checkedAt: status.checkedAt },
+				detail: {
+					provider: status.provider,
+					available: true,
+					checkedAt: status.checkedAt,
+					...(conflict ? { providerConflict: conflict } : {}),
+				},
+				// A provider override is not an outage — recall works, it is simply
+				// answered by a different model than the config names.
 				reason: null,
 			};
 		}
 		const err = status.error ?? "provider unreachable";
 		return {
 			ok: false,
-			detail: { provider: status.provider, available: false, error: err, checkedAt: status.checkedAt },
+			detail: {
+				provider: status.provider,
+				available: false,
+				error: err,
+				checkedAt: status.checkedAt,
+				...(conflict ? { providerConflict: conflict } : {}),
+			},
 			reason: `embedding provider ${status.provider} unavailable: ${err}`,
 		};
 	} catch (err) {

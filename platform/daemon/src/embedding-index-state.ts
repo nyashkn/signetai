@@ -57,6 +57,50 @@ export function resolveActiveEmbeddingConfig(db: ReadDb, configured: EmbeddingCo
 	};
 }
 
+export interface EmbeddingProviderConflict {
+	/** What `agent.yaml` (or the environment) asked for. */
+	readonly configuredProvider: EmbeddingConfig["provider"];
+	/** What actually serves recall, because the active profile pins the vector space. */
+	readonly activeProvider: EmbeddingConfig["provider"];
+	/** True while a staged generation is being rebuilt toward the configured profile. */
+	readonly migrationPending: boolean;
+}
+
+/**
+ * The gap between the provider that was configured and the one actually serving.
+ *
+ * `resolveActiveEmbeddingConfig` replaces `provider` with whatever
+ * `embedding_index_state.active` pins, and that is correct — the active profile
+ * owns the vector space, and answering a query with vectors from a different
+ * model returns confident nonsense. What is missing is any signal that the
+ * override happened, so editing `embedding.provider` reads as a no-op.
+ *
+ * It matters most on one shape. When the active provider is `native`, work
+ * routes into the ONNX worker, which segfaults Bun outright on this codebase —
+ * and a process that dies cannot report why. `embedding.warmNative: false` is
+ * the switch that avoids it, and it has to be set *before* the crash, so the
+ * conflict has to be visible at startup rather than diagnosed after.
+ *
+ * Only a differing **provider** counts. A different model under the same
+ * provider is a real change but not one that routes work into a crashing
+ * module, and warning about it would train the operator to ignore the warning.
+ */
+export function describeEmbeddingProviderConflict(
+	db: ReadDb,
+	configured: EmbeddingConfig,
+): EmbeddingProviderConflict | null {
+	// A pinned profile is returned verbatim by resolution — nothing is overridden.
+	if (configured.profile) return null;
+	const state = readEmbeddingIndexState(db);
+	if (!state) return null;
+	if (state.active.provider === configured.provider) return null;
+	return {
+		configuredProvider: configured.provider,
+		activeProvider: state.active.provider,
+		migrationPending: state.state === "building",
+	};
+}
+
 /** True only while `cfg` still describes the generation that owns active recall. */
 export function isActiveEmbeddingConfig(db: ReadDb, cfg: EmbeddingConfig): boolean {
 	const state = readEmbeddingIndexState(db);

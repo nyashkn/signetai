@@ -230,6 +230,30 @@ the new profile; only then is the new index promoted. Check
 coverage. If the daemon restarts, the incomplete staged build resumes; a
 failed build leaves the active index unchanged.
 
+**While that migration is pending, `provider` is not the provider in use.** The
+active profile owns the vector space, so it keeps serving recall until the
+staged build is promoted — answering a query with vectors from a different
+model would return confident nonsense. Editing `embedding.provider` therefore
+looks like it does nothing until the rebuild finishes. The daemon logs a
+`Configured embedding provider is not the one serving recall` warning at
+startup when the two differ, and `GET /api/embeddings/status` and
+`GET /health` both report a `providerConflict` object naming each side.
+
+This matters most when the **active** provider is `native`: work routes into
+the native ONNX path regardless of what `provider` says, and that path can take
+the whole daemon process down. Setting `provider` to something else does not
+avoid it — `warmNative` is the switch that does, because it gates the native
+path independently of the resolved provider:
+
+```yaml
+embedding:
+  provider: ollama
+  warmNative: false   # never route to native, whatever the active profile pins
+```
+
+A crash of that kind kills the process outright, so nothing in-process can
+detect it and fall back; the flag has to be set before it matters.
+
 Recommended Ollama models:
 
 | Model | Dimensions | Notes |

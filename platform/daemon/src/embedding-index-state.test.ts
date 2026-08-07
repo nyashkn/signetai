@@ -1,15 +1,16 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
+import type { WriteDb } from "./db-accessor";
 import {
 	beginEmbeddingIndexBuild,
+	describeEmbeddingProviderConflict,
 	ensureEmbeddingIndexState,
 	failEmbeddingIndexBuild,
 	isActiveEmbeddingConfig,
 	readEmbeddingIndexState,
 	resolveActiveEmbeddingConfig,
 } from "./embedding-index-state";
-import type { WriteDb } from "./db-accessor";
 import type { EmbeddingConfig } from "./memory-config";
 
 const config: EmbeddingConfig = {
@@ -98,6 +99,58 @@ describe("embedding index state", () => {
 			)
 			.run();
 		expect(isActiveEmbeddingConfig(db, config)).toBe(false);
+	});
+
+	/**
+	 * The operator edits `embedding.provider` and nothing appears to happen,
+	 * because the active profile pins the vector space and wins — correctly. The
+	 * cost is that the divergence is invisible, and on this exact shape (active
+	 * `native`, configured anything else) the native ONNX worker segfaults Bun
+	 * outright. A dead process cannot report its own conflict, so it has to be
+	 * said before it matters.
+	 */
+	it("reports a configured provider the active profile is overriding", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		raw.exec(
+			"CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT)",
+		);
+		const db = raw as unknown as WriteDb;
+
+		ensureEmbeddingIndexState(db, config);
+		const asked: EmbeddingConfig = { ...config, provider: "ollama", base_url: "http://127.0.0.1:11434" };
+		beginEmbeddingIndexBuild(db, asked);
+
+		expect(describeEmbeddingProviderConflict(db, asked)).toEqual({
+			configuredProvider: "ollama",
+			activeProvider: "native",
+			migrationPending: true,
+		});
+	});
+
+	it("does not report a conflict when the configured provider is already active", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		const db = raw as unknown as WriteDb;
+
+		ensureEmbeddingIndexState(db, config);
+		// Same provider, different model: a real change, but not the one that
+		// routes work to a crashing module. Reporting it would train the operator
+		// to ignore the warning.
+		expect(describeEmbeddingProviderConflict(db, { ...config, model: "qwen3-embedding:0.6b" })).toBeNull();
+		expect(describeEmbeddingProviderConflict(db, config)).toBeNull();
+	});
+
+	it("reports nothing when the caller pinned a profile, because nothing is overridden", () => {
+		const raw = new Database(":memory:");
+		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		const db = raw as unknown as WriteDb;
+
+		ensureEmbeddingIndexState(db, config);
+		// `resolveActiveEmbeddingConfig` returns a profile-pinned config verbatim,
+		// so there is no override to warn about.
+		const pinned: EmbeddingConfig = { ...config, provider: "ollama", profile: "nomic-embed-text-v1.5" };
+		expect(describeEmbeddingProviderConflict(db, pinned)).toBeNull();
 	});
 
 	it("normalizes malformed config before it becomes durable state", () => {

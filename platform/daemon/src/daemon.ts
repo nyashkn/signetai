@@ -47,7 +47,7 @@ import { clearAllPresence } from "./cross-agent";
 import { closeDbAccessor, getDbAccessor, getVectorRuntimeStatus, initDbAccessorAsync } from "./db-accessor";
 import { fetchEmbedding } from "./embedding-fetch";
 import { type EmbeddingIndexMigrationHandle, startEmbeddingIndexMigration } from "./embedding-index-migration";
-import { resolveActiveEmbeddingConfig } from "./embedding-index-state";
+import { describeEmbeddingProviderConflict, resolveActiveEmbeddingConfig } from "./embedding-index-state";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { initFeatureFlags } from "./feature-flags";
 import { writeFileIfChangedAsync } from "./file-sync";
@@ -1307,11 +1307,32 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const activeEmbeddingCfg = getDbAccessor().withReadDb((db) => resolveActiveEmbeddingConfig(db, memoryCfg.embedding));
 	configureLlmConcurrency(memoryCfg.pipelineV2.worker.maxLlmConcurrency);
+	// Report what actually serves recall. This line used to print the *configured*
+	// values under the word "Resolved", so a startup log could say `ollama` while
+	// every embedding call went to `native`.
 	logger.info("config", "Resolved embedding config", {
-		provider: memoryCfg.embedding.provider,
-		model: memoryCfg.embedding.model,
-		dimensions: memoryCfg.embedding.dimensions,
+		provider: activeEmbeddingCfg.provider,
+		model: activeEmbeddingCfg.model,
+		dimensions: activeEmbeddingCfg.dimensions,
 	});
+
+	// The active profile legitimately overrides the configured provider — it owns
+	// the vector space. But the override is otherwise silent, so editing
+	// `embedding.provider` looks like a no-op, and when the active provider is
+	// `native` the ONNX worker takes the whole Bun process down with it. Nothing
+	// in-process can catch a segfault, so the only useful moment is now.
+	const embeddingConflict = getDbAccessor().withReadDb((db) =>
+		describeEmbeddingProviderConflict(db, memoryCfg.embedding),
+	);
+	if (embeddingConflict) {
+		logger.warn("config", "Configured embedding provider is not the one serving recall", {
+			...embeddingConflict,
+			hint:
+				embeddingConflict.activeProvider === "native"
+					? "the native ONNX path can crash the daemon; set embedding.warmNative: false (or SIGNET_EMBEDDING_WARM_NATIVE=0) to route to the local fallback"
+					: "the active profile pins the vector space; the configured provider takes over once the staged rebuild completes",
+		});
+	}
 
 	reloadAuthState(AGENTS_DIR);
 	if (!transcriptCaptureWorkerHandle) {

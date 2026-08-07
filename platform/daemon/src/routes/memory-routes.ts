@@ -14,6 +14,7 @@ import { fetchEmbedding } from "../embedding-fetch";
 import { buildEmbeddingHealth } from "../embedding-health";
 import { stagingCoverage } from "../embedding-index-migration";
 import {
+	describeEmbeddingProviderConflict,
 	isActiveEmbeddingConfig,
 	readEmbeddingIndexState,
 	resolveActiveEmbeddingConfig,
@@ -3162,14 +3163,22 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 	// GET /api/embeddings/status
 	// =========================================================================
 	app.get("/api/embeddings/status", async (c) => {
-		const config = withActiveEmbeddingConfig(loadMemoryConfig(AGENTS_DIR));
+		// `withActiveEmbeddingConfig` resolves the active profile over the
+		// configured one, so every field below already describes what is serving.
+		// The unresolved config is read separately because the difference between
+		// the two is the thing an operator cannot otherwise see.
+		const configured = loadMemoryConfig(AGENTS_DIR);
+		const config = withActiveEmbeddingConfig(configured);
 		const status = await checkEmbeddingProvider(config.embedding);
 		const tracker = embeddingTrackerHandle?.getStats() ?? null;
-		const index = getDbAccessor().withReadDb((db) => {
+		const { index, providerConflict } = getDbAccessor().withReadDb((db) => {
 			const state = readEmbeddingIndexState(db);
-			return state?.staging ? { ...state, coverage: stagingCoverage(db, state.staging.dimensions) } : state;
+			return {
+				index: state?.staging ? { ...state, coverage: stagingCoverage(db, state.staging.dimensions) } : state,
+				providerConflict: describeEmbeddingProviderConflict(db, configured.embedding),
+			};
 		});
-		return c.json({ ...status, tracker, index });
+		return c.json({ ...status, tracker, index, providerConflict });
 	});
 
 	// =========================================================================
