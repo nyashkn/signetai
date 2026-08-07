@@ -150,6 +150,32 @@ describe("email-source-provider", () => {
 		expect(bodies.length).toBeGreaterThan(0);
 	});
 
+	it("stores captured_at as ISO so email can be ordered against other sources", async () => {
+		// Regression: `capturedAt` took the RFC 2822 `Date:` header verbatim while
+		// every other connector stored ISO. `captured_at` is TEXT and is ordered as
+		// TEXT, so email sorted alphabetically by weekday name. The fixture is
+		// enough to prove it: "Mon, 03 Aug" sorts *before* "Sun, 02 Aug", so the
+		// newest message came back as the oldest and a cross-source timeline was
+		// meaningless — while every row still looked like a perfectly good date.
+		await sync();
+
+		const stored = rows<{ captured_at: string }>(
+			`SELECT captured_at FROM memory_artifacts
+			 WHERE source_kind = 'source_email_message' ORDER BY captured_at ASC`,
+		);
+		expect(stored.length).toBe(3);
+		for (const row of stored) {
+			expect(row.captured_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+		}
+
+		// Ordering by the stored column must equal true chronological order.
+		expect(stored.map((row) => row.captured_at)).toEqual([
+			"2026-08-02T16:43:30.000Z",
+			"2026-08-02T18:00:00.000Z",
+			"2026-08-03T06:15:14.000Z",
+		]);
+	});
+
 	it("writes author, recipient and cc edges from headers", async () => {
 		await sync();
 		const edges = rows<{ dependency_type: string; target: string; strength: number }>(

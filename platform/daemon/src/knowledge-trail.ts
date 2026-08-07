@@ -40,6 +40,35 @@ export interface TouchedItem {
 	readonly deepLink: string | null;
 }
 
+/**
+ * A thing that *names* this identity, as opposed to one joined to it by an edge.
+ *
+ * These come from `memory_entity_mentions` — extraction's output, so a model
+ * decided the text was about this person. That is a materially weaker claim
+ * than an `authored_by` edge derived from an RFC 5322 header, and the locked
+ * rule is that inferred links never present as provenance. Hence a separate
+ * field rather than more rows in `items`: a caller has to opt into showing them
+ * and cannot mistake one for the other.
+ *
+ * Worth the trouble because it is most of the cross-source reach. Matt West is
+ * on no ClickUp task as a member — he is external to the workspace — yet 22
+ * tasks discuss him by name. On edges alone, "what have we given Matt to act
+ * on" answers nothing.
+ */
+export interface MentionedItem {
+	readonly memoryId: string;
+	/** The memory's own text — what was actually said. */
+	readonly summary: string;
+	/** The literal span extraction matched, when it recorded one. */
+	readonly mentionText: string | null;
+	/** Extraction's own confidence. Never 1.0 in practice; treat as inferred. */
+	readonly confidence: number;
+	readonly sourceKind: string | null;
+	readonly sourcePath: string | null;
+	readonly occurredAt: string | null;
+	readonly deepLink: string | null;
+}
+
 export interface TrailHop {
 	readonly entityId: string;
 	readonly name: string;
@@ -212,10 +241,18 @@ function linkFor(sourceKind: string | null, sourcePath: string | null, metaJson:
  * Deliberately flat rather than a walk: this is the profile-page query and the
  * cheap first answer to "what have we given them to act on". `trailFrom` is
  * where multi-hop lives.
+ *
+ * Two result sets, never one. `items` are edges — asserted by a connector from
+ * a header or an API field. `mentions` are extraction's output, where a model
+ * read text and decided it was about this person. Both answer the question;
+ * only the first is provenance. Merging them would let an inferred link render
+ * identically to a transport-asserted one, which the write policy forbids for
+ * the same reason it forbids auto-applying a merge.
  */
 export function whatTouched(options: TrailOptions): {
 	readonly identity: ResolvedIdentity;
 	readonly items: readonly TouchedItem[];
+	readonly mentions: readonly MentionedItem[];
 } {
 	const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIMIT, 1), 500);
 	const minStrength = options.minStrength ?? DEFAULT_MIN_STRENGTH;
@@ -224,7 +261,7 @@ export function whatTouched(options: TrailOptions): {
 
 	return getDbAccessor().withReadDb((db) => {
 		const identity = resolveIdentityInTx(db, options.agentId, options.selector);
-		if (identity.entityIds.length === 0) return { identity, items: [] };
+		if (identity.entityIds.length === 0) return { identity, items: [], mentions: [] };
 
 		const ids = identity.entityIds;
 		const rows = db
@@ -278,8 +315,70 @@ export function whatTouched(options: TrailOptions): {
 				occurredAt: row.occurred_at,
 				deepLink: linkFor(row.source_kind, row.source_path, row.meta),
 			})),
+			mentions: mentionsOf(db, options.agentId, ids, { limit, since, until }),
 		};
 	});
+}
+
+/** Longer than a headline, short enough that a list of these stays readable. */
+const MENTION_SUMMARY_CHARS = 400;
+
+/**
+ * Memories that name this identity, newest first.
+ *
+ * The join runs `memory_entity_mentions → memories → memory_artifacts`: the
+ * mention says who, the memory says what was said, and the artifact is the only
+ * row carrying a `source_kind` and the metadata a deep link is built from. Drop
+ * the last join and every mention comes back unfollowable, which is precisely
+ * how this reach stayed invisible — the data was written, and nothing read it.
+ */
+function mentionsOf(
+	db: ReadDb,
+	agentId: string,
+	entityIds: readonly string[],
+	window: { readonly limit: number; readonly since: string | null; readonly until: string | null },
+): MentionedItem[] {
+	const rows = db
+		.prepare(
+			`SELECT mem.memory_id AS memory_id, mem.mention_text AS mention_text,
+			        COALESCE(mem.confidence, 0.5) AS confidence,
+			        m.content AS content, m.source_path AS source_path,
+			        a.source_kind AS source_kind, a.source_meta_json AS meta,
+			        COALESCE(a.captured_at, m.created_at) AS occurred_at
+			 FROM memory_entity_mentions mem
+			 JOIN memories m ON m.id = mem.memory_id
+			 LEFT JOIN memory_artifacts a
+			   ON a.agent_id = m.agent_id AND a.source_path = m.source_path
+			      AND COALESCE(a.is_deleted, 0) = 0
+			 WHERE mem.entity_id IN (${placeholders(entityIds.length)})
+			   AND m.agent_id = ?
+			   AND COALESCE(m.is_deleted, 0) = 0
+			   AND (? IS NULL OR COALESCE(a.captured_at, m.created_at) >= ?)
+			   AND (? IS NULL OR COALESCE(a.captured_at, m.created_at) <= ?)
+			 ORDER BY occurred_at DESC
+			 LIMIT ?`,
+		)
+		.all(...entityIds, agentId, window.since, window.since, window.until, window.until, window.limit) as Array<{
+		memory_id: string;
+		mention_text: string | null;
+		confidence: number;
+		content: string | null;
+		source_path: string | null;
+		source_kind: string | null;
+		meta: string | null;
+		occurred_at: string | null;
+	}>;
+
+	return rows.map((row) => ({
+		memoryId: row.memory_id,
+		summary: (row.content ?? "").slice(0, MENTION_SUMMARY_CHARS),
+		mentionText: row.mention_text,
+		confidence: row.confidence,
+		sourceKind: row.source_kind,
+		sourcePath: row.source_path,
+		occurredAt: row.occurred_at,
+		deepLink: linkFor(row.source_kind, row.source_path, row.meta),
+	}));
 }
 
 interface WalkRow {
@@ -520,6 +619,13 @@ export interface TimelineEntry {
 	readonly relation: string;
 	readonly sourceKind: string | null;
 	readonly deepLink: string | null;
+	/**
+	 * True when this entry came from an extraction mention rather than a
+	 * connector-asserted edge. A timeline that silently mixed the two would let
+	 * a model's reading of a sentence sit in the same column as an RFC 5322
+	 * header, so the distinction travels with the row.
+	 */
+	readonly inferred: boolean;
 }
 
 /**
@@ -534,13 +640,20 @@ export interface TimelineEntry {
  * Entries with no timestamp are dropped rather than bucketed at the epoch: an
  * undated row at the head of a timeline reads as the oldest event, and it is
  * really an unknown one.
+ *
+ * Mentions are included here, flagged, where `what_touched` keeps them in their
+ * own field. A timeline answers "what was going on around this person", and for
+ * anyone outside your own workspace the mentions *are* the cross-source half —
+ * an external correspondent is on no task as a member while being the subject
+ * of a dozen. Excluding them would answer the question with a straight face and
+ * leave out most of the year.
  */
 export function identityTimeline(options: TrailOptions): {
 	readonly identity: ResolvedIdentity;
 	readonly entries: readonly TimelineEntry[];
 } {
 	const result = whatTouched(options);
-	const entries = result.items
+	const fromEdges = result.items
 		.filter((item): item is typeof item & { occurredAt: string } => item.occurredAt !== null)
 		.map((item) => ({
 			at: item.occurredAt,
@@ -550,7 +663,26 @@ export function identityTimeline(options: TrailOptions): {
 			relation: item.relation,
 			sourceKind: item.sourceKind,
 			deepLink: item.deepLink,
-		}))
-		.sort((a, b) => a.at.localeCompare(b.at));
+			inferred: false,
+		}));
+	const fromMentions = result.mentions
+		.filter((item): item is typeof item & { occurredAt: string } => item.occurredAt !== null)
+		.map((item) => ({
+			at: item.occurredAt,
+			entityId: item.memoryId,
+			name: firstLine(item.summary),
+			entityType: "memory",
+			relation: "mentioned in",
+			sourceKind: item.sourceKind,
+			deepLink: item.deepLink,
+			inferred: true,
+		}));
+	const entries = [...fromEdges, ...fromMentions].sort((a, b) => a.at.localeCompare(b.at));
 	return { identity: result.identity, entries };
+}
+
+/** A memory's headline. Extraction writes a markdown `# Title` first when it has one. */
+function firstLine(text: string): string {
+	const line = text.split("\n", 1)[0] ?? "";
+	return line.replace(/^#+\s*/, "").trim() || text.slice(0, 80).trim();
 }

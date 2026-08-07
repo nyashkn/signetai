@@ -138,8 +138,22 @@ identity. `agent_id` defaults to `default`, `limit` to 50, `min_strength` to
 
 ### GET /api/knowledge/touched
 
-Everything one person or thing is attached to, one row per edge, each with a
-`deepLink` to the artifact it came from.
+Everything one person or thing is attached to, each row with a `deepLink` to the
+artifact it came from.
+
+Two result sets, never merged:
+
+- `items` — one row per **edge**, asserted by a connector from a header or an
+  API field (`authored_by` from `From:`, `addressed_to` from a ClickUp
+  assignee). These are provenance.
+- `mentions` — one row per **memory that names this identity**, from
+  extraction. A model read the text and decided it was about this person, so
+  each carries its own `confidence` and the literal `mentionText` it matched.
+  Inferred, and never to be rendered as provenance.
+
+Both matter. An external correspondent is on no task as a member while being the
+subject of dozens — on edges alone, "what have we given them to act on" answers
+with email and nothing else.
 
 Query: `who` (required), `limit`, `min_strength`, `since`, `until`, `agent_id`.
 
@@ -157,6 +171,12 @@ One identity's activity across every connected source, oldest first. No new
 storage — each edge already carries the capture time of the artifact it came
 from, so email and ClickUp interleave by real time. Entries with no timestamp
 are omitted rather than bucketed at the epoch.
+
+Unlike `touched`, edges and mentions share one ordered list here, because the
+question is "what was going on around this person". Each entry carries
+`inferred` — `false` for a connector-asserted edge, `true` for an extraction
+mention (`relation: "mentioned in"`) — so a caller can style or filter them and
+cannot mistake one for the other.
 
 Query: `who` (required), `since`, `until`, `limit`, `min_strength`, `agent_id`.
 

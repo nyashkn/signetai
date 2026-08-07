@@ -55,7 +55,31 @@ describe("trail queries", () => {
 		});
 	}
 
+	/** A ClickUp task memory that *names* someone without linking them by an edge. */
+	function mention(memoryId: string, entityId: string, taskPath: string, content: string, text: string): void {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memory_artifacts
+				 (agent_id, source_path, source_sha256, source_kind, session_id, session_token, captured_at,
+				  content, updated_at, is_deleted, source_meta_json)
+				 VALUES ('default', ?, 'sha', 'source_clickup_task', 'sess', 'tok', '2026-07-12T09:00:00.000Z',
+				         ?, '2026-07-12T09:00:00.000Z', 0, ?)`,
+			).run(taskPath, content, JSON.stringify({ provider: "clickup", url: "https://app.clickup.com/t/868kk2mjf" }));
+			db.prepare(
+				`INSERT INTO memories (id, type, content, created_at, updated_at, updated_by, vector_clock,
+				 agent_id, source_path, is_deleted)
+				 VALUES (?, 'fact', ?, '2026-07-12T09:00:00.000Z', '2026-07-12T09:00:00.000Z', 'test', '{}',
+				         'default', ?, 0)`,
+			).run(memoryId, content, taskPath);
+			db.prepare(
+				`INSERT INTO memory_entity_mentions (memory_id, entity_id, mention_text, confidence, created_at)
+				 VALUES (?, ?, ?, 0.7, '2026-07-12T09:00:00.000Z')`,
+			).run(memoryId, entityId, text);
+		});
+	}
+
 	const PATH = "email://pivotplanit/Inbox/messages/%3Cm1@dock-blocks.com%3E";
+	const TASK_PATH = "clickup://9011717886/tasks/868kk2mjf";
 
 	/**
 	 * Matt exists twice — as the name extraction found and as the address the
@@ -80,12 +104,78 @@ describe("trail queries", () => {
 			).run();
 		});
 
+		// Matt is named in a ClickUp task but is not a member of the workspace, so
+		// no participant edge exists and none should. This is the real corpus's
+		// shape: 22 tasks discuss him, zero list him.
+		mention(
+			"mem-task",
+			"ent-matt",
+			TASK_PATH,
+			"# Migrate off HubSpot\n\nMatt is cancelling HubSpot, so there is nothing to keep in sync.",
+			"Matt",
+		);
+
 		// Direction is the connector's: the artifact points at the people.
 		edge("dep-auth", "ent-msg", "ent-matt-addr", "authored_by", PATH);
 		edge("dep-to", "ent-msg", "ent-alecia", "addressed_to", PATH);
 		edge("dep-thread", "ent-thread", "ent-msg", "contains");
 		edge("dep-mailbox", "ent-mailbox", "ent-thread", "contains");
 	}
+
+	it("returns what names a person separately from what is linked to them", () => {
+		// The gap this closes: `whatTouched` read `entity_dependencies` only, so
+		// everything extraction wrote to `memory_entity_mentions` was invisible.
+		// On the live corpus that hid every ClickUp task discussing an external
+		// correspondent — 22 of them for Matt — and "what have we given Matt to
+		// act on" answered with email alone.
+		const result = whatTouched({ agentId: "default", selector: "Matt West" });
+
+		// Edges are unchanged: still only the message, still transport-asserted.
+		expect(result.items.map((item) => item.name)).toEqual(["Sales Cycle Time"]);
+		expect(result.items.every((item) => item.sourceKind === "source_email_message")).toBe(true);
+
+		// The task arrives in its own field, never mixed in with the edges.
+		expect(result.mentions.length).toBe(1);
+		const task = result.mentions[0];
+		expect(task?.sourceKind).toBe("source_clickup_task");
+		expect(task?.mentionText).toBe("Matt");
+		expect(task?.confidence).toBe(0.7);
+		expect(task?.summary).toContain("Matt is cancelling HubSpot");
+		// Followable, or it is a claim with nowhere to check it.
+		expect(task?.deepLink).toBe("https://app.clickup.com/t/868kk2mjf");
+	});
+
+	it("reaches a mention through an alias, not only the spelling extraction used", () => {
+		// The mention hangs off `ent-matt`; the address is a different row. Asking
+		// by the address must still find it, or the answer depends on which
+		// spelling the caller happened to type.
+		const byAddress = whatTouched({ agentId: "default", selector: "matt@dock-blocks.com" });
+		expect(byAddress.mentions.map((m) => m.memoryId)).toEqual(["mem-task"]);
+	});
+
+	it("flags an inferred timeline entry rather than passing it off as provenance", () => {
+		const result = identityTimeline({ agentId: "default", selector: "Matt West" });
+
+		const inferred = result.entries.filter((entry) => entry.inferred);
+		const asserted = result.entries.filter((entry) => !entry.inferred);
+		expect(inferred.map((entry) => entry.sourceKind)).toEqual(["source_clickup_task"]);
+		expect(inferred[0]?.relation).toBe("mentioned in");
+		// The markdown heading becomes the headline rather than the raw blob.
+		expect(inferred[0]?.name).toBe("Migrate off HubSpot");
+		expect(asserted.every((entry) => entry.sourceKind === "source_email_message")).toBe(true);
+
+		// Both sources, one clock, ordered — the email is 07-10, the task 07-12.
+		expect(result.entries.map((entry) => entry.at)).toEqual([...result.entries.map((entry) => entry.at)].sort());
+		expect(result.entries.at(-1)?.sourceKind).toBe("source_clickup_task");
+	});
+
+	it("does not count a person merely named in a thing as having touched it", () => {
+		// `who_touched` is a roster, not a reading list. Matt is discussed in the
+		// task; he did not act on it, and an inferred mention must not put him in
+		// the same column as an assignee.
+		const actors = whoTouched({ agentId: "default", selector: "ent-msg" });
+		expect(actors.actors.map((actor) => actor.name).sort()).toEqual(["Alecia", "matt@dock-blocks.com"]);
+	});
 
 	it("finds a person's work through the address the connector keyed on", () => {
 		// "Matt West" is the extracted person and holds no edges at all; every
@@ -220,12 +310,14 @@ describe("trail queries", () => {
 	it("reads one identity's activity forwards across sources", () => {
 		const result = identityTimeline({ agentId: "default", selector: "Matt West" });
 
-		expect(result.entries.map((entry) => entry.name)).toEqual(["Sales Cycle Time"]);
+		// Email on 07-10, the ClickUp task on 07-12 — two sources, one clock.
+		expect(result.entries.map((entry) => entry.name)).toEqual(["Sales Cycle Time", "Migrate off HubSpot"]);
 		expect(result.entries[0]?.at).toBe("2026-07-10T09:00:00.000Z");
 		expect(result.entries[0]?.deepLink).toBe("message://%3cm1%40dock-blocks.com%3e");
 
-		// A window that excludes the only dated edge returns nothing rather than
-		// falling back to everything.
+		// A window that excludes every dated row returns nothing rather than
+		// falling back to everything. It has to bound mentions too, or the window
+		// silently stops meaning anything the moment extraction has run.
 		expect(identityTimeline({ agentId: "default", selector: "Matt West", until: "2026-01-01" }).entries).toEqual([]);
 	});
 

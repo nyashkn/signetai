@@ -419,6 +419,25 @@ function writeMailboxArtifact(
 	return 1;
 }
 
+/**
+ * An RFC 2822 `Date:` header as ISO 8601, for `captured_at`.
+ *
+ * IMAP hands back the header verbatim — `Wed, 29 Jul 2026 22:33:12 +0000` —
+ * while every other connector stores ISO. `captured_at` is TEXT and every
+ * reader orders it as TEXT, so the raw header sorts *alphabetically by weekday
+ * name*: `Tue` before `Thu` before `Sat`. Email then cannot be ordered against
+ * itself, let alone interleaved with ClickUp, which is the whole premise of a
+ * cross-source timeline.
+ *
+ * An unparseable header returns undefined so the artifact writer falls back to
+ * the message's mtime. A wrong-but-ordered date is recoverable; a right-looking
+ * string that sorts as garbage is what hid this for two phases.
+ */
+function isoCapturedAt(raw: string | undefined): string | undefined {
+	const ms = Date.parse(raw ?? "");
+	return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+}
+
 function writeThreadArtifact(
 	source: SignetSourceEntry,
 	agentId: string,
@@ -450,7 +469,7 @@ function writeThreadArtifact(
 		sourcePath: path,
 		sourceKind: "source_email_thread",
 		sourceMtimeMs: Date.parse(members[members.length - 1]?.envelope.date ?? "") || Date.now(),
-		capturedAt: first.envelope.date,
+		capturedAt: isoCapturedAt(first.envelope.date),
 		content,
 		sourceMeta: {
 			provider: EMAIL_PROVIDER_KIND,
@@ -519,7 +538,7 @@ function writeMessageArtifact(
 		sourcePath: path,
 		sourceKind: "source_email_message",
 		sourceMtimeMs: Date.parse(envelope.date) || Date.now(),
-		capturedAt: envelope.date,
+		capturedAt: isoCapturedAt(envelope.date),
 		content,
 		sourceMeta: {
 			provider: EMAIL_PROVIDER_KIND,
