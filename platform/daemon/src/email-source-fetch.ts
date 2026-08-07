@@ -126,19 +126,6 @@ function addresses(value: unknown): readonly EmailAddress[] {
 	return parseAddressList(stringArray(value).join(", "));
 }
 
-export async function listEmailMailboxes(account: string, timeoutMs?: number): Promise<readonly string[]> {
-	const raw = await runner()({
-		args: ["mailbox", "list", "-a", assertSafeAccountName(account), "--json"],
-		...(timeoutMs === undefined ? {} : { timeoutMs }),
-	});
-	const parsed = parseJson(raw, "mailbox list");
-	if (!isRecord(parsed) || !Array.isArray(parsed.mailboxes)) return [];
-	return parsed.mailboxes
-		.filter(isRecord)
-		.map((mailbox) => (typeof mailbox.name === "string" ? mailbox.name : ""))
-		.filter((name) => name.length > 0);
-}
-
 export interface HimalayaAccount {
 	readonly name: string;
 	readonly isDefault: boolean;
@@ -154,10 +141,8 @@ export interface HimalayaAccount {
  * SASL username in `config.toml`. That is the same string the IMAP server
  * authenticates, which makes it the account's own address by definition.
  *
- * ponytail: a regex rather than a TOML parser — no dependency exists in the repo
- * and this reads two key shapes. Accounts authenticating via OAuth2 have no
- * `sasl.plain.username`, so they come back with a null address and the caller
- * falls back to declaring one by hand.
+ * Accounts authenticating via OAuth2 have no `sasl.plain.username`, so they come
+ * back with a null address and the caller falls back to declaring one by hand.
  */
 export async function listHimalayaAccounts(configPath?: string): Promise<readonly HimalayaAccount[]> {
 	const raw = await runner()({ args: ["account", "list", "--json"] });
@@ -179,30 +164,37 @@ function defaultHimalayaConfigPath(): string {
 	return join(homedir(), ".config", "himalaya", "config.toml");
 }
 
-const ACCOUNT_SECTION = /^\s*\[accounts\.([^\]]+)\]\s*$/;
-const SASL_USERNAME = /^\s*(?:imap|smtp)\.sasl\.plain\.username\s*=\s*["']([^"']+)["']\s*$/;
+/** Walk a dotted path through parsed TOML, returning the leaf only if it is a string. */
+function stringAt(root: unknown, path: readonly string[]): string | null {
+	let node: unknown = root;
+	for (const key of path) {
+		if (!isRecord(node)) return null;
+		node = node[key];
+	}
+	return typeof node === "string" ? node : null;
+}
 
 function readAccountAddresses(configPath: string): ReadonlyMap<string, string> {
 	const found = new Map<string, string>();
-	let text = "";
+	let parsed: unknown;
 	try {
-		text = readFileSync(configPath, "utf8");
+		parsed = Bun.TOML.parse(readFileSync(configPath, "utf8"));
 	} catch {
+		// A missing or malformed config means no addresses, not a failed sync —
+		// the caller falls back to a declared principal.
 		return found;
 	}
 
-	let current = "";
-	for (const line of text.split(/\r?\n/)) {
-		const section = ACCOUNT_SECTION.exec(line);
-		if (section?.[1]) {
-			current = section[1].replace(/^["']|["']$/g, "");
-			continue;
-		}
-		if (line.trimStart().startsWith("[")) current = "";
-		if (current.length === 0 || found.has(current)) continue;
-		const username = SASL_USERNAME.exec(line);
+	const accounts = isRecord(parsed) ? parsed.accounts : undefined;
+	if (!isRecord(accounts)) return found;
+
+	for (const [name, account] of Object.entries(accounts)) {
+		// imap first: it is the protocol that names the mailbox being read.
+		const username =
+			stringAt(account, ["imap", "sasl", "plain", "username"]) ??
+			stringAt(account, ["smtp", "sasl", "plain", "username"]);
 		// Only an address is useful here; a bare login name identifies no mailbox.
-		if (username?.[1]?.includes("@")) found.set(current, username[1].toLowerCase());
+		if (username?.includes("@") === true) found.set(name, username.toLowerCase());
 	}
 	return found;
 }

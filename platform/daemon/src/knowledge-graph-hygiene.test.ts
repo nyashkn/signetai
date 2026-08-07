@@ -136,6 +136,8 @@ describe("knowledge graph hygiene report", () => {
 		});
 
 		expect(report.duplicateEntities.filter((group) => group.linkedBy === "alias")).toHaveLength(0);
+	});
+
 	test("finds bounded, source-topology-free cleanup candidates for Dreaming attention", () => {
 		dbPath = makeDbPath();
 		initDbAccessor(dbPath);

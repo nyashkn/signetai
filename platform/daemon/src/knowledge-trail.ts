@@ -315,7 +315,7 @@ export function whatTouched(options: TrailOptions): {
 				occurredAt: row.occurred_at,
 				deepLink: linkFor(row.source_kind, row.source_path, row.meta),
 			})),
-			mentions: mentionsOf(db, options.agentId, ids, { limit, since, until }),
+			mentions: mentionsOf(db, options.agentId, ids, limit, since, until),
 		};
 	});
 }
@@ -336,7 +336,9 @@ function mentionsOf(
 	db: ReadDb,
 	agentId: string,
 	entityIds: readonly string[],
-	window: { readonly limit: number; readonly since: string | null; readonly until: string | null },
+	limit: number,
+	since: string | null,
+	until: string | null,
 ): MentionedItem[] {
 	const rows = db
 		.prepare(
@@ -358,7 +360,7 @@ function mentionsOf(
 			 ORDER BY occurred_at DESC
 			 LIMIT ?`,
 		)
-		.all(...entityIds, agentId, window.since, window.since, window.until, window.until, window.limit) as Array<{
+		.all(...entityIds, agentId, since, since, until, until, limit) as Array<{
 		memory_id: string;
 		mention_text: string | null;
 		confidence: number;

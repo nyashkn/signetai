@@ -397,6 +397,8 @@ export function registerKnowledgeRoutes(app: Hono): void {
 				selector: who,
 				limit: positiveInt(c.req.query("limit")),
 				minStrength: ratio(c.req.query("min_strength")),
+				since: c.req.query("since")?.trim() || undefined,
+				until: c.req.query("until")?.trim() || undefined,
 			}),
 		);
 	});

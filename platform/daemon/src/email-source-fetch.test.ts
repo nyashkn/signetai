@@ -9,7 +9,6 @@ import {
 	fetchEmailEnvelopes,
 	fetchEmailMessageRaw,
 	groupIntoThreads,
-	listEmailMailboxes,
 	listHimalayaAccounts,
 	setHimalayaRunnerForTests,
 } from "./email-source-fetch";
@@ -136,21 +135,6 @@ describe("fetchEmailEnvelopes", () => {
 	});
 });
 
-describe("listEmailMailboxes", () => {
-	test("returns names from the v2 mailbox list shape", async () => {
-		stubRunner(
-			JSON.stringify({
-				mailboxes: [
-					{ id: "Inbox", name: "Inbox", total: null, unread: null },
-					{ id: "Sent", name: "Sent" },
-					{ id: "broken" },
-				],
-			}),
-		);
-		expect(await listEmailMailboxes("pivotplanit")).toEqual(["Inbox", "Sent"]);
-	});
-});
-
 describe("groupIntoThreads", () => {
 	test("walks In-Reply-To to the oldest reachable ancestor", () => {
 		const groups = groupIntoThreads([
@@ -206,6 +190,7 @@ describe("listHimalayaAccounts", () => {
 				accounts: [
 					{ name: "gmail", default: true, backends: ["imap", "smtp"] },
 					{ name: "pivotplanit", default: false, backends: ["imap", "smtp"] },
+					{ name: "smtp-only", default: false, backends: ["smtp"] },
 					{ name: "oauth-only", default: false, backends: ["imap", "smtp"] },
 				],
 			}),
@@ -220,9 +205,15 @@ describe("listHimalayaAccounts", () => {
 				'imap.sasl.plain.username = "nyashkn@gmail.com"',
 				'imap.sasl.plain.password.command = "pass show gmail"',
 				"",
+				// Deliberately divergent: imap is the protocol that names the mailbox
+				// being read, so it wins when the two disagree. Identical usernames
+				// here would let either preference pass.
 				"[accounts.pivotplanit]",
 				'imap.sasl.plain.username = "NJUI@pivotplanit.com"',
-				'smtp.sasl.plain.username = "njui@pivotplanit.com"',
+				'smtp.sasl.plain.username = "bounces@pivotplanit.com"',
+				"",
+				"[accounts.smtp-only]",
+				'smtp.sasl.plain.username = "outbound@kuze.ai"',
 				"",
 				"[accounts.oauth-only]",
 				'imap.oauth2.client-id = "abc"',
@@ -238,6 +229,8 @@ describe("listHimalayaAccounts", () => {
 			expect(accounts).toEqual([
 				{ name: "gmail", isDefault: true, address: "nyashkn@gmail.com" },
 				{ name: "pivotplanit", isDefault: false, address: "njui@pivotplanit.com" },
+				// smtp is the fallback, not dead weight — an account may configure only it.
+				{ name: "smtp-only", isDefault: false, address: "outbound@kuze.ai" },
 				// No SASL username to read, so no address is invented for it.
 				{ name: "oauth-only", isDefault: false, address: null },
 			]);
