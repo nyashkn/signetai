@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../../core/src/migrations/index";
+import { runMigrations } from "@signet/core";
 import type { ContinuityState } from "./continuity-state";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import {
@@ -64,6 +64,12 @@ function createTestDbAccessor(dbPath: string): DbAccessor {
 		},
 		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
+		},
+		async withReadDbAsync<T>(fn: (rdb: ReadDb) => Promise<T>): Promise<T> {
+			return fn(db as unknown as ReadDb);
+		},
+		checkpointWal() {
+			db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 		},
 		close() {
 			db.close();

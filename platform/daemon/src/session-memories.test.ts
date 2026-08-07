@@ -7,11 +7,12 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { WriteDb } from "./db-accessor";
 
 const TEST_DIR = join(tmpdir(), `signet-session-mem-test-${Date.now()}`);
 process.env.SIGNET_PATH = TEST_DIR;
@@ -436,8 +437,8 @@ describe("parseFeedback", () => {
 			good: 0.5,
 			bad_string: "nope",
 			bad_bool: true,
-			bad_nan: NaN,
-			bad_inf: Infinity,
+			bad_nan: Number.NaN,
+			bad_inf: Number.POSITIVE_INFINITY,
 			also_good: -0.3,
 		});
 		expect(result).toEqual({ good: 0.5, also_good: -0.3 });
@@ -480,7 +481,7 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-1", { "mem-aaa-111": 0.8 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-1", { "mem-aaa-111": 0.8 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-1", "mem-aaa-111");
 		testDb.close();
@@ -498,8 +499,8 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-2", { "mem-aaa-111": 0.8 });
-		recordAgentFeedbackInner(testDb, "session-fb-2", { "mem-aaa-111": 0.4 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-2", { "mem-aaa-111": 0.8 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-2", { "mem-aaa-111": 0.4 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-2", "mem-aaa-111");
 		testDb.close();
@@ -519,7 +520,7 @@ describe("recordAgentFeedbackInner", () => {
 		const testDb = openTestDb();
 		const scores = [0.9, 0.7, 0.5, 0.3, 0.1];
 		for (const s of scores) {
-			recordAgentFeedbackInner(testDb, "session-fb-3", { "mem-aaa-111": s });
+			recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-3", { "mem-aaa-111": s });
 		}
 
 		const result = getFeedbackColumns(testDb, "session-fb-3", "mem-aaa-111");
@@ -541,7 +542,7 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-4", {
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-4", {
 			"mem-aaa-111": 0.9,
 			"mem-bbb-222": -0.5,
 		});
@@ -563,7 +564,7 @@ describe("recordAgentFeedbackInner", () => {
 
 		const testDb = openTestDb();
 		// mem-ghost doesn't exist — UPDATE matches 0 rows, no crash
-		recordAgentFeedbackInner(testDb, "session-fb-5", {
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-5", {
 			"mem-aaa-111": 0.5,
 			"mem-ghost": 0.9,
 		});
@@ -589,7 +590,7 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-6a", { "mem-aaa-111": 0.7 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-6a", { "mem-aaa-111": 0.7 });
 
 		const a = getFeedbackColumns(testDb, "session-fb-6a", "mem-aaa-111");
 		const b = getFeedbackColumns(testDb, "session-fb-6b", "mem-aaa-111");
@@ -614,7 +615,7 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-agent", { "mem-aaa-111": 0.9 }, "agent-a");
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-agent", { "mem-aaa-111": 0.9 }, "agent-a");
 
 		const a = getFeedbackColumns(testDb, "session-fb-agent", "mem-aaa-111", "agent-a");
 		const b = getFeedbackColumns(testDb, "session-fb-agent", "mem-aaa-111", "agent-b");
@@ -632,8 +633,8 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-7", { "mem-aaa-111": -0.8 });
-		recordAgentFeedbackInner(testDb, "session-fb-7", { "mem-aaa-111": -0.4 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-7", { "mem-aaa-111": -0.8 });
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-7", { "mem-aaa-111": -0.4 });
 
 		const result = getFeedbackColumns(testDb, "session-fb-7", "mem-aaa-111");
 		testDb.close();
@@ -651,7 +652,7 @@ describe("recordAgentFeedbackInner", () => {
 		);
 
 		const testDb = openTestDb();
-		recordAgentFeedbackInner(testDb, "session-fb-8", {});
+		recordAgentFeedbackInner(testDb as unknown as WriteDb, "session-fb-8", {});
 
 		const result = getFeedbackColumns(testDb, "session-fb-8", "mem-aaa-111");
 		testDb.close();

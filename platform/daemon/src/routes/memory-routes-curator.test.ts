@@ -218,9 +218,17 @@ describe("memory curator routes", () => {
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
 			readonly agentId: string;
-			readonly injectedNeverUsed: ReadonlyArray<{ readonly id: string; readonly sessions: number }>;
-			readonly contradicted: ReadonlyArray<{ readonly id: string; readonly contradicted_count: number }>;
-			readonly highUsed: ReadonlyArray<{ readonly id: string; readonly used_count: number }>;
+			readonly injectedNeverUsed: ReadonlyArray<{
+				readonly id: string;
+				readonly content: string;
+				readonly sessions: number;
+			}>;
+			readonly contradicted: ReadonlyArray<{
+				readonly id: string;
+				readonly content: string;
+				readonly contradicted_count: number;
+			}>;
+			readonly highUsed: ReadonlyArray<{ readonly id: string; readonly content: string; readonly used_count: number }>;
 		};
 
 		expect(body.agentId).toBe("curator");

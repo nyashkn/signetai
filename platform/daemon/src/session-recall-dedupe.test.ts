@@ -121,7 +121,9 @@ const getDbAccessorSpy = spyOn(dbAccessor, "getDbAccessor").mockImplementation(
 	() =>
 		({
 			withWriteTx: <T>(fn: (db: typeof fakeDb) => T): T => fn(fakeDb),
-		}) as ReturnType<typeof dbAccessor.getDbAccessor>,
+			// Only withWriteTx is reached on this path; the rest of DbAccessor is
+			// deliberately absent so an unexpected read fails loudly.
+		}) as unknown as ReturnType<typeof dbAccessor.getDbAccessor>,
 );
 
 const { advanceRecallContextEpoch, applyRecallDedupe, claimRecallItems } = await import("./session-recall-dedupe");
@@ -188,7 +190,7 @@ describe("session recall dedupe", () => {
 		expect(result.items).toEqual([
 			{ id: "mem-1", score: 0.9, source: "hybrid", already_recalled: true },
 			{ id: "mem-2", score: 0.8, source: "hybrid" },
-		]);
+		] as typeof result.items);
 		expect(result.meta.repeatedReturned).toBe(1);
 	});
 

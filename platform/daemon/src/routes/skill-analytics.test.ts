@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
+import type { ReadDb } from "../db-accessor";
 import { querySkillAnalytics } from "./skill-analytics.js";
 
 function seedSkills(db: Database, rows: ReadonlyArray<{ id: string; name: string; agentId?: string }>): void {
@@ -77,7 +78,7 @@ describe("skill analytics", () => {
 			{ id: "inv-3", skillName: "web-search", latencyMs: 100, success: false, errorText: "oops" },
 		]);
 
-		const result = querySkillAnalytics(db, {
+		const result = querySkillAnalytics(db as unknown as ReadDb, {
 			agentId: "default",
 			limit: 10,
 		});
@@ -103,7 +104,7 @@ describe("skill analytics", () => {
 			{ id: "inv-b2", skillName: "browser-use-b", agentId: "agent-b", latencyMs: 300 },
 		]);
 
-		const result = querySkillAnalytics(db, {
+		const result = querySkillAnalytics(db as unknown as ReadDb, {
 			agentId: "agent-a",
 			limit: 10,
 		});
@@ -120,7 +121,7 @@ describe("skill analytics", () => {
 			{ id: "inv-new", skillName: "browser-use", latencyMs: 200, createdAt: "2025-06-15T12:00:00Z" },
 		]);
 
-		const result = querySkillAnalytics(db, {
+		const result = querySkillAnalytics(db as unknown as ReadDb, {
 			agentId: "default",
 			since: "2025-06-01T00:00:00Z",
 			limit: 10,

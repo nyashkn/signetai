@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
+import { MIGRATIONS, type MigrationDb } from "@signet/core";
 import type { WriteDb } from "./db-accessor";
 import {
 	beginEmbeddingIndexBuild,
@@ -13,6 +13,17 @@ import {
 } from "./embedding-index-state";
 import type { EmbeddingConfig } from "./memory-config";
 
+/**
+ * Reach one migration through the package entry rather than its file path.
+ * A relative import into `platform/core/src` escapes this project's rootDir,
+ * which is what kept every test file out of `tsc` in the first place.
+ */
+function embeddingIndexGenerations(db: MigrationDb): void {
+	const migration = MIGRATIONS.find((m) => m.version === 91);
+	if (!migration) throw new Error("migration 91 (embedding index generations) is missing");
+	migration.up(db);
+}
+
 const config: EmbeddingConfig = {
 	provider: "native",
 	model: "nomic-embed-text-v1.5",
@@ -23,7 +34,7 @@ const config: EmbeddingConfig = {
 describe("embedding index state", () => {
 	it("seeds one legacy raw active profile and preserves it on later starts", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		const db = raw as unknown as WriteDb;
 
 		const initial = ensureEmbeddingIndexState(db, config, "2026-01-01T00:00:00.000Z");
@@ -48,7 +59,7 @@ describe("embedding index state", () => {
 
 	it("builds Qwen in staging without changing the legacy active profile", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(
 			`CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT)`,
 		);
@@ -71,7 +82,7 @@ describe("embedding index state", () => {
 
 	it("stages unknown model changes with identity formatting instead of silently skipping them", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(
 			`CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT)`,
 		);
@@ -85,7 +96,7 @@ describe("embedding index state", () => {
 
 	it("rejects writes that captured a superseded active generation", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(
 			`CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT)`,
 		);
@@ -111,7 +122,7 @@ describe("embedding index state", () => {
 	 */
 	it("reports a configured provider the active profile is overriding", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(
 			"CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT)",
 		);
@@ -130,7 +141,7 @@ describe("embedding index state", () => {
 
 	it("does not report a conflict when the configured provider is already active", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		const db = raw as unknown as WriteDb;
 
 		ensureEmbeddingIndexState(db, config);
@@ -143,7 +154,7 @@ describe("embedding index state", () => {
 
 	it("reports nothing when the caller pinned a profile, because nothing is overridden", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		const db = raw as unknown as WriteDb;
 
 		ensureEmbeddingIndexState(db, config);
@@ -155,7 +166,7 @@ describe("embedding index state", () => {
 
 	it("normalizes malformed config before it becomes durable state", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		const db = raw as unknown as WriteDb;
 		const malformed = { ...config, provider: "not-a-provider", dimensions: 0 } as unknown as EmbeddingConfig;
 		const initial = ensureEmbeddingIndexState(db, malformed);

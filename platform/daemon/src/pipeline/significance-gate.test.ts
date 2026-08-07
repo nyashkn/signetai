@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations, type MigrationDb } from "../../../core/src/migrations";
-import type { ReadDb } from "../db-accessor";
-import { assessSignificance, type SignificanceConfig } from "./significance-gate";
+import { type MigrationDb, runMigrations } from "@signet/core";
+import type { ReadDb, SqliteStatement } from "../db-accessor";
+import { type SignificanceConfig, assessSignificance } from "./significance-gate";
 
 const DEFAULT_CONFIG: SignificanceConfig = {
 	enabled: true,
@@ -11,9 +11,13 @@ const DEFAULT_CONFIG: SignificanceConfig = {
 	noveltyThreshold: 0.15,
 };
 
-/** Wrap bun:sqlite Database to satisfy ReadDb. */
+/**
+ * Wrap bun:sqlite Database to satisfy ReadDb. bun:sqlite's `.get()` returns
+ * `unknown` where `SqliteStatement` promises `Record<string, unknown> | undefined`,
+ * so the statement is re-typed here rather than widening the shared interface.
+ */
 function makeReadDb(db: Database): ReadDb {
-	return { prepare: (sql: string) => db.prepare(sql) };
+	return { prepare: (sql: string) => db.prepare(sql) as unknown as SqliteStatement };
 }
 
 describe("significance gate", () => {

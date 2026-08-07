@@ -254,7 +254,7 @@ describe("desktop update integration", () => {
 				}),
 				resolveGlobalPackagePath: () => "/pkg",
 				runCommand: async (command, args, options) => {
-					expect(options.env.SIGNET_DAEMON_ENTRYPOINT).toBeUndefined();
+					expect(options.env?.SIGNET_DAEMON_ENTRYPOINT).toBeUndefined();
 					calls.push(`${command} ${args.join(" ")} @ ${options.cwd}`);
 					return { exitCode: 0, stdout: "desktop installed", stderr: "", timedOut: false };
 				},

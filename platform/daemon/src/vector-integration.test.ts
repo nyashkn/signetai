@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cosineSimilarity } from "@signet/core";
-import { runMigrations } from "../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import { vectorToBlob } from "./db-helpers";
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,14 @@ import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
 import { indexExternalMemoryArtifact } from "./memory-lineage";
 import { buildAgentScopeClause, expandRecallKeywordQuery, hybridRecall, transcriptExcerpt } from "./memory-search";
+import type { TemporalRecallRow } from "./temporal-recall";
+
+/** Test-only: the loaded config is deeply readonly; these tests tune it in place. */
+type Mutable<T> = T extends readonly (infer E)[]
+	? Mutable<E>[]
+	: T extends object
+		? { -readonly [K in keyof T]: Mutable<T[K]> }
+		: T;
 
 describe("hybridRecall", () => {
 	let dir = "";
@@ -568,8 +576,10 @@ describe("hybridRecall", () => {
 
 		expect(result.meta.temporal?.mode).toBe("timeline");
 		expect(result.results).toHaveLength(2);
-		expect(result.results[0]?.subject_type).toBe("session_summary");
-		expect(result.results[0]?.temporal_facet).toBe("session");
+		// Temporal recall rows carry subject_type/temporal_facet beyond the plain RecallResult shape.
+		const temporalRow = result.results[0] as unknown as TemporalRecallRow | undefined;
+		expect(temporalRow?.subject_type).toBe("session_summary");
+		expect(temporalRow?.temporal_facet).toBe("session");
 		expect(result.results[0]?.content).toContain("temporal recall");
 		expect(JSON.stringify(result)).not.toContain("Raw transcript text");
 		expect(result.results.some((row) => row.source_path === "/repo/notes/temporal.md")).toBe(true);
@@ -1694,12 +1704,14 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
-		cfg.pipelineV2.traversal.enabled = true;
-		cfg.pipelineV2.traversal.primary = true;
+		if (cfg.pipelineV2.traversal) {
+			cfg.pipelineV2.traversal.enabled = true;
+			cfg.pipelineV2.traversal.primary = true;
+		}
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(
@@ -1741,13 +1753,13 @@ describe("hybridRecall", () => {
 			).run("hint-spotify", "mem-spotify", "What music streaming service has the user been using lately?", now);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.traversal.enabled = false;
+		if (cfg.pipelineV2.traversal) cfg.pipelineV2.traversal.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
-		cfg.pipelineV2.hints.enabled = true;
+		if (cfg.pipelineV2.hints) cfg.pipelineV2.hints.enabled = true;
 
 		const result = await hybridRecall(
 			{
@@ -1826,11 +1838,11 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
-		cfg.pipelineV2.traversal.enabled = false;
+		if (cfg.pipelineV2.traversal) cfg.pipelineV2.traversal.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(
@@ -1847,8 +1859,9 @@ describe("hybridRecall", () => {
 
 		const hit = result.results.find((row) => row.id === "mem-spotify-structured");
 		expect(hit).toBeDefined();
-		expect(["structured", "sec"]).toContain(hit?.source);
-		expect(hit?.score).toBeGreaterThan(0.75);
+		if (!hit) throw new Error("unreachable: hit already asserted to be defined");
+		expect(["structured", "sec"]).toContain(hit.source);
+		expect(hit.score).toBeGreaterThan(0.75);
 	});
 
 	it("uses structured path candidates when lexical recall misses a shampoo brand", async () => {
@@ -1909,12 +1922,14 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = true;
-		cfg.pipelineV2.traversal.enabled = true;
-		cfg.pipelineV2.traversal.primary = true;
+		if (cfg.pipelineV2.traversal) {
+			cfg.pipelineV2.traversal.enabled = true;
+			cfg.pipelineV2.traversal.primary = true;
+		}
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(
@@ -1931,7 +1946,8 @@ describe("hybridRecall", () => {
 
 		const hit = result.results.find((row) => row.id === "mem-shampoo-structured");
 		expect(hit).toBeDefined();
-		expect(["structured", "sec"]).toContain(hit?.source);
+		if (!hit) throw new Error("unreachable: hit already asserted to be defined");
+		expect(["structured", "sec"]).toContain(hit.source);
 	});
 
 	it("expands baking advice queries to bridge ingredient preference memories", async () => {
@@ -1973,11 +1989,11 @@ describe("hybridRecall", () => {
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.traversal.enabled = false;
+		if (cfg.pipelineV2.traversal) cfg.pipelineV2.traversal.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(
@@ -2021,11 +2037,11 @@ assistant: John Mulaney's Kid Gorgeous is an excellent example. Hasan Minhaj: Ho
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.traversal.enabled = false;
+		if (cfg.pipelineV2.traversal) cfg.pipelineV2.traversal.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(
@@ -2104,11 +2120,11 @@ assistant: John Mulaney's Kid Gorgeous is an excellent example. Hasan Minhaj: Ho
 			);
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.search.rehearsal_enabled = false;
 		cfg.search.min_score = 0;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.traversal.enabled = false;
+		if (cfg.pipelineV2.traversal) cfg.pipelineV2.traversal.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const result = await hybridRecall(

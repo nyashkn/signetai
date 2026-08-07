@@ -78,7 +78,9 @@ describe("boundary-reason", () => {
 		});
 
 		test("DEFAULT_DURABLE_BOUNDARIES matches DURABLE_BOUNDARY_REASONS", () => {
-			expect(new Set(DEFAULT_DURABLE_BOUNDARIES)).toEqual(DURABLE_BOUNDARY_REASONS);
+			// Compared as sorted members rather than Set vs ReadonlySet, which are
+			// not mutually assignable even when they hold exactly the same values.
+			expect([...DEFAULT_DURABLE_BOUNDARIES].sort()).toEqual([...DURABLE_BOUNDARY_REASONS].sort());
 		});
 	});
 });

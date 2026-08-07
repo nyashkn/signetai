@@ -24,6 +24,8 @@ function makeAccessor(database: Database): DbAccessor {
 				throw error;
 			}
 		},
+		withReadDbAsync: async <T>(fn: (readDb: ReadDb) => Promise<T>): Promise<T> => fn(database as unknown as ReadDb),
+		checkpointWal: (): void => {},
 		close(): void {},
 	};
 }

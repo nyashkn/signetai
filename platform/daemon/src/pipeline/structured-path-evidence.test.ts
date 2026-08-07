@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { ReadDb } from "../db-accessor";
 import { findStructuredClaimCandidates, scoreStructuredPathEvidence } from "./structured-path-evidence";
 

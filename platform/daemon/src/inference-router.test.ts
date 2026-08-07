@@ -309,6 +309,8 @@ describe("InferenceRouter legacy API credentials", () => {
 			);
 
 			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+			// Assigned only inside the mocked `fetch`; TS does not track writes made
+			// through a closure, so reads below restore the declared type.
 			let requestBody: Record<string, unknown> | null = null;
 			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
@@ -342,7 +344,10 @@ describe("InferenceRouter legacy API credentials", () => {
 			// pi-ai owns the reasoning abstraction: the OpenRouter { enabled, maxTokens }
 			// config is translated by pi-ai. With reasoning disabled (enabled: false),
 			// pi-ai omits the reasoning field entirely rather than forwarding the raw config.
-			expect(requestBody?.reasoning).toBeUndefined();
+			// TS narrows `requestBody` to its `null` initializer here rather than its
+			// declared union, since the only reassignment is inside the fetch mock
+			// closure; the cast restores the declared type at the read site.
+			expect((requestBody as Record<string, unknown> | null)?.reasoning).toBeUndefined();
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -392,6 +397,8 @@ describe("InferenceRouter legacy API credentials", () => {
 			);
 
 			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+			// Assigned only inside the mocked `fetch`; TS does not track writes made
+			// through a closure, so reads below restore the declared type.
 			let requestBody: Record<string, unknown> | null = null;
 			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
@@ -418,7 +425,9 @@ describe("InferenceRouter legacy API credentials", () => {
 			// The fix forwards options.reasoning; pi-ai's openrouter thinkingFormat
 			// emits it as { effort: <level> }. Before the fix this was { effort: "none" }
 			// (disabled) or absent.
-			expect(requestBody?.reasoning).toEqual({ effort: "high" });
+			// See the cast note above: `requestBody` narrows to its `null` initializer
+			// through this closure-only reassignment pattern.
+			expect((requestBody as Record<string, unknown> | null)?.reasoning).toEqual({ effort: "high" });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -464,6 +473,8 @@ describe("InferenceRouter legacy API credentials", () => {
 			);
 
 			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+			// Assigned only inside the mocked `fetch`; TS does not track writes made
+			// through a closure, so reads below restore the declared type.
 			let requestBody: Record<string, unknown> | null = null;
 			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
@@ -489,7 +500,9 @@ describe("InferenceRouter legacy API credentials", () => {
 			expect(result.ok).toBe(true);
 			// Default "medium" depth must NOT enable thinking. pi-ai emits
 			// { effort: "none" } (disabled) or omits — never "medium"/"high".
-			const effort = (requestBody?.reasoning as { effort?: string } | undefined)?.effort;
+			// Cast restores the declared type; see note above on closure narrowing.
+			const effort = ((requestBody as Record<string, unknown> | null)?.reasoning as { effort?: string } | undefined)
+				?.effort;
 			expect(effort === "medium" || effort === "high").toBe(false);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -537,6 +550,8 @@ describe("InferenceRouter legacy API credentials", () => {
 			);
 
 			process.env.OPENROUTER_API_KEY = "test-openrouter-key";
+			// Assigned only inside the mocked `fetch`; TS does not track writes made
+			// through a closure, so reads below restore the declared type.
 			let requestBody: Record<string, unknown> | null = null;
 			globalThis.fetch = mock((input: string | URL | Request, init?: RequestInit) => {
 				const url = String(input);
@@ -563,7 +578,8 @@ describe("InferenceRouter legacy API credentials", () => {
 			// The target is reasoning: high, but aggregate_recall must suppress it.
 			// Acceptable wire shapes: reasoning absent, or { effort: "none" }.
 			// A regression would emit { effort: "high" } or { effort: "medium" }.
-			const effort = (requestBody?.reasoning as { effort?: string } | undefined)?.effort;
+			const effort = ((requestBody as Record<string, unknown> | null)?.reasoning as { effort?: string } | undefined)
+				?.effort;
 			expect(effort === "high" || effort === "medium").toBe(false);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });

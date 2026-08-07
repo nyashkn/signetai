@@ -97,8 +97,8 @@ describe("inference provider factory", () => {
 describe("resolveProviderReasoning", () => {
 	function target(enabled: boolean | undefined): Parameters<typeof resolveProviderReasoning>[0] {
 		return enabled === undefined
-			? { executor: "openrouter", models: {} }
-			: { executor: "openrouter", models: {}, openrouter: { reasoning: { enabled } } };
+			? { kind: "api", executor: "openrouter", models: {} }
+			: { kind: "api", executor: "openrouter", models: {}, openrouter: { reasoning: { enabled } } };
 	}
 	function model(reasoning: "low" | "medium" | "high"): Parameters<typeof resolveProviderReasoning>[1] {
 		return { model: "test", reasoning };

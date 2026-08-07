@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { WorkerOptions } from "node:worker_threads";
 import {
-	createEmbeddingWorkerHandle,
 	type EmbeddingWorkerFactory,
 	type EmbeddingWorkerLike,
+	createEmbeddingWorkerHandle,
 } from "./embedding-worker-handle";
 import type { EmbeddingWorkerInit, MainToWorkerMessage, WorkerToMainMessage } from "./embedding-worker-protocol";
 import {
@@ -176,6 +176,7 @@ describe("native-embedding facade (worker-backed)", () => {
 			type: "check_result",
 			id: checkReq?.type === "checkAvailable" ? checkReq.id : -1,
 			available: true,
+			error: null,
 		});
 		await checkP;
 		await flush();

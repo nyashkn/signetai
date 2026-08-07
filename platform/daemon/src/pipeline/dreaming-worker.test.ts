@@ -4,10 +4,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DreamingConfig } from "@signet/core";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor } from "../db-accessor";
 import {
 	DREAMING_AGENT_PROMPT,
+	type DreamingAgentExecutor,
 	type DreamingPassFocus,
 	dreamingFocusOfMode,
 	enqueueDreamingHygieneAttention,
@@ -236,52 +237,61 @@ describe("dreaming worker agent scope", () => {
 		// in a single invocation, each apply batch carrying the agentId whose
 		// graph it maintains and citing that scope's own evidence.
 		const seenPrompts: string[] = [];
-		const executorFactory = (agentId: string) => ({
-			async run(input: {
-				prompt: string;
-				tools: ReadonlyArray<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }>;
-			}) {
+		const executorFactory = (agentId: string): DreamingAgentExecutor => ({
+			async run(input) {
 				seenPrompts.push(input.prompt);
 				const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
 				if (!apply) throw new Error("Missing apply_ontology_ops");
-				await apply.execute("call", {
-					agentId: ALPHA,
-					operations: [
-						{
-							operation: "create_entity",
-							payload: { name: "Apex", type: "project" },
-							reason: "The evidence identifies the project.",
-							confidence: 0.9,
-							evidence: [
-								{
-									source_ref: "summary:summary-alpha",
-									source_kind: "summary",
-									source_id: "summary-alpha",
-									quote: alphaEvidence,
-								},
-							],
-						},
-					],
-				});
-				await apply.execute("call", {
-					agentId: BETA,
-					operations: [
-						{
-							operation: "create_entity",
-							payload: { name: "Zenith", type: "project" },
-							reason: "The evidence identifies the project.",
-							confidence: 0.9,
-							evidence: [
-								{
-									source_ref: "summary:summary-beta",
-									source_kind: "summary",
-									source_id: "summary-beta",
-									quote: betaEvidence,
-								},
-							],
-						},
-					],
-				});
+				await apply.execute(
+					"call",
+					{
+						agentId: ALPHA,
+						operations: [
+							{
+								operation: "create_entity",
+								payload: { name: "Apex", type: "project" },
+								reason: "The evidence identifies the project.",
+								confidence: 0.9,
+								evidence: [
+									{
+										source_ref: "summary:summary-alpha",
+										source_kind: "summary",
+										source_id: "summary-alpha",
+										quote: alphaEvidence,
+									},
+								],
+							},
+						],
+					},
+					undefined,
+					undefined,
+					{} as never,
+				);
+				await apply.execute(
+					"call",
+					{
+						agentId: BETA,
+						operations: [
+							{
+								operation: "create_entity",
+								payload: { name: "Zenith", type: "project" },
+								reason: "The evidence identifies the project.",
+								confidence: 0.9,
+								evidence: [
+									{
+										source_ref: "summary:summary-beta",
+										source_kind: "summary",
+										source_id: "summary-beta",
+										quote: betaEvidence,
+									},
+								],
+							},
+						],
+					},
+					undefined,
+					undefined,
+					{} as never,
+				);
 				return { summary: "Consolidated both scopes" };
 			},
 		});

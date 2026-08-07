@@ -8,6 +8,7 @@
  * `conflictGuardSourceId` ON CONFLICT guard that only overwrites a conflicting
  * path when it already belongs to the same source_id.
  */
+import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -307,16 +308,24 @@ describe("upsertMemoryArtifactInTx conflictGuardSourceId", () => {
 	test("with the guard, does not overwrite a row owned by a different source_id", () => {
 		// Seed a row owned by src-A (no guard, so it inserts unconditionally).
 		getDbAccessor().withWriteTx((db) => {
-			upsertMemoryArtifactInTx(db, baseFields("src-A", "owner content", "2026-01-02T01:00:00.000Z"), {
-				conflictGuardSourceId: false,
-			});
+			upsertMemoryArtifactInTx(
+				db as unknown as Database,
+				baseFields("src-A", "owner content", "2026-01-02T01:00:00.000Z"),
+				{
+					conflictGuardSourceId: false,
+				},
+			);
 		});
 
 		// Attempt to upsert the same path for src-B with the guard active.
 		getDbAccessor().withWriteTx((db) => {
-			upsertMemoryArtifactInTx(db, baseFields("src-B", "intruder content", "2026-01-02T02:00:00.000Z"), {
-				conflictGuardSourceId: true,
-			});
+			upsertMemoryArtifactInTx(
+				db as unknown as Database,
+				baseFields("src-B", "intruder content", "2026-01-02T02:00:00.000Z"),
+				{
+					conflictGuardSourceId: true,
+				},
+			);
 		});
 
 		const row = readArtifact(agentId, "obsidian://vault/guarded.md");
@@ -328,13 +337,13 @@ describe("upsertMemoryArtifactInTx conflictGuardSourceId", () => {
 
 	test("with the guard, overwrites a row owned by the same source_id", () => {
 		getDbAccessor().withWriteTx((db) => {
-			upsertMemoryArtifactInTx(db, baseFields("src-A", "first", "2026-01-02T01:00:00.000Z"), {
+			upsertMemoryArtifactInTx(db as unknown as Database, baseFields("src-A", "first", "2026-01-02T01:00:00.000Z"), {
 				conflictGuardSourceId: false,
 			});
 		});
 
 		getDbAccessor().withWriteTx((db) => {
-			upsertMemoryArtifactInTx(db, baseFields("src-A", "second", "2026-01-02T02:00:00.000Z"), {
+			upsertMemoryArtifactInTx(db as unknown as Database, baseFields("src-A", "second", "2026-01-02T02:00:00.000Z"), {
 				conflictGuardSourceId: true,
 			});
 		});

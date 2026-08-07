@@ -66,7 +66,7 @@ describe("Sources routes", () => {
 		const app = new Hono();
 		registerSourcesRoutes(app, {
 			agentsDir: dir,
-			startBridge: (sources: readonly NativeMemorySource[], bridgeOptions: NativeMemoryBridgeOptions) => {
+			startBridge: (sources: readonly NativeMemorySource[] = [], bridgeOptions: NativeMemoryBridgeOptions = {}) => {
 				expect(sources).toHaveLength(1);
 				expect(sources[0]?.sourceId).toStartWith("obsidian:");
 				expect(bridgeOptions.yieldEveryFiles).toBe(1);
@@ -222,7 +222,7 @@ describe("Sources routes", () => {
 			if (text.includes("/issues?") || text.includes("/pulls?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/contents/")) return Promise.resolve(new Response("missing", { status: 404 }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const res = await makeApp().request("/api/sources/github", {
 			method: "POST",
@@ -329,7 +329,7 @@ describe("Sources routes", () => {
 		const app = new Hono();
 		registerSourcesRoutes(app, {
 			agentsDir: dir,
-			startBridge: (sources: readonly NativeMemorySource[], bridgeOptions: NativeMemoryBridgeOptions) => {
+			startBridge: (sources: readonly NativeMemorySource[] = [], bridgeOptions: NativeMemoryBridgeOptions = {}) => {
 				syncCalls++;
 				const call = syncCalls;
 				return {
@@ -909,8 +909,12 @@ describe("Sources routes", () => {
 		});
 		expect(second.status).toBe(409);
 
-		controller?.enqueue(new TextEncoder().encode(JSON.stringify(snapshot)));
-		controller?.close();
+		// TS narrows `controller` to `null` here since the reassignment happens inside the
+		// `start` callback closure, which control-flow analysis doesn't track across calls.
+		// Cast back to the declared type to use the value the closure actually assigned.
+		const streamController = controller as ReadableStreamDefaultController<Uint8Array> | null;
+		streamController?.enqueue(new TextEncoder().encode(JSON.stringify(snapshot)));
+		streamController?.close();
 		expect((await first).status).toBe(200);
 	});
 

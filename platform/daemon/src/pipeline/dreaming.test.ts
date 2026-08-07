@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { DreamingConfig } from "@signet/core";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor } from "../db-accessor";
 import {
 	DREAMING_AGENT_PROMPT,
@@ -37,6 +37,7 @@ const AGENT = "default";
 
 function defaultCfg(overrides?: Partial<DreamingConfig>): DreamingConfig {
 	return {
+		enabled: true,
 		tokenThreshold: 100_000,
 		maxInterval: 6 * 60 * 60 * 1_000,
 		maxInputTokens: 32_000,

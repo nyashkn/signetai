@@ -106,6 +106,7 @@ describe("inference OAuth", () => {
 
 	test("refreshes an expired token once and persists the replacement", async () => {
 		const refreshToken = mock(async () => ({
+			type: "oauth" as const,
 			refresh: "refresh-old",
 			access: "access-refreshed",
 			expires: Date.now() + 60_000,

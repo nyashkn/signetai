@@ -179,6 +179,7 @@ describe("TTL eviction lifecycle handler (#902)", () => {
 		const seen: Array<{ key: string; agentId: string; runtimePath: string }> = [];
 		const handler: SessionEvictionHandler = (info) => {
 			seen.push({ key: info.sessionKey, agentId: info.agentId, runtimePath: info.runtimePath });
+			return undefined;
 		};
 		setSessionEvictionHandler(handler);
 		claimSession("ttl-sess-1", "plugin", "agent-a");

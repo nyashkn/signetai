@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { runMigrations } from "../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import { closeDbAccessor, initDbAccessor } from "./db-accessor";
 import { recordSkillInvocation } from "./skill-invocations";
 

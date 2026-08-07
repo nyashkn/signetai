@@ -38,7 +38,7 @@ describe("discord-source-provider", () => {
 	it("indexes multi-guild Discord topology, members, threads, messages, mentions, attachments, embeds, polls, and checkpoints", async () => {
 		globalThis.fetch = mock((url: string | URL | Request) =>
 			Promise.resolve(discordResponse(String(url))),
-		) as typeof fetch;
+		) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{
 				guildIds: ["123456789012345678", "223456789012345678"],
@@ -160,7 +160,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			if (text.includes("/threads/archived/")) return Promise.resolve(Response.json({ threads: [], has_more: false }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{
 				guildIds: ["123456789012345678"],
@@ -223,7 +223,9 @@ describe("discord-source-provider", () => {
 		});
 
 		expect(result?.failures).toEqual([]);
-		expect(socket?.sent.some((entry) => entry.includes('"op":2'))).toBe(true);
+		// TS narrows `socket` (only ever reassigned inside the factory closure above) to its `null`
+		// initializer at this read; the cast restores the declared union without changing runtime behaviour.
+		expect((socket as FakeDiscordGatewaySocket | null)?.sent.some((entry) => entry.includes('"op":2'))).toBe(true);
 		const rows = sourceRows(added.source.id);
 		expect(rows.map((row) => row.source_kind)).toContain("source_discord_message");
 		expect(rows.map((row) => row.source_kind)).toContain("source_discord_message_event");
@@ -302,7 +304,7 @@ describe("discord-source-provider", () => {
 			}
 			if (text.includes("/channels")) return Promise.resolve(new Response("discord unavailable", { status: 503 }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await discordSourceProvider.sync?.({
 			source: added.source,
@@ -351,7 +353,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await discordSourceProvider.sync?.({
 			source: added.source,
@@ -674,7 +676,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 
 		const result = await discordSourceProvider.sync?.({
 			source: added.source,
@@ -737,7 +739,7 @@ describe("discord-source-provider", () => {
 			}
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{ guildIds: ["123456789012345678"], tokenRef: "DISCORD_BOT_TOKEN", now: "2026-01-01T00:00:00.000Z" },
 			dir,
@@ -836,7 +838,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/thread-members")) return Promise.resolve(Response.json([]));
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{
 				guildIds: ["123456789012345678"],
@@ -909,7 +911,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{ guildIds: ["123456789012345678"], tokenRef: "DISCORD_BOT_TOKEN", now: "2026-01-01T00:00:00.000Z" },
 			dir,
@@ -998,7 +1000,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{
 				guildIds: ["123456789012345678"],
@@ -1169,7 +1171,7 @@ describe("discord-source-provider", () => {
 			if (text.includes("/members?")) return Promise.resolve(Response.json([]));
 			if (text.includes("/threads/active")) return Promise.resolve(Response.json({ threads: [] }));
 			return Promise.resolve(Response.json([]));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const added = addDiscordSource(
 			{
 				guildIds: ["123456789012345678"],

@@ -146,7 +146,9 @@ describe("prompt entity context scaling (#1059)", () => {
 				embeddingCalls += 1;
 				return [0.5, 0.5];
 			},
-			embedding: { provider: "test", model: "test" } as EmbeddingConfig,
+			// `test` is deliberately not a real provider: this asserts the caller's
+			// own `fetchEmbedding` is used, so the provider name must never resolve.
+			embedding: { provider: "test", model: "test" } as unknown as EmbeddingConfig,
 		});
 
 		// Two entities match the prompt, but both are scored against the same

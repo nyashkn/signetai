@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { join } from "node:path";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { isDurableBoundary, normalizeBoundaryReason } from "./boundary-reason";
 import { enqueueSummaryJob, tracksSessionSummaryArtifact } from "./summary-worker";
@@ -32,6 +32,8 @@ function makeAccessor(db: Database): DbAccessor {
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
+		withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+		checkpointWal: () => {},
 		close() {
 			db.close();
 		},
@@ -226,5 +228,4 @@ describe("issue #896: boundary reason idempotency", () => {
 		// If we tried to enqueue again, hooks.ts would detect the duplicate
 		// and skip. This is the idempotency guarantee.
 	});
-
 });

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import type { ReadDb } from "./db-accessor";
 import { buildEmbeddingHealth } from "./embedding-health";
 
 describe("buildEmbeddingHealth", () => {
@@ -22,24 +23,24 @@ describe("buildEmbeddingHealth", () => {
 		`);
 
 		const report = buildEmbeddingHealth(
-			db,
+			db as unknown as ReadDb,
 			{
 				provider: "ollama",
 				model: "nomic-embed-text",
 				dimensions: 768,
-			base_url: "http://127.0.0.1:11434",
-		},
-		{
-			provider: "ollama",
-			model: "nomic-embed-text",
-			available: true,
-			base_url: "http://127.0.0.1:11434",
-			checkedAt: new Date().toISOString(),
-		},
-		{
-			sqlite: null,
-			sqliteAttempt: "/tmp/bad-sqlite.dylib",
-			sqliteWarning: "custom sqlite not configured",
+				base_url: "http://127.0.0.1:11434",
+			},
+			{
+				provider: "ollama",
+				model: "nomic-embed-text",
+				available: true,
+				base_url: "http://127.0.0.1:11434",
+				checkedAt: new Date().toISOString(),
+			},
+			{
+				sqlite: null,
+				sqliteAttempt: "/tmp/bad-sqlite.dylib",
+				sqliteWarning: "custom sqlite not configured",
 				extensionPath: "/tmp/vec0.dylib",
 				extensionLoaded: false,
 				extensionLoadError: "loadExtension blocked",
@@ -82,24 +83,24 @@ describe("buildEmbeddingHealth", () => {
 		`);
 
 		const report = buildEmbeddingHealth(
-			db,
+			db as unknown as ReadDb,
 			{
 				provider: "ollama",
 				model: "nomic-embed-text",
 				dimensions: 768,
-			base_url: "http://127.0.0.1:11434",
-		},
-		{
-			provider: "ollama",
-			model: "nomic-embed-text",
-			available: true,
-			base_url: "http://127.0.0.1:11434",
-			checkedAt: new Date().toISOString(),
-		},
-		{
-			sqlite: null,
-			sqliteAttempt: null,
-			sqliteWarning: null,
+				base_url: "http://127.0.0.1:11434",
+			},
+			{
+				provider: "ollama",
+				model: "nomic-embed-text",
+				available: true,
+				base_url: "http://127.0.0.1:11434",
+				checkedAt: new Date().toISOString(),
+			},
+			{
+				sqlite: null,
+				sqliteAttempt: null,
+				sqliteWarning: null,
 				extensionPath: "/tmp/vec0.dylib",
 				extensionLoaded: true,
 				extensionLoadError: null,

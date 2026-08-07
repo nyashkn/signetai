@@ -19,6 +19,13 @@ const embeddingConfig: EmbeddingConfig = {
 	base_url: "",
 };
 
+/** Test-only: the loaded config is deeply readonly; these tests tune it in place. */
+type Mutable<T> = T extends readonly (infer E)[]
+	? Mutable<E>[]
+	: T extends object
+		? { -readonly [K in keyof T]: Mutable<T[K]> }
+		: T;
+
 function testVector(value: number): number[] {
 	return Array.from({ length: embeddingConfig.dimensions }, (_, index) => (index === 0 ? value : 0));
 }
@@ -188,9 +195,7 @@ describe("Obsidian source embeddings", () => {
 
 		const rows = getDbAccessor().withReadDb(
 			(db) =>
-				db
-					.prepare("SELECT source_type FROM embeddings ORDER BY source_type")
-					.all() as Array<{ source_type: string }>,
+				db.prepare("SELECT source_type FROM embeddings ORDER BY source_type").all() as Array<{ source_type: string }>,
 		);
 		expect(rows.map((row) => row.source_type)).toEqual(["source_chunk"]);
 	});
@@ -311,7 +316,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;
@@ -319,7 +324,7 @@ describe("Obsidian source embeddings", () => {
 		cfg.search.min_score = 0;
 		cfg.search.rehearsal_enabled = false;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.hints.enabled = false;
+		if (cfg.pipelineV2.hints) cfg.pipelineV2.hints.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 		const response = await hybridRecall(
 			{ query: "canonical source_path heading provenance", limit: 3, agentId: "obsidian-embedding-agent" },
@@ -358,7 +363,7 @@ describe("Obsidian source embeddings", () => {
 			fetchEmbedding: async () => testVector(1),
 		});
 
-		const cfg = loadMemoryConfig(dir);
+		const cfg = loadMemoryConfig(dir) as Mutable<ReturnType<typeof loadMemoryConfig>>;
 		cfg.embedding.provider = embeddingConfig.provider;
 		cfg.embedding.model = embeddingConfig.model;
 		cfg.embedding.dimensions = embeddingConfig.dimensions;
@@ -366,7 +371,7 @@ describe("Obsidian source embeddings", () => {
 		cfg.search.min_score = 0;
 		cfg.search.rehearsal_enabled = false;
 		cfg.pipelineV2.graph.enabled = false;
-		cfg.pipelineV2.hints.enabled = false;
+		if (cfg.pipelineV2.hints) cfg.pipelineV2.hints.enabled = false;
 		cfg.pipelineV2.reranker.enabled = false;
 
 		const agentARecall = await hybridRecall(

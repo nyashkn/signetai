@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
-import { logger } from "../logger";
+import type { logger } from "../logger";
 import { executeTask } from "./worker";
 
 function isTaskRunRow(value: unknown): value is { status: string; error: string | null } {
@@ -38,6 +38,8 @@ describe("executeTask", () => {
 			withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
 				return fn(db as unknown as WriteDb);
 			},
+			withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+			checkpointWal: () => {},
 			close() {},
 		};
 
@@ -102,6 +104,8 @@ describe("executeTask", () => {
 			withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
 				return fn(db as unknown as WriteDb);
 			},
+			withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+			checkpointWal: () => {},
 			close() {},
 		};
 

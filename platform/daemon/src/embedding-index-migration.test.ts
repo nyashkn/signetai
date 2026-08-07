@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { findSqliteVecExtension } from "@signet/core";
+import { MIGRATIONS, type MigrationDb, findSqliteVecExtension } from "@signet/core";
+import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import {
 	promoteStagingIndex,
 	stageEmbeddingBatch,
@@ -8,10 +9,19 @@ import {
 	startEmbeddingIndexMigration,
 } from "./embedding-index-migration";
 import { beginEmbeddingIndexBuild, ensureEmbeddingIndexState } from "./embedding-index-state";
-import { up as embeddingIndexGenerations } from "../../core/src/migrations/091-embedding-index-generations";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 
 const VEC_EXTENSION = findSqliteVecExtension();
+
+/**
+ * Reach one migration through the package entry rather than its file path.
+ * A relative import into `platform/core/src` escapes this project's rootDir,
+ * which is what kept every test file out of `tsc` in the first place.
+ */
+function embeddingIndexGenerations(db: MigrationDb): void {
+	const migration = MIGRATIONS.find((m) => m.version === 91);
+	if (!migration) throw new Error("migration 91 (embedding index generations) is missing");
+	migration.up(db);
+}
 
 describe("staging embedding coverage", () => {
 	it("requires every active row, including source chunks, at the staged dimensions", () => {
@@ -36,7 +46,7 @@ describe("staging embedding coverage", () => {
 
 	it("prunes obsolete staged rows while active writes and purges continue", async () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(`
 			CREATE TABLE embeddings (
 				id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER,
@@ -63,6 +73,8 @@ describe("staging embedding coverage", () => {
 		const accessor: DbAccessor = {
 			withWriteTx: (fn) => fn(db),
 			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
+			checkpointWal: () => {},
 			close: () => undefined,
 		};
 
@@ -90,7 +102,7 @@ describe("staging embedding coverage", () => {
 
 	it("fails closed when the target provider returns the wrong vector dimension", async () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(`
 			CREATE TABLE embeddings (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
 			CREATE TABLE embeddings_staging (id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
@@ -109,6 +121,8 @@ describe("staging embedding coverage", () => {
 		const accessor: DbAccessor = {
 			withWriteTx: (fn) => fn(db),
 			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
+			checkpointWal: () => {},
 			close: () => undefined,
 		};
 
@@ -127,7 +141,7 @@ describe("staging embedding coverage", () => {
 describe("staging promotion", () => {
 	it("swaps full index slots while retaining the previous active slot", () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(`
 				CREATE TABLE memories (id TEXT PRIMARY KEY, embedding_model TEXT);
 				CREATE TABLE embeddings (id TEXT, content_hash TEXT, dimensions INTEGER, source_type TEXT, source_id TEXT, created_at TEXT);
@@ -154,6 +168,8 @@ describe("staging promotion", () => {
 		const accessor: DbAccessor = {
 			withWriteTx: (fn) => fn(db),
 			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
+			checkpointWal: () => {},
 			close: () => undefined,
 		};
 
@@ -168,7 +184,7 @@ describe("staging promotion", () => {
 		if (!VEC_EXTENSION) return;
 		const raw = new Database(":memory:");
 		raw.loadExtension(VEC_EXTENSION);
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(`
 			CREATE TABLE memories (id TEXT PRIMARY KEY, embedding_model TEXT);
 			CREATE TABLE embeddings (id TEXT, content_hash TEXT, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, created_at TEXT);
@@ -207,6 +223,8 @@ describe("staging promotion", () => {
 				}
 			},
 			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
+			checkpointWal: () => {},
 			close: () => undefined,
 		};
 
@@ -221,7 +239,7 @@ describe("staging promotion", () => {
 describe("staging migration lifecycle", () => {
 	it("resumes an interrupted build without clearing its inactive vector slot", async () => {
 		const raw = new Database(":memory:");
-		embeddingIndexGenerations(raw as unknown as Parameters<typeof embeddingIndexGenerations>[0]);
+		embeddingIndexGenerations(raw as unknown as MigrationDb);
 		raw.exec(`
 			CREATE TABLE embeddings (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
 			CREATE TABLE embeddings_staging (id TEXT, content_hash TEXT UNIQUE, vector BLOB, dimensions INTEGER, source_type TEXT, source_id TEXT, chunk_text TEXT, created_at TEXT, agent_id TEXT);
@@ -242,6 +260,8 @@ describe("staging migration lifecycle", () => {
 		const accessor: DbAccessor = {
 			withWriteTx: (fn) => fn(db),
 			withReadDb: (fn) => fn(raw as unknown as ReadDb),
+			withReadDbAsync: async (fn) => fn(raw as unknown as ReadDb),
+			checkpointWal: () => {},
 			close: () => undefined,
 		};
 

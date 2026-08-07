@@ -1,6 +1,6 @@
 import Database from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { DbAccessor, WriteDb } from "../db-accessor";
+import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { retireLegacyExtractionJobs } from "./extraction-fallback";
 
 function makeAccessor(db: Database): DbAccessor {
@@ -8,9 +8,13 @@ function makeAccessor(db: Database): DbAccessor {
 		withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
 			return fn(db as unknown as WriteDb);
 		},
-		withReadDb<T>(fn: (rdb: Database) => T): T {
-			return fn(db);
+		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
+			return fn(db as unknown as ReadDb);
 		},
+		async withReadDbAsync<T>(fn: (rdb: ReadDb) => Promise<T>): Promise<T> {
+			return fn(db as unknown as ReadDb);
+		},
+		checkpointWal(): void {},
 		close() {
 			db.close();
 		},

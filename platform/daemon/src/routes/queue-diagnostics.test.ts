@@ -7,8 +7,8 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { runMigrations } from "@signet/core";
 import { Hono } from "hono";
-import { runMigrations } from "../../../core/src/migrations";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { cancelObsoleteJobs, createRateLimiter, pruneTerminalJobs, requeueDeadJobs } from "../repair-actions";
 import { registerPipelineRoutes } from "./pipeline-routes";
@@ -30,6 +30,8 @@ function makeAccessor(db: Database): DbAccessor {
 				throw err;
 			}
 		},
+		withReadDbAsync: async <T>(fn: (readDb: ReadDb) => Promise<T>): Promise<T> => fn(db as unknown as ReadDb),
+		checkpointWal: (): void => {},
 		close(): void {},
 	};
 }
@@ -334,6 +336,10 @@ describe("repair action integration via the new dispatch path", () => {
 				withWriteTx: () => {
 					throw new Error("simulated degraded runtime: DbAccessor is closed");
 				},
+				withReadDbAsync: async () => {
+					throw new Error("simulated degraded runtime: DbAccessor is closed");
+				},
+				checkpointWal: (): void => {},
 				close(): void {},
 			};
 			const app = new Hono();

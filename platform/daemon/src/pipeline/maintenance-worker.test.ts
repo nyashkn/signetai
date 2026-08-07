@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { createProviderTracker } from "../diagnostics";
 import { DEFAULT_PIPELINE_V2 } from "../memory-config";
@@ -33,6 +33,8 @@ function asAccessor(db: Database): DbAccessor {
 		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
+		withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+		checkpointWal: () => {},
 		close() {
 			db.close();
 		},

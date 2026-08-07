@@ -78,7 +78,9 @@ describe("interactive semantic mutation cutover", () => {
 						| undefined,
 			);
 			expect(pinned?.pinned).toBe(1);
-			expect(pinned?.pinned_at).toBe(result?.pinnedAt);
+			// `result` is a loosely-typed operation payload (Record<string, unknown> | null);
+			// cast the read-back timestamp to the shape the pin_entity operation actually returns.
+			expect(pinned?.pinned_at).toBe(result?.pinnedAt as string | undefined);
 			expect(pinned?.proposal_id).toBe(proposal.id);
 		});
 
@@ -342,7 +344,10 @@ describe("interactive semantic mutation cutover", () => {
 
 	describe("retired direct writers are gone", () => {
 		it("knowledge-graph no longer exports pinEntity/unpinEntity/createEntityAlias/archiveEntityAlias", async () => {
-			const mod = await import("../knowledge-graph");
+			// These names were retired in favour of the audited ontology-operations path
+			// (create_entity_alias / archive_entity_alias). Cast to check for their absence —
+			// the module's type no longer declares them, which is exactly what this asserts.
+			const mod = (await import("../knowledge-graph")) as unknown as Record<string, unknown>;
 			expect(mod.pinEntity).toBeUndefined();
 			expect(mod.unpinEntity).toBeUndefined();
 			expect(mod.createEntityAlias).toBeUndefined();

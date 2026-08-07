@@ -18,7 +18,9 @@ const infoMock = mock((_cat: string, _msg: string, _data?: Record<string, unknow
 const warnMock = mock((..._args: unknown[]) => {});
 const errorMock = mock((..._args: unknown[]) => {});
 const hybridRecallMock = mock(async (..._args: Parameters<PromptDeps["hybridRecall"]>) => ({ results: [] }));
-const fetchEmbeddingMock = mock(async (..._args: Parameters<PromptDeps["fetchEmbedding"]>) => null);
+const fetchEmbeddingMock = mock(
+	async (..._args: Parameters<PromptDeps["fetchEmbedding"]>): Promise<number[] | null> => null,
+);
 const searchTemporalFallbackMock = mock(() => []);
 
 const { loadMemoryConfig: realLoadMemoryConfig } = await import("./memory-config");

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import type { DbAccessor, ReadDb, WriteDb } from "../db-accessor";
 import { type RetentionConfig, startRetentionWorker } from "./retention-worker";
 
@@ -20,6 +20,8 @@ function makeAccessor(db: Database): DbAccessor {
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
+		withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+		checkpointWal: () => {},
 		close() {
 			db.close();
 		},

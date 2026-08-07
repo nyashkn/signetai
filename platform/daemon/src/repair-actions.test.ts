@@ -4,8 +4,7 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { readMemoriesFtsSql } from "../../core/src/fts-schema";
-import { runMigrations } from "../../core/src/migrations";
+import { readMemoriesFtsSql, runMigrations } from "@signet/core";
 import { normalizeAndHashContent } from "./content-normalization";
 import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import { toFtsSchemaQueryDb } from "./db-accessor";
@@ -50,6 +49,8 @@ function asAccessor(db: Database): DbAccessor {
 		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
+		withReadDbAsync: async <T>(fn: (rdb: ReadDb) => Promise<T>): Promise<T> => fn(db as unknown as ReadDb),
+		checkpointWal: (): void => {},
 		close() {
 			db.close();
 		},
@@ -785,7 +786,7 @@ describe("checkFtsConsistency", () => {
 		expect(result.success).toBe(true);
 		expect(result.affected).toBe(1);
 		expect(result.message).toMatch(/tokenizer drift/i);
-		expect(readMemoriesFtsSql(toFtsSchemaQueryDb(db))).toContain("porter unicode61");
+		expect(readMemoriesFtsSql(toFtsSchemaQueryDb(db as unknown as ReadDb))).toContain("porter unicode61");
 	});
 
 	it("repairs legacy porter tokenizer drift when repair=true", () => {
@@ -798,7 +799,7 @@ describe("checkFtsConsistency", () => {
 		expect(result.affected).toBe(1);
 		expect(result.message).toMatch(/unicode61 tokenizer/i);
 
-		const sql = readMemoriesFtsSql(toFtsSchemaQueryDb(db));
+		const sql = readMemoriesFtsSql(toFtsSchemaQueryDb(db as unknown as ReadDb));
 		expect(sql).toContain("tokenize='unicode61'");
 		expect(sql).not.toContain("porter unicode61");
 	});
@@ -837,7 +838,6 @@ describe("reembedMissingMemories", () => {
 			10,
 			false,
 			false,
-			"default",
 		);
 
 		expect(result.success).toBe(true);
@@ -1212,6 +1212,8 @@ describe("reembedModelMigration", () => {
 			withReadDb<T>(fn: (rdb: ReadDb) => T): T {
 				return inner.withReadDb(fn);
 			},
+			withReadDbAsync: async <T>(fn: (rdb: ReadDb) => Promise<T>): Promise<T> => inner.withReadDbAsync(fn),
+			checkpointWal: (): void => inner.checkpointWal(),
 			close() {
 				inner.close();
 			},

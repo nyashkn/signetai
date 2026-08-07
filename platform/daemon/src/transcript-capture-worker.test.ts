@@ -137,7 +137,10 @@ describe("transcript capture worker", () => {
 		});
 
 		expect(id).toBeTruthy();
-		expect(getTranscriptCaptureJobStatus(getDbAccessor(), "agent-a", id ?? "")).toEqual({
+		// toBeTruthy does not narrow for the compiler, and the receipt's `id` is a
+		// plain string, so the nullable enqueue result has to be narrowed here.
+		if (!id) throw new Error("unreachable: id was already asserted truthy");
+		expect(getTranscriptCaptureJobStatus(getDbAccessor(), "agent-a", id)).toEqual({
 			id,
 			status: "pending",
 			error: null,

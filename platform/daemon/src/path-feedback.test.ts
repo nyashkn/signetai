@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 
 const TEST_DIR = join(tmpdir(), `signet-path-feedback-test-${Date.now()}`);
 process.env.SIGNET_PATH = TEST_DIR;
@@ -157,7 +157,9 @@ describe("recordPathFeedback", () => {
 		expect(typeof dep?.proposal_id).toBe("string");
 		const proposal = db
 			.prepare("SELECT operation, status, created_by, evidence FROM ontology_proposals WHERE id = ?")
-			.get(dep?.proposal_id) as { operation: string; status: string; created_by: string; evidence: string } | undefined;
+			.get(dep?.proposal_id ?? null) as
+			| { operation: string; status: string; created_by: string; evidence: string }
+			| undefined;
 		expect(proposal).toMatchObject({ operation: "update_link", status: "applied", created_by: "path-feedback" });
 		expect(proposal?.evidence).toContain('"memory_id":"mem-a"');
 
@@ -332,7 +334,7 @@ describe("recordPathFeedback", () => {
 		expect(typeof reverse?.proposal_id).toBe("string");
 		const reverseProposal = db
 			.prepare("SELECT operation, status, created_by, evidence FROM ontology_proposals WHERE id = ?")
-			.get(reverse?.proposal_id) as
+			.get(reverse?.proposal_id ?? null) as
 			| { operation: string; status: string; created_by: string; evidence: string }
 			| undefined;
 		expect(reverseProposal).toMatchObject({ operation: "create_link", status: "applied", created_by: "path-feedback" });

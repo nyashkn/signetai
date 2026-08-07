@@ -18,15 +18,21 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { type Server, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
+
+/** The concrete spawn() return type for stdio: ["ignore", "pipe", "pipe"] — stdin is
+ *  null (ignored), stdout/stderr are readable streams. Distinct from
+ *  ChildProcessWithoutNullStreams, which requires a writable stdin too. */
+type SpawnedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 const daemonScript = join(import.meta.dir, "daemon.ts");
 const tempDirs: string[] = [];
-const children: ChildProcessWithoutNullStreams[] = [];
+const children: SpawnedChild[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
@@ -86,11 +92,7 @@ async function blackholeOrigin(): Promise<string> {
 	});
 }
 
-async function waitForHealth(
-	origin: string,
-	child: ChildProcessWithoutNullStreams,
-	deadlineMs = 30_000,
-): Promise<void> {
+async function waitForHealth(origin: string, child: SpawnedChild, deadlineMs = 30_000): Promise<void> {
 	const deadline = Date.now() + deadlineMs;
 	while (Date.now() < deadline) {
 		if (child.exitCode !== null) throw new Error(`daemon exited before health (status ${child.exitCode})`);

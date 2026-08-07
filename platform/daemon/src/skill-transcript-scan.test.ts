@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import { closeDbAccessor, initDbAccessor } from "./db-accessor";
 import { MAX_TRANSCRIPT_SCAN_BYTES, recordSkillsFromTranscript } from "./skill-transcript-scan";
 

@@ -336,9 +336,14 @@ memory:
 					)
 					.all() as Array<{ agentId: string; subjectId: string }>,
 		);
+		const otherAgentId = otherAgentJson.id;
+		const firstId = firstJson.id;
+		if (otherAgentId === undefined || firstId === undefined) {
+			throw new Error("expected otherAgentJson.id and firstJson.id to be defined");
+		}
 		expect(rows).toEqual([
-			{ agentId: "agent-a", subjectId: otherAgentJson.id },
-			{ agentId: "default", subjectId: firstJson.id },
+			{ agentId: "agent-a", subjectId: otherAgentId },
+			{ agentId: "default", subjectId: firstId },
 		]);
 	});
 

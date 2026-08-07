@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../../../core/src/migrations";
+import { runMigrations } from "@signet/core";
 import { type DbAccessor, type ReadDb, type WriteDb, closeDbAccessor, initDbAccessor } from "../db-accessor";
 import { loadMemoryConfig } from "../memory-config";
 import { IMMUTABLE_ARTIFACT_ERROR_PREFIX, writeSummaryArtifact } from "../memory-lineage";
@@ -32,7 +32,7 @@ function makeAccessor(db: Database): DbAccessor {
 			try {
 				const result = fn(db as unknown as WriteDb);
 				db.exec("COMMIT");
-			return result;
+				return result;
 			} catch (err) {
 				db.exec("ROLLBACK");
 				throw err;
@@ -41,6 +41,8 @@ function makeAccessor(db: Database): DbAccessor {
 		withReadDb<T>(fn: (db: ReadDb) => T): T {
 			return fn(db as unknown as ReadDb);
 		},
+		withReadDbAsync: async (fn) => fn(db as unknown as ReadDb),
+		checkpointWal: () => {},
 		close() {
 			db.close();
 		},
@@ -308,6 +310,10 @@ describe("summary job helpers", () => {
 		controller.abort();
 		let observedSignal: AbortSignal | undefined;
 		const provider: LlmProvider = {
+			name: "test-provider",
+			async available(): Promise<boolean> {
+				return true;
+			},
 			async generate(_prompt, opts) {
 				observedSignal = opts?.signal;
 				throw new Error("aborted");
@@ -328,6 +334,7 @@ describe("summary job helpers", () => {
 						agent_id: "default",
 						transcript: "User: summarize continuity cancellation",
 						trigger: "test",
+						boundary_reason: null,
 						captured_at: null,
 						started_at: null,
 						ended_at: null,
