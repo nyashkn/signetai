@@ -27,6 +27,14 @@ import { ownerReadOne } from "./db-owner-sql";
 import { runWriteTxAsync } from "./db-accessor";
 import { getDreamingEpisodicTokenBacklogCached } from "./pipeline/dreaming-token-cache";
 
+/**
+ * Knowledge-graph reads are single-row lookups (sub-millisecond in SQLite), but
+ * they queue behind every other job in the serial DB owner. A 2 s deadline made
+ * roughly half of a Dreaming pass's tool calls fail on a busy daemon, burning
+ * the pass's turn budget on retries instead of evidence. Wait for the queue.
+ */
+const KNOWLEDGE_READ_DEADLINE_MS = 15_000;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -199,7 +207,7 @@ export async function getAspectsForEntity(
 			params: [entityId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.aspects-for-entity.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.aspects-for-entity.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToAspect);
 }
@@ -221,7 +229,7 @@ export async function getAttributesForAspect(
 			params: [aspectId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.attributes-for-aspect.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.attributes-for-aspect.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToAttribute);
 }
@@ -249,7 +257,7 @@ export async function getConstraintsForEntity(
 			params: [entityId, agentId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.constraints-for-entity.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.constraints-for-entity.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToAttribute);
 }
@@ -268,7 +276,7 @@ export async function getEntityDependencyById(
 			params: [params.id, params.agentId],
 			result: "get",
 		},
-		{ operation: "db:knowledge.dependency-by-id.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.dependency-by-id.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return row === null ? null : rowToDependency(row);
 }
@@ -291,7 +299,7 @@ export async function getDependenciesFrom(
 			params: [entityId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.dependencies-from.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.dependencies-from.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToDependency);
 }
@@ -314,7 +322,7 @@ export async function getDependenciesTo(
 			params: [entityId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.dependencies-to.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.dependencies-to.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToDependency);
 }
@@ -338,7 +346,7 @@ export async function getPinnedEntities(
 			params: [agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.pinned-entities.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.pinned-entities.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.flatMap((row) => {
 		if (typeof row.id !== "string" || typeof row.name !== "string") return [];
@@ -405,7 +413,7 @@ export async function getTaskMeta(_accessor: DbAccessor, entityId: string, agent
 			params: [entityId, agentId],
 			result: "get",
 		},
-		{ operation: "db:knowledge.task-meta.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.task-meta.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return row ? rowToTaskMeta(row) : null;
 }
@@ -640,7 +648,7 @@ export async function resolveNamedEntity(
 			],
 			result: "get",
 		},
-		{ operation: "db:knowledge.resolve-entity.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.resolve-entity.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	if (!rows) return null;
 	return {
@@ -664,7 +672,7 @@ async function resolveEntityByNameOnOwner(
 			params: [resolved.id, params.agentId],
 			result: "get",
 		},
-		{ operation: "db:knowledge.entity-by-name.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-by-name.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return row ? rowToEntity(row) : null;
 }
@@ -686,7 +694,7 @@ async function resolveAspectByNameOnOwner(params: {
 			params: [params.entityId, params.agentId, canonical, canonical],
 			result: "get",
 		},
-		{ operation: "db:knowledge.aspect-by-name.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.aspect-by-name.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return row ? rowToAspect(row) : null;
 }
@@ -783,7 +791,7 @@ export async function listEntityAliases(
 			params: args,
 			result: "all",
 		},
-		{ operation: "db:knowledge.entity-aliases.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-aliases.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToEntityAlias);
 }
@@ -807,7 +815,7 @@ export async function getEntityAspectsByName(
 			params: [entity.id, params.agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.entity-aspects-with-counts.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-aspects-with-counts.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return {
 		entity,
@@ -1014,7 +1022,7 @@ export async function listEntityGroups(
 			params: [aspect.id, params.agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.entity-groups.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-groups.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return {
 		entity,
@@ -1083,7 +1091,7 @@ export async function listEntityClaims(
 			params: [aspect.id, params.agentId, group.length > 0 ? group : "general"],
 			result: "all",
 		},
-		{ operation: "db:knowledge.entity-claims.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-claims.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return {
 		entity,
@@ -1159,7 +1167,7 @@ export async function listEntityAttributesByPath(
 			params: [...args, params.limit, params.offset],
 			result: "all",
 		},
-		{ operation: "db:knowledge.attributes-by-path.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.attributes-by-path.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return { entity, aspect, items: rows.map(rowToAttribute) };
 }
@@ -1242,7 +1250,7 @@ export async function listKnowledgeEntities(
 			params: [...args, params.limit, params.offset],
 			result: "all",
 		},
-		{ operation: "db:knowledge.entities-list.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entities-list.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 
 	return rows.map((row) => ({
@@ -1310,7 +1318,7 @@ export async function getKnowledgeEntityDetail(
 			params: [entityId, agentId],
 			result: "get",
 		},
-		{ operation: "db:knowledge.entity-detail.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-detail.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 
 	if (!row) return null;
@@ -1355,7 +1363,7 @@ export async function getEntityAspectsWithCounts(
 			params: [entityId, agentId],
 			result: "all",
 		},
-		{ operation: "db:knowledge.aspects-with-counts.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.aspects-with-counts.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 
 	return rows.map((row) => ({
@@ -1407,7 +1415,7 @@ export async function getAttributesForAspectFiltered(
 			params: [...args, params.limit, params.offset],
 			result: "all",
 		},
-		{ operation: "db:knowledge.attributes-filtered.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.attributes-filtered.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	return rows.map(rowToAttribute);
 }
@@ -1449,7 +1457,7 @@ export async function getEntityDependenciesDetailed(
 			],
 			result: "all",
 		},
-		{ operation: "db:knowledge.dependencies-detailed.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.dependencies-detailed.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 
 	return rows.map((row) => ({
@@ -1563,7 +1571,7 @@ export async function getEntityHealth(
 			params: [],
 			result: "get",
 		},
-		{ operation: "db:knowledge.predictor-table.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.predictor-table.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 	if (predictorTable === null) return [];
 
@@ -1589,7 +1597,7 @@ export async function getEntityHealth(
 			params: args,
 			result: "all",
 		},
-		{ operation: "db:knowledge.entity-health.read", deadlineMs: 2_000 },
+		{ operation: "db:knowledge.entity-health.read", deadlineMs: KNOWLEDGE_READ_DEADLINE_MS },
 	);
 
 	const grouped = new Map<
