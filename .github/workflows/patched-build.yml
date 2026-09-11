@@ -1,0 +1,147 @@
+name: Patched build
+
+# Keeps a locally-patched Signet daemon available without a manual rebuild.
+#
+# Each patch lives on its own branch in this fork. Every night this rebases them
+# onto upstream main, runs the suites they touch, and publishes an ad-hoc-signed
+# arm64 binary as an artifact. Three failure modes are worth distinguishing and
+# the job reports each one separately:
+#
+#   landed    the fix is now upstream -> delete the branch, drop the patch
+#   conflict  upstream moved under the patch -> needs a human rebase
+#   red       the patch still applies but its tests no longer pass
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_binary:
+        description: "Check patches only, skip the native build"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: https://github.com/Signet-AI/signetai.git
+  PATCH_BRANCHES: "fix/knowledge-graph-read-deadline fix/dreaming-evidence-fragment-size"
+
+jobs:
+  patched-build:
+    runs-on: macos-14
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+          git fetch --quiet upstream main
+          echo "UPSTREAM_SHA=$(git rev-parse --short upstream/main)" >> "$GITHUB_ENV"
+
+      # A patch that landed upstream must not be silently re-applied on top of
+      # itself: rebase would succeed with an empty diff and hide that the branch
+      # is now dead weight. Detect it by marker before touching the tree.
+      - name: Detect patches that landed upstream
+        id: landed
+        run: |
+          landed=""
+          for branch in $PATCH_BRANCHES; do
+            case "$branch" in
+              fix/knowledge-graph-read-deadline) marker="KNOWLEDGE_READ_DEADLINE_MS"; file="platform/daemon/src/knowledge-graph.ts" ;;
+              fix/dreaming-evidence-fragment-size) marker="MAX_EVIDENCE_SCAN_RESULT_CHARS"; file="platform/daemon/src/pipeline/dreaming-capabilities.ts" ;;
+              *) echo "::error::no landed-marker configured for $branch"; exit 1 ;;
+            esac
+            if git show "upstream/main:$file" | grep -q "$marker"; then
+              echo "::notice::$branch has landed upstream - delete the branch and drop the patch"
+              landed="$landed $branch"
+            fi
+          done
+          echo "branches=$landed" >> "$GITHUB_OUTPUT"
+
+      - name: Rebase patches onto upstream main
+        id: rebase
+        run: |
+          git config user.name "patched-build"
+          git config user.email "patched-build@users.noreply.github.com"
+          git checkout --quiet -B patched-build upstream/main
+          applied=""
+          for branch in $PATCH_BRANCHES; do
+            case " ${{ steps.landed.outputs.branches }} " in *" $branch "*) continue ;; esac
+            if git cherry-pick "origin/$branch" >/dev/null 2>&1; then
+              applied="$applied $branch"
+            else
+              git cherry-pick --abort || true
+              echo "::error::$branch no longer applies to upstream/main ($UPSTREAM_SHA) - needs a manual rebase"
+              exit 1
+            fi
+          done
+          echo "applied=$applied" >> "$GITHUB_OUTPUT"
+          echo "Applied:$applied onto $UPSTREAM_SHA"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build workspace dependencies
+        run: bun run build
+
+      # Only the suites the patches touch. A full run here would report upstream's
+      # own breakage as this workflow's failure.
+      - name: Test the patched surfaces
+        working-directory: platform/daemon
+        run: |
+          bun test \
+            src/pipeline/dreaming-evidence-fragment-size.test.ts \
+            src/pipeline/dreaming-evidence.test.ts \
+            src/pipeline/dreaming-agent-tools.test.ts \
+            src/episodic-sources.test.ts
+
+      - name: Build dashboard assets
+        if: ${{ !inputs.skip_binary }}
+        run: bun run build:dashboard
+
+      - name: Build native binary
+        if: ${{ !inputs.skip_binary }}
+        run: bun run build:native-bun
+
+      # Copying a built binary invalidates its signature and macOS then SIGKILLs
+      # it on launch with no output (exit 137). Sign here so the downloaded
+      # artifact runs as-is.
+      - name: Ad-hoc sign
+        if: ${{ !inputs.skip_binary }}
+        run: |
+          codesign -s - --force ./dist/native/signet-darwin-arm64
+          codesign -v ./dist/native/signet-darwin-arm64
+
+      - name: Smoke the binary
+        if: ${{ !inputs.skip_binary }}
+        run: |
+          ./dist/native/signet-darwin-arm64 --version
+          ./dist/native/signet-darwin-arm64 --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.skip_binary }}
+        with:
+          name: signet-darwin-arm64-patched-${{ env.UPSTREAM_SHA }}
+          path: dist/native/signet-darwin-arm64
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Patched build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| upstream | \`$UPSTREAM_SHA\` |"
+            echo "| applied | \`${{ steps.rebase.outputs.applied }}\` |"
+            echo "| landed upstream | \`${{ steps.landed.outputs.branches }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
