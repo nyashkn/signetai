@@ -51,6 +51,13 @@ const bounded = (value: number | undefined, fallback: number, max: number): numb
 	Math.min(Math.max(Math.floor(value ?? fallback), 1), max);
 
 const MAX_EVIDENCE_EXCERPT_CHARS = 2_000;
+// A fragment read is one source in one turn, so it can carry far more than a
+// keyword-search excerpt: at 2k a multi-hundred-KB transcript needs hundreds of
+// turns and never finishes inside a pass, which is what froze the backlog.
+const MAX_EVIDENCE_FRAGMENT_CHARS = 20_000;
+const DEFAULT_EVIDENCE_FRAGMENT_CHARS = 8_000;
+// Total across a scan response, which fans out over up to `limit` sources.
+const MAX_EVIDENCE_SCAN_RESULT_CHARS = 32_000;
 const MAX_EVIDENCE_RESULT_CHARS = 16_000;
 const MAX_HYDRATED_ITEMS = 50;
 const MAX_ENTITY_TEXT_CHARS = 2_000;
@@ -219,6 +226,11 @@ function projectEvidenceFragment(
 		: projectEvidenceItem(source, fragment.content, fragment.start, fragment.sourceLength);
 }
 
+function fragmentContentLength(item: Record<string, unknown>): number {
+	const content = item.content;
+	return typeof content === "string" ? content.length : 0;
+}
+
 function projectEntity(entity: Entity): Record<string, unknown> {
 	return {
 		id: entity.id,
@@ -379,7 +391,7 @@ export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvi
 		const fragment = projectEvidenceFragment(
 			source,
 			Math.max(0, Math.floor(input.offset ?? 0)),
-			Math.min(Math.max(Math.floor(input.chunkSize ?? MAX_EVIDENCE_EXCERPT_CHARS), 1), MAX_EVIDENCE_EXCERPT_CHARS),
+			bounded(input.chunkSize, DEFAULT_EVIDENCE_FRAGMENT_CHARS, MAX_EVIDENCE_FRAGMENT_CHARS),
 		);
 		return fragment === null
 			? { ok: false, error: "Evidence fragment offset is outside the source" }
@@ -406,14 +418,23 @@ export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvi
 					limit: input.limit,
 				});
 	const items = scanFirst
-		? sources.flatMap((source) => {
-				const fragment = projectEvidenceFragment(
-					source,
-					deliveredOffsetForSource(db, scopeId, source),
-					MAX_EVIDENCE_EXCERPT_CHARS,
-				);
-				return fragment === null ? [] : [fragment];
-			})
+		? (() => {
+				// The scan is the delivery path: whatever it returns is recorded as consumed.
+				// A 2k slice per source means a large transcript needs hundreds of passes, so
+				// take real bites, bounded overall so one response cannot swallow the context.
+				let remaining = MAX_EVIDENCE_SCAN_RESULT_CHARS;
+				return sources.flatMap((source) => {
+					if (remaining <= 0) return [];
+					const fragment = projectEvidenceFragment(
+						source,
+						deliveredOffsetForSource(db, scopeId, source),
+						Math.min(MAX_EVIDENCE_FRAGMENT_CHARS, remaining),
+					);
+					if (fragment === null) return [];
+					remaining -= fragmentContentLength(fragment);
+					return [fragment];
+				});
+			})()
 		: projectEvidence(sources, input.query ?? "");
 	return { ok: true, items };
 }
