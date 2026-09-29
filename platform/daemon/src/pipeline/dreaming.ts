@@ -491,6 +491,42 @@ function resetDreamingTokens(
 	}
 }
 
+// A content pass that consumed backlog but never landed a memory-head commit is not "done" — the
+// working-memory head it exists to update never moved. Advance the same bookkeeping resetDreamingTokens
+// would (last_pass_at/evidence_cursor/last_pass_id/last_pass_mode, so the backlog isn't reprocessed
+// forever) but count it as a failure instead of clearing consecutive_failures, so a run of these hits
+// DREAMING_FAILURE_HALT_THRESHOLD and the scheduler backs off instead of retrying every 5-25 minutes
+// indefinitely at zero cost visibility.
+function recordDreamingHeadMissingInTx(
+	db: WriteDb,
+	agentId: string,
+	passId: string,
+	mode: string,
+	evidenceCursor: EpisodicCursor | null,
+	lastPassAt: string | null,
+): void {
+	const exists = db.prepare("SELECT 1 FROM dreaming_state WHERE agent_id = ?").get(agentId);
+	if (exists) {
+		db.prepare(
+			`UPDATE dreaming_state
+			 SET consecutive_failures = consecutive_failures + 1,
+			     last_failure_at = datetime('now'),
+			     last_pass_at = ?,
+			     evidence_cursor = ?,
+			     last_pass_id = ?,
+			     last_pass_mode = ?,
+			     updated_at = datetime('now')
+			 WHERE agent_id = ?`,
+		).run(lastPassAt, evidenceCursor === null ? null : JSON.stringify(evidenceCursor), passId, mode, agentId);
+	} else {
+		db.prepare(
+			`INSERT INTO dreaming_state
+			 (agent_id, consecutive_failures, last_failure_at, last_pass_at, evidence_cursor, last_pass_id, last_pass_mode)
+			 VALUES (?, 1, datetime('now'), ?, ?, ?, ?)`,
+		).run(agentId, lastPassAt, evidenceCursor === null ? null : JSON.stringify(evidenceCursor), passId, mode);
+	}
+}
+
 export async function recordDreamingFailure(accessor: DbAccessor, agentId: string): Promise<void> {
 	await ownerTransaction(
 		await getDbOwnerForAccessor(accessor),
@@ -2072,6 +2108,13 @@ export function finalizeDreamingPassInDb(db: WriteDb, input: DbOwnerDreamingPass
 			});
 		}
 	}
+	// A content pass that consumed backlog is only genuinely "done" once its curated MEMORY.md head
+	// actually moved. Treating "[memory-head commit missing]" the same as a real commit here is what let
+	// a non-committing pass reset consecutive_failures to 0 forever, re-running every 5-25 minutes with
+	// no backoff even though it never advanced the working-memory head it exists to update.
+	const memoryHeadMissing =
+		input.mode === "incremental-content" &&
+		(input.memoryHeadResult === null || Reflect.get(input.memoryHeadResult, "ok") !== true);
 	if (
 		dreamingModeAdvancesEvidence(
 			input.mode as DreamingMode,
@@ -2081,7 +2124,18 @@ export function finalizeDreamingPassInDb(db: WriteDb, input: DbOwnerDreamingPass
 		const watermarks = new Map(input.nextWatermarkByScope.map((item) => [item.scope, item.watermark]));
 		for (const item of input.hasBacklogByScope) {
 			if (!item.hasBacklog) continue;
-			resetDreamingTokens(db, item.scope, input.passId, input.mode, null, watermarks.get(item.scope) ?? null);
+			if (memoryHeadMissing) {
+				recordDreamingHeadMissingInTx(
+					db,
+					item.scope,
+					input.passId,
+					input.mode,
+					null,
+					watermarks.get(item.scope) ?? null,
+				);
+			} else {
+				resetDreamingTokens(db, item.scope, input.passId, input.mode, null, watermarks.get(item.scope) ?? null);
+			}
 		}
 	}
 }
