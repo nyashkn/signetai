@@ -116,14 +116,36 @@ export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommit
 		input.entries.some((entry) => entry.support.length > 8)
 	)
 		return { ok: false, code: "INVALID_HEAD", error: "head input exceeds its bounded budget" };
-	const body = input.entries.map((entry) => `- ${entry.text.trim()}`).join("\n");
+	// The model can submit the same entryId twice in one commit (e.g. revising an entry mid-turn).
+	// Exact repeats are harmless — keep the first and drop the rest. Conflicting repeats are ambiguous
+	// (which text is authoritative?) and would otherwise hit the entry_id PRIMARY KEY below as a raw
+	// SQLite error; reject them with a structured error the model can act on instead.
+	const dedupedEntries: (typeof input.entries)[number][] = [];
+	const seenEntries = new Map<string, (typeof input.entries)[number]>();
+	for (const entry of input.entries) {
+		const prior = seenEntries.get(entry.entryId);
+		if (prior === undefined) {
+			seenEntries.set(entry.entryId, entry);
+			dedupedEntries.push(entry);
+			continue;
+		}
+		if (prior.text.trim() !== entry.text.trim() || JSON.stringify(prior.support) !== JSON.stringify(entry.support))
+			return {
+				ok: false,
+				code: "DUPLICATE_ENTRY_ID",
+				error: `entry ${entry.entryId} was submitted more than once with conflicting content`,
+			};
+	}
+	const normalizedInput =
+		dedupedEntries.length === input.entries.length ? input : { ...input, entries: dedupedEntries };
+	const body = normalizedInput.entries.map((entry) => `- ${entry.text.trim()}`).join("\n");
 	const safety = scanMemoryContent(body);
 	if (!body || !safety.contextEligible || countTokens(body) > 1000)
 		return { ok: false, code: "INVALID_HEAD", error: "head must be nonempty, safe, and at most 1000 tokens" };
 	const contentHash = hash(body);
 	if (head?.is_current === 1 && currentHash === contentHash)
 		return { ok: true, code: "NOOP", revision, hash: contentHash, changed: false, changedIds: [] };
-	const result = commitEntries(db, input, body, contentHash, revision, currentHash);
+	const result = commitEntries(db, normalizedInput, body, contentHash, revision, currentHash);
 	if (result.ok) {
 		const now = new Date().toISOString();
 		const revisionId = String(result.revisionId);
@@ -271,6 +293,11 @@ function commitEntries(
 		.prepare("SELECT entry_id FROM memory_head_entries WHERE agent_id = ? AND status = 'active'")
 		.all(input.agentId) as Array<{ entry_id: string }>;
 	const retained = new Set(input.entries.map((entry) => entry.entryId));
+	// memory_head_revision_entries has UNIQUE(agent_id, revision, ordinal). Each removed entry in this
+	// revision needs its own ordinal continuing after the 'add' rows above, not the shared constant
+	// `input.entries.length` every removal previously reused — that collided the moment a commit
+	// dropped more than one previously-active entry, raising a raw SQLite UNIQUE constraint error.
+	let removalOrdinal = input.entries.length;
 	for (const old of activeEntries) {
 		if (retained.has(old.entry_id)) continue;
 		db.prepare(
@@ -278,7 +305,8 @@ function commitEntries(
 		).run(nextRevision, now, input.agentId, old.entry_id);
 		db.prepare(
 			"INSERT INTO memory_head_revision_entries (agent_id, revision, entry_id, ordinal, operation, provenance_json) VALUES (?, ?, ?, ?, 'remove', '[]')",
-		).run(input.agentId, nextRevision, old.entry_id, input.entries.length);
+		).run(input.agentId, nextRevision, old.entry_id, removalOrdinal);
+		removalOrdinal += 1;
 	}
 
 	return {

@@ -241,6 +241,127 @@ describe("memory head owner runtime", () => {
 		).toEqual({ operation: "remove" });
 	});
 
+	it("removes multiple entries in one commit without a duplicate memory_head_revision_entries ordinal", async () => {
+		await memory("location", "Location is the office.");
+		await pass("seed-two");
+		const seedBase = await snapshot();
+		expect(
+			await head({
+				action: "commit",
+				input: {
+					passId: "seed-two",
+					agentId: "default",
+					baseRevision: Number(seedBase.revision),
+					baseHash: String(seedBase.hash),
+					entries: [
+						{
+							entryId: "meeting",
+							text: "Meeting is Tuesday.",
+							support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+						},
+						{
+							entryId: "location",
+							text: "Location is the office.",
+							support: [{ source_ref: "memory:location", quote: "Location is the office." }],
+						},
+					],
+				},
+			}),
+		).toMatchObject({ ok: true, revision: 1 });
+		await memory("agenda", "Agenda is budget review.");
+		await pass("drop-both");
+		const dropBase = await snapshot();
+		// Both previously-active entries are dropped in the same commit — this used to insert two
+		// memory_head_revision_entries 'remove' rows sharing the same `ordinal` (input.entries.length),
+		// violating UNIQUE(agent_id, revision, ordinal) as a raw SQLite error instead of committing.
+		expect(
+			await head({
+				action: "commit",
+				input: {
+					passId: "drop-both",
+					agentId: "default",
+					baseRevision: Number(dropBase.revision),
+					baseHash: String(dropBase.hash),
+					entries: [
+						{
+							entryId: "agenda",
+							text: "Agenda is budget review.",
+							support: [{ source_ref: "memory:agenda", quote: "Agenda is budget review." }],
+						},
+					],
+				},
+			}),
+		).toMatchObject({ ok: true, revision: 2 });
+		const removedOrdinals = (
+			await Promise.all(
+				["meeting", "location"].map((entryId) =>
+					ownerReadOne<{ ordinal: number }>(
+						client,
+						"SELECT ordinal FROM memory_head_revision_entries WHERE entry_id=? AND revision=2 AND operation='remove'",
+						[entryId],
+						options,
+					),
+				),
+			)
+		).map((row) => row?.ordinal);
+		expect(removedOrdinals.every((ordinal) => typeof ordinal === "number" && ordinal >= 1)).toBe(true);
+		expect(new Set(removedOrdinals).size).toBe(2);
+	});
+
+	it("dedupes an exact-duplicate entryId and rejects a conflicting duplicate with a structured error", async () => {
+		await pass("dup-exact");
+		let base = await snapshot();
+		expect(
+			await head({
+				action: "commit",
+				input: {
+					passId: "dup-exact",
+					agentId: "default",
+					baseRevision: Number(base.revision),
+					baseHash: String(base.hash),
+					entries: [
+						{
+							entryId: "meeting",
+							text: "Meeting is Tuesday.",
+							support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+						},
+						{
+							entryId: "meeting",
+							text: "Meeting is Tuesday.",
+							support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+						},
+					],
+				},
+			}),
+		).toMatchObject({ ok: true, revision: 1 });
+		expect(await snapshot()).toMatchObject({ content: "- Meeting is Tuesday." });
+		await pass("dup-conflict");
+		base = await snapshot();
+		expect(
+			await head({
+				action: "commit",
+				input: {
+					passId: "dup-conflict",
+					agentId: "default",
+					baseRevision: Number(base.revision),
+					baseHash: String(base.hash),
+					entries: [
+						{
+							entryId: "meeting",
+							text: "Meeting is Tuesday.",
+							support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+						},
+						{
+							entryId: "meeting",
+							text: "Meeting is Wednesday.",
+							support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+						},
+					],
+				},
+			}),
+		).toMatchObject({ ok: false, code: "DUPLICATE_ENTRY_ID" });
+	});
+
 	it("recovers a pending projection without generation and preserves edits to a generated file", async () => {
 		const target = join(root, "MEMORY.md");
 		mkdirSync(target);
