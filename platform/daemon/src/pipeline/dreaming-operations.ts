@@ -785,16 +785,50 @@ function applyValidatedOperationBody(
 	};
 }
 
+// The DB owner serializes every write through one queue, so within a single transaction the delta in
+// the running pass's own head revision, measured immediately before and after that pass's own write,
+// is caused by nothing but that write (no other writer can interleave inside the transaction). Folding
+// that delta into head_base_revision keeps the pass's own edits (e.g. archiving a superseded claim via
+// ontology-proposals.ts, which always tags updated_by = 'dreaming') from permanently moving
+// memory_md_heads.revision past the fence memory-head-owner.ts checks on commit, without touching the
+// schema: a write from any other actor happens in its own transaction and is never captured here, so it
+// still moves `revision` without moving this pass's `head_base_revision`, and still fences the commit.
+function runningContentPassHead(db: WriteDb, passId: string | undefined): { agentId: string; revision: number } | null {
+	if (!passId) return null;
+	const pass = db
+		.prepare(
+			"SELECT agent_id AS agentId FROM dreaming_passes WHERE id = ? AND status = 'running' AND mode = 'incremental-content'",
+		)
+		.get(passId) as { agentId: string } | undefined;
+	if (!pass) return null;
+	const head = db.prepare("SELECT revision FROM memory_md_heads WHERE agent_id = ?").get(pass.agentId) as
+		| { revision: number }
+		| undefined;
+	return { agentId: pass.agentId, revision: head?.revision ?? 0 };
+}
+
 function applyValidatedOperationInTx(
 	db: WriteDb,
 	entry: ValidatedDreamingOperation,
 	params: ApplyDreamingOperationsParams,
 ): DreamingOperationItem {
 	const savepoint = `signet_dream_op_${entry.index}`;
+	const before = runningContentPassHead(db, params.passId);
 	db.exec(`SAVEPOINT ${savepoint}`);
 	try {
 		const result = applyValidatedOperationBody(db, entry, params);
 		db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+		if (before !== null) {
+			const after = db.prepare("SELECT revision FROM memory_md_heads WHERE agent_id = ?").get(before.agentId) as
+				| { revision: number }
+				| undefined;
+			const delta = (after?.revision ?? before.revision) - before.revision;
+			if (delta > 0) {
+				db.prepare(
+					"UPDATE dreaming_passes SET head_base_revision = head_base_revision + ? WHERE id = ? AND status = 'running'",
+				).run(delta, params.passId as string);
+			}
+		}
 		return result;
 	} catch (error) {
 		db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
