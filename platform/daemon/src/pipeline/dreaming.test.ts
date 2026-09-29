@@ -848,6 +848,27 @@ describe("Dreaming", () => {
 		expect(await shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + DREAMING_HALT_COOLDOWN_MS + 1_000)).toBe(true);
 	});
 
+	it("counts a content pass that never lands a memory-head commit as a failure instead of resetting the streak", async () => {
+		const run = () =>
+			runDreamingAgentPass(
+				accessor,
+				{ async run() { return { summary: "Reviewed evidence." }; } },
+				defaultCfg(),
+				"/tmp",
+				AGENT,
+				[AGENT],
+				"incremental-content",
+			);
+		for (let i = 0; i < DREAMING_FAILURE_HALT_THRESHOLD; i += 1) {
+			seedTranscript(db, `no-commit-${i}`, `Pass ${i} reviewed a fact but never called memory_head_commit.`);
+			const result = await run();
+			expect(result.summary).toContain("[memory-head commit missing]");
+			expect((await getDreamingState(accessor, AGENT)).consecutiveFailures).toBe(i + 1);
+		}
+		const state = await getDreamingState(accessor, AGENT);
+		expect(isDreamingScopeHalted(state)).toBe(true);
+	});
+
 	it("isDreamingScopeHalted gates on the failure threshold and cooldown", () => {
 		const base = (overrides: Partial<DreamingState>): DreamingState => ({
 			consecutiveFailures: 0,
@@ -961,7 +982,11 @@ describe("Dreaming", () => {
 				"/tmp",
 				AGENT,
 				[AGENT],
-				"incremental-content",
+				// This test exercises search_evidence pagination/frontier-capping only — it never drives the
+				// mock executor through memory_head_commit, so "incremental-content" mode's failure-counting
+				// for a missing head commit (see the "counts a content pass..." test above) doesn't apply
+				// here; use "incremental" like the sibling test above, mode-agnostic for this mechanic.
+				"incremental",
 			);
 
 		const first = await run();
