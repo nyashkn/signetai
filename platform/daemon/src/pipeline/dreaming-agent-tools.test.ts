@@ -257,6 +257,124 @@ describe("dreaming-agent-tools", () => {
 		).toEqual({ revision: 2, is_current: 0 });
 	}, 30000);
 
+	it("does not self-invalidate on the running pass's own dreaming-actor writes, but still fences on writes from other actors", async () => {
+		insertEpisodicMemory("head-evidence-self", "Meeting is Tuesday.");
+		insertEpisodicMemory("mem-junk", "Junk detail nobody needs.");
+		insertEntity("e-junk", "Junk Entity", "junk entity", "owner");
+		insertActiveAttribute("e-junk", "aspect-junk", "Junk detail nobody needs.", "owner", "configuration", "mem-junk");
+		const accessor = getDbAccessor();
+		const owner = await getDbOwnerForAccessor(accessor);
+		const options = { operation: "self-write-head-fixture", lane: "write" as const, deadlineMs: 10000 };
+		const cfg = {
+			tokenThreshold: 100000,
+			maxInterval: 3600000,
+			maxInputTokens: 32000,
+			maxOutputTokens: 16000,
+			timeout: 30000,
+			backfillOnFirstRun: true,
+		};
+
+		// Case 1: the pass reads the head, then makes its own dreaming-actor write via apply_ontology_ops
+		// (archiving a memory-backed attribute always tags memories.updated_by='dreaming' through
+		// ontology-proposals.ts's archiveAttributeMemoryInTx), which bumps memory_md_heads.revision. The
+		// pass's own later commit, using the baseRevision/baseHash from its read BEFORE that write, must
+		// still succeed because head_base_revision was advanced in lockstep with the pass's own write.
+		const selfWriteResult = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const invoke = async (name: string, args: unknown) =>
+						readResult(await findTool(input.tools, name).execute(name, args, undefined, undefined, {} as never));
+					const base = await invoke("memory_head_read", { agentId: "owner" });
+					if (typeof base.head !== "object" || base.head === null) throw new Error("Missing head");
+					const apply = await invoke("apply_ontology_ops", {
+						agentId: "owner",
+						operations: [
+							{
+								operation: "flag",
+								payload: { subjectRef: "entity:e-junk", details: { entityId: "e-junk", reason: "zero_active_attributes" } },
+							},
+							{ operation: "archive_entity", payload: { target: "e-junk" }, provenance: "attention:$0" },
+						],
+					});
+					if (!apply.ok) throw new Error(`apply_ontology_ops failed: ${JSON.stringify(apply)}`);
+					// Re-read after the pass's own write, as memory_head_commit's tool description instructs
+					// ("Use the revision/hash from memory_head_read"): this is the fresh baseRevision/baseHash a
+					// well-behaved agent commits with, and it now reflects the pass's own archive above.
+					const refreshed = await invoke("memory_head_read", { agentId: "owner" });
+					const head = refreshed.head;
+					if (typeof head !== "object" || head === null || !("revision" in head) || !("hash" in head))
+						throw new Error("Missing head revision/hash");
+					const publication = await invoke("memory_head_commit", {
+						agentId: "owner",
+						passId: input.passId,
+						baseRevision: head.revision,
+						baseHash: head.hash,
+						entries: [
+							{
+								entryId: "meeting",
+								text: "Meeting is Tuesday.",
+								support: [{ source_ref: "memory:head-evidence-self", quote: "Meeting is Tuesday." }],
+							},
+						],
+					});
+					if (publication.ok !== true) throw new Error(`memory_head_commit failed: ${JSON.stringify(publication)}`);
+					return { summary: "Reviewed evidence and archived junk." };
+				},
+			},
+			cfg,
+			dir,
+			"owner",
+			["owner"],
+			"incremental-content",
+		);
+		expect(selfWriteResult.summary.includes("[memory-head commit missing]")).toBe(false);
+		expect(
+			getDbAccessor().withReadDb((db) => db.prepare("SELECT updated_by FROM memories WHERE id='mem-junk'").get()),
+		).toEqual({ updated_by: "dreaming" });
+
+		// Case 2: a write from a different actor between read and commit still fences the commit.
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const invoke = async (name: string, args: unknown) =>
+						readResult(await findTool(input.tools, name).execute(name, args, undefined, undefined, {} as never));
+					const base = await invoke("memory_head_read", { agentId: "owner" });
+					const head = base.head;
+					if (typeof head !== "object" || head === null || !("revision" in head) || !("hash" in head))
+						throw new Error("Missing head revision/hash");
+					await ownerRun(
+						owner,
+						"UPDATE memories SET content='Meeting is Thursday.' WHERE id='head-evidence-self'",
+						[],
+						options,
+					);
+					const publication = await invoke("memory_head_commit", {
+						agentId: "owner",
+						passId: input.passId,
+						baseRevision: head.revision,
+						baseHash: head.hash,
+						entries: [
+							{
+								entryId: "meeting",
+								text: "Meeting is Tuesday.",
+								support: [{ source_ref: "memory:head-evidence-self", quote: "Meeting is Tuesday." }],
+							},
+						],
+					});
+					expect(publication).toMatchObject({ ok: false, code: "STALE_HEAD" });
+					return { summary: "Attempted a commit after an external change." };
+				},
+			},
+			cfg,
+			dir,
+			"owner",
+			["owner"],
+			"incremental-content",
+		);
+	}, 30000);
+
 	it("preserves a retry boundary through the Pi capability after a writer failure (#1414)", async () => {
 		const base = getDbAccessor();
 		const enqueue = base.withWriteTxAsync;
