@@ -35,6 +35,9 @@ const GUARDED_CONFIG_FILES_CI = new Set(["agent.yaml", "config.yaml"]);
 
 const MAX_CONFIG_BYTES = 1_048_576;
 const MAX_POLICY_GROUP_LENGTH = 128;
+// Roster reads are tiny but queue behind every other job in the serial DB owner;
+// at 2 s the dashboard's agents panel 503s on a busy daemon.
+const AGENT_READ_DEADLINE_MS = 15_000;
 
 function validatePolicyGroup(rawGroup: unknown): string | null | undefined {
 	if (rawGroup !== undefined && rawGroup !== null && typeof rawGroup !== "string") {
@@ -206,7 +209,7 @@ export function registerMiscRoutes(app: Hono): void {
 					sql: "SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents ORDER BY name",
 					result: "all",
 				},
-				{ operation: "agents.list", lane: "read", deadlineMs: 2_000 },
+				{ operation: "agents.list", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 			);
 			return c.json({ agents });
 		} catch (error) {
@@ -224,7 +227,7 @@ export function registerMiscRoutes(app: Hono): void {
 					params: [name],
 					result: "get",
 				},
-				{ operation: "agents.get", lane: "read", deadlineMs: 2_000 },
+				{ operation: "agents.get", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 			);
 		} catch (error) {
 			return c.json({ error: error instanceof Error ? error.message : "Database unavailable" }, 503);
@@ -281,7 +284,7 @@ export function registerMiscRoutes(app: Hono): void {
 				params: [name],
 				result: "get",
 			},
-			{ operation: "agents.get_created", lane: "read", deadlineMs: 2_000 },
+			{ operation: "agents.get_created", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 		);
 		return c.json(created, 201);
 	});
@@ -297,7 +300,7 @@ export function registerMiscRoutes(app: Hono): void {
 				params: [name],
 				result: "get",
 			},
-			{ operation: "agents.get_for_update", lane: "read", deadlineMs: 2_000 },
+			{ operation: "agents.get_for_update", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 		);
 		if (!existing) return c.json({ error: "Agent not found" }, 404);
 		let resolved: ReturnType<typeof resolveAgentMemoryPolicy>;
@@ -335,7 +338,7 @@ export function registerMiscRoutes(app: Hono): void {
 				params: [existing.id],
 				result: "get",
 			},
-			{ operation: "agents.get_updated", lane: "read", deadlineMs: 2_000 },
+			{ operation: "agents.get_updated", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 		);
 		return c.json({ ...updated, effective_scope: resolved.effectiveScope });
 	});
@@ -346,7 +349,7 @@ export function registerMiscRoutes(app: Hono): void {
 		const purge = c.req.query("purge") === "true";
 		const agent = await dbOwnerQuery<{ id: string } | undefined>(
 			{ sql: "SELECT id FROM agents WHERE name = ?", params: [name], result: "get" },
-			{ operation: "agents.get_for_delete", lane: "read", deadlineMs: 2_000 },
+			{ operation: "agents.get_for_delete", lane: "read", deadlineMs: AGENT_READ_DEADLINE_MS },
 		);
 		if (!agent) return c.json({ error: "Agent not found" }, 404);
 		let result: AgentRemovalResult;
