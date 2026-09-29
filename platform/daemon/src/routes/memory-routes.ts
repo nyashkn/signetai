@@ -2116,10 +2116,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		}
 
 		const sessionKeyRaw = c.req.header("x-signet-session-key");
-		const agentId = resolveAgentId({
+		const scopedAgent = resolveMemoryScopedAgentId(c, {
 			agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
 			sessionKey: sessionKeyRaw,
 		});
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
 		const agentScope = await getAgentScope(agentId);
 		const access = buildAgentScopeClause(agentId, agentScope.readPolicy, agentScope.policyGroup);
 		const scopeProject = c.get("auth")?.claims?.scope?.project;
@@ -2259,10 +2261,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		if (!memoryId) return c.json({ error: "memory id is required" }, 400);
 		const limit = Math.min(parseOptionalInt(c.req.query("limit")) ?? 50, 500);
 		const sessionKeyRaw = c.req.header("x-signet-session-key");
-		const agentId = resolveAgentId({
+		const scopedAgent = resolveMemoryScopedAgentId(c, {
 			agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
 			sessionKey: sessionKeyRaw,
 		});
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
 		const agentScope = await getAgentScope(agentId);
 		const access = buildAgentScopeClause(agentId, agentScope.readPolicy, agentScope.policyGroup);
 
@@ -3232,7 +3236,9 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		try {
 			const sessionKeyRaw = body.sessionKey ?? c.req.header("x-signet-session-key");
 			const sessionKey = sessionKeyRaw ?? null;
-			const agentId = resolveAgentId({ agentId: body.agentId, sessionKey: sessionKeyRaw });
+			const scopedAgent = resolveMemoryScopedAgentId(c, { agentId: body.agentId, sessionKey: sessionKeyRaw });
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentId = scopedAgent.agentId;
 			const recallSurface = normalizeRecallSurface(body.recallSurface, "explicit_api");
 			if (aggregateSaveRequested) {
 				const recallAuth = c.get("auth");
@@ -3353,10 +3359,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 			const sessionKeyRaw =
 				c.req.query("sessionKey") ?? c.req.query("session_key") ?? c.req.header("x-signet-session-key");
 			const sessionKey = sessionKeyRaw ?? null;
-			const agentId = resolveAgentId({
+			const scopedAgent = resolveMemoryScopedAgentId(c, {
 				agentId: c.req.query("agentId") ?? c.req.query("agent_id") ?? c.req.header("x-signet-agent-id"),
 				sessionKey: sessionKeyRaw,
 			});
+			if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+			const agentId = scopedAgent.agentId;
 			recordRecallAttempt(recallSurface);
 			const agentScope = await getAgentScope(agentId);
 			const params = {
