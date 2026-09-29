@@ -243,6 +243,39 @@ describe("daemonless secret API", () => {
 		expect(daemonCalls).toBe(2);
 	});
 
+	test("uses the local vault for secret operations when the daemon is remote", async () => {
+		workspace = mkdtempSync(join(tmpdir(), "signet-remote-daemon-secrets-"));
+		process.env.SIGNET_PATH = workspace;
+		setSecretKeyringAdapterForTests(unavailableKeyring());
+		let daemonCalls = 0;
+		let keyringReads = 0;
+		const api = createSecretCommandApiCall({
+			daemonApiCall: async () => {
+				daemonCalls += 1;
+				return { ok: true, data: { daemon: true } };
+			},
+			offlineApiCall: createOfflineSecretApiCall(),
+			isDaemonRunning: async () => true,
+			agentsDir: workspace,
+			localWorkspace: false,
+			readKeyring: async () => {
+				keyringReads += 1;
+				return { state: "found", value: "not-used-by-test" };
+			},
+		});
+
+		await api("POST", "/api/secrets/REMOTE_CASE_KEY", { value: "remote-case-value" });
+		expect(await api("GET", "/api/secrets")).toEqual({
+			ok: true,
+			data: { secrets: ["REMOTE_CASE_KEY"], provider: "local" },
+		});
+		expect(daemonCalls).toBe(0);
+		expect(keyringReads).toBe(0);
+
+		expect(await api("GET", "/api/diagnostics")).toEqual({ ok: true, data: { daemon: true } });
+		expect(daemonCalls).toBe(1);
+	});
+
 	test("serializes racing CLI and daemon store writers", async () => {
 		workspace = mkdtempSync(join(tmpdir(), "signet-concurrent-secrets-"));
 		const writer = join(import.meta.dir, `.secret-writer-${process.pid}.mjs`);
