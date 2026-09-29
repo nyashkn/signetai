@@ -579,3 +579,28 @@ describe("document routes", () => {
 		expect(await allowedDelete.json()).toMatchObject({ deleted: true, memoriesRemoved: 1 });
 	});
 });
+
+describe("memory read agent scope", () => {
+	it("rejects cross-agent recall and search for an agent-scoped token", async () => {
+		const app = await makeApp("team");
+		const headers = { authorization: `Bearer ${teamToken({ agent: "agent-a" })}`, "content-type": "application/json" };
+
+		const recall = await app.request("/api/memory/recall", {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ query: "anything", agentId: "agent-b" }),
+		});
+		expect(recall.status).toBe(403);
+		expect(await recall.json()).toMatchObject({ error: expect.stringContaining("scope restricted to agent 'agent-a'") });
+
+		const search = await app.request("/api/memory/search?q=anything&agentId=agent-b", { headers });
+		expect(search.status).toBe(403);
+
+		const ownScope = await app.request("/api/memory/recall", {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ query: "anything" }),
+		});
+		expect(ownScope.status).toBe(200);
+	});
+});
