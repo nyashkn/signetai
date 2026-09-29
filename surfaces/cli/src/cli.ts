@@ -978,7 +978,7 @@ async function ensureDaemonForSecrets(): Promise<boolean> {
 	return ensureDaemonRunning(isDaemonRunning);
 }
 
-const { fetchFromDaemon, fetchDaemonResult, fetchDaemonStream, fetchDaemonRaw, secretApiCall } = createDaemonClient(
+const { fetchFromDaemon, fetchDaemonResult, fetchDaemonStream, fetchDaemonRaw, secretApiCall, localWorkspace } = createDaemonClient(
 	DEFAULT_PORT,
 	AGENTS_DIR,
 );
@@ -988,6 +988,7 @@ const secretCommandApiCall = createSecretCommandApiCall({
 	offlineApiCall: offlineSecretApiCall,
 	isDaemonRunning,
 	agentsDir: AGENTS_DIR,
+	localWorkspace,
 });
 const SKILLS_DIR = join(AGENTS_DIR, "skills");
 

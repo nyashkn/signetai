@@ -93,6 +93,8 @@ interface SecretCommandApiOptions {
 	readonly offlineApiCall: DaemonApiCall;
 	readonly isDaemonRunning: () => Promise<boolean>;
 	readonly agentsDir: string;
+	/** False when the CLI targets a remote daemon (SIGNET_DAEMON_URL or configured URL). */
+	readonly localWorkspace?: boolean;
 	readonly readKeyring?: () => Promise<SecretKeyringResult>;
 }
 
@@ -109,6 +111,10 @@ export function createSecretCommandApiCall(options: SecretCommandApiOptions): Da
 	const readKeyring = options.readKeyring ?? (() => getSecretKeyring(`workspace:${options.agentsDir}`).get());
 
 	return async (method, path, body, timeoutMs) => {
+		// Secret exec runs on this machine, so a remote daemon's vault is never the right store.
+		if (options.localWorkspace === false && isLocalSecretOperation(method, path)) {
+			return options.offlineApiCall(method, path, body, timeoutMs);
+		}
 		if (!(await options.isDaemonRunning())) return options.offlineApiCall(method, path, body, timeoutMs);
 		if (!isLocalSecretOperation(method, path)) return options.daemonApiCall(method, path, body, timeoutMs);
 
