@@ -39,7 +39,7 @@ function captureTelemetry(): { readonly collector: TelemetryCollector; readonly 
 function writeAuthConfig(mode: "local" | "team"): void {
 	writeFileSync(
 		join(agentsDir, "agent.yaml"),
-		`auth:\n  mode: ${mode}\n  rateLimits:\n    forget:\n      windowMs: 60000\n      max: 30\n    modify:\n      windowMs: 60000\n      max: 60\n    batchForget:\n      windowMs: 60000\n      max: 5\n    admin:\n      windowMs: 60000\n      max: 10\n    recallLlm:\n      windowMs: 60000\n      max: 60\n`,
+		`embedding:\n  provider: none\nauth:\n  mode: ${mode}\n  rateLimits:\n    forget:\n      windowMs: 60000\n      max: 30\n    modify:\n      windowMs: 60000\n      max: 60\n    batchForget:\n      windowMs: 60000\n      max: 5\n    admin:\n      windowMs: 60000\n      max: 10\n    recallLlm:\n      windowMs: 60000\n      max: 60\n`,
 	);
 }
 
@@ -153,6 +153,7 @@ beforeAll(async () => {
 	mkdirSync(join(agentsDir, ".daemon"), { recursive: true });
 	writeFileSync(join(agentsDir, ".daemon", "auth-secret"), "test-secret-key-32-bytes-min!!!!");
 	process.env.SIGNET_PATH = agentsDir;
+	writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  provider: none\n");
 
 	const hono = await import("hono");
 	appFactory = hono.Hono;
@@ -582,7 +583,7 @@ describe("document routes", () => {
 	});
 });
 
-describe("memory read agent scope", () => {
+describe("memory agent scope", () => {
 	it("rejects cross-agent recall and search for an agent-scoped token", async () => {
 		const app = await makeApp("team");
 		const headers = { authorization: `Bearer ${teamToken({ agent: "agent-a" })}`, "content-type": "application/json" };
@@ -604,5 +605,24 @@ describe("memory read agent scope", () => {
 			body: JSON.stringify({ query: "anything" }),
 		});
 		expect(ownScope.status).toBe(200);
+	});
+
+	it("defaults an agent-scoped token's writes to its own agent", async () => {
+		const app = await makeApp("team");
+		const headers = { authorization: `Bearer ${teamToken({ agent: "agent-a" })}`, "content-type": "application/json" };
+
+		const stored = await app.request("/api/memory/remember", {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ content: "scoped default write probe" }),
+		});
+		expect(stored.status).toBe(200);
+
+		const crossWrite = await app.request("/api/memory/remember", {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ content: "scoped cross write probe", agentId: "agent-b" }),
+		});
+		expect(crossWrite.status).toBe(403);
 	});
 });

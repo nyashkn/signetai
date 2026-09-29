@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { applyRecallScoreThreshold, redactCredentials, vectorSearchWithMetadata } from "@signet/core";
 import type { Context, Hono, MiddlewareHandler } from "hono";
-import { ensureAgentRegistered, getAgentScope, resolveAgentId } from "../agent-id";
+import { ensureAgentRegistered, getAgentScope } from "../agent-id";
 import { aggregateRecall, parseAggregateRecallBudget, readAggregateRecallBudgetInput } from "../aggregate-recall";
 import { checkScope, requirePermission, requirePermissionWithRateLimit } from "../auth";
 import { type ConcurrencyAdmission, createConcurrencyAdmission } from "../concurrency-admission";
@@ -1356,7 +1356,12 @@ export function registerMemoryRoutes(app: Hono, deps: MemoryRoutesDeps = {}): vo
 		}
 		const scope = body.scope ?? null;
 		const rowProvenance = parseRememberRowProvenance(body as Record<string, unknown>);
-		const agentId = resolveAgentId({ agentId: body.agentId, sessionKey: c.req.header("x-signet-session-key") });
+		const scopedAgent = resolveMemoryScopedAgentId(c, {
+			agentId: body.agentId,
+			sessionKey: c.req.header("x-signet-session-key"),
+		});
+		if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+		const agentId = scopedAgent.agentId;
 		const auth = c.get("auth");
 		if (auth?.claims) {
 			const tokenProject = auth.claims.scope?.project;
