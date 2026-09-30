@@ -124,6 +124,9 @@ export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHead
 							)
 							.all(agentId, head.revision)
 					: [],
+			// A stale head hides its text from sessions, but the curating pass needs the last committed
+			// set to carry forward; commit re-verifies every quote, so changed evidence still drops out.
+			previousEntries: previousHeadEntries(db, agentId),
 		};
 	}
 	const input = request.input;
@@ -193,6 +196,30 @@ export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHead
 		}
 	}
 	return result;
+}
+
+function previousHeadEntries(
+	db: WriteDb,
+	agentId: string,
+): Array<{ entryId: string; text: string; support: unknown[] }> {
+	const rows = db
+		.prepare(
+			`SELECT e.entry_id AS entryId, e.canonical_text AS text, re.provenance_json AS provenanceJson
+			 FROM memory_head_entries e
+			 LEFT JOIN memory_head_revision_entries re
+			   ON re.agent_id = e.agent_id AND re.entry_id = e.entry_id AND re.revision = e.last_revision
+			 WHERE e.agent_id = ? AND e.status = 'active'
+			 ORDER BY e.entry_id`,
+		)
+		.all(agentId) as Array<{ entryId: string; text: string; provenanceJson: string | null }>;
+	return rows.map((row) => {
+		let support: unknown[] = [];
+		try {
+			const parsed = JSON.parse(row.provenanceJson ?? "[]");
+			if (Array.isArray(parsed)) support = parsed;
+		} catch {}
+		return { entryId: row.entryId, text: row.text, support };
+	});
 }
 
 function commitEntries(

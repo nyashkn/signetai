@@ -2524,7 +2524,8 @@ describe("Dreaming", () => {
 			[AGENT],
 			"incremental-content",
 		);
-		expect(contentPrompt).toBe(DREAMING_CONTENT_AGENT_PROMPT);
+		expect(contentPrompt).toStartWith(DREAMING_CONTENT_AGENT_PROMPT);
+		expect(contentPrompt).toMatch(/<pass_id>[^<]+<\/pass_id>$/);
 		expect(contentPrompt).not.toContain("Process ALL pending hygiene records");
 		expect(contentPrompt).toContain("kind=surprisal");
 		expect(contentPrompt).toContain("never cite attention:<id>");
