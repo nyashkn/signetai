@@ -179,14 +179,28 @@ export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHead
 	}
 	const normalizedInput =
 		dedupedEntries.length === input.entries.length ? input : { ...input, entries: dedupedEntries };
-	const body = normalizedInput.entries.map((entry) => `- ${entry.text.trim()}`).join("\n");
+	// One entry whose source was purged or edited should not block the rest of the working memory:
+	// publish the entries whose quotes still verify and report the dropped ones to the agent.
+	const dropped: Array<{ entryId: string; code: string; error: string }> = [];
+	const provenEntries = normalizedInput.entries.filter((entry) => {
+		const problem = entryProvenanceError(db, agentId, entry);
+		if (problem) dropped.push({ entryId: entry.entryId, ...problem });
+		return problem === null;
+	});
+	if (provenEntries.length === 0 && dropped.length > 0) return { ok: false, ...dropped[0], dropped };
+	const committedInput =
+		provenEntries.length === normalizedInput.entries.length
+			? normalizedInput
+			: { ...normalizedInput, entries: provenEntries };
+	const withDropped = (result: Record<string, unknown>) => (dropped.length > 0 ? { ...result, dropped } : result);
+	const body = committedInput.entries.map((entry) => `- ${entry.text.trim()}`).join("\n");
 	const safety = scanMemoryContent(body);
 	if (!body || !safety.contextEligible || countTokens(body) > 1000)
 		return { ok: false, code: "INVALID_HEAD", error: "head must be nonempty, safe, and at most 1000 tokens" };
 	const contentHash = hash(body);
 	if (head?.is_current === 1 && currentHash === contentHash)
-		return { ok: true, code: "NOOP", revision, hash: contentHash, changed: false, changedIds: [] };
-	const result = commitEntries(db, normalizedInput, body, contentHash, revision, currentHash);
+		return withDropped({ ok: true, code: "NOOP", revision, hash: contentHash, changed: false, changedIds: [] });
+	const result = commitEntries(db, committedInput, body, contentHash, revision, currentHash);
 	if (result.ok) {
 		const now = new Date().toISOString();
 		const revisionId = String(result.revisionId);
@@ -209,15 +223,15 @@ export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHead
 		try {
 			publish(db, root, agentId, next);
 		} catch (error) {
-			return {
+			return withDropped({
 				...result,
 				ok: false,
 				code: "PUBLICATION_PENDING",
 				error: error instanceof Error ? error.message : String(error),
-			};
+			});
 		}
 	}
-	return result;
+	return withDropped(result);
 }
 
 function previousHeadEntries(
@@ -244,6 +258,29 @@ function previousHeadEntries(
 	});
 }
 
+function entryProvenanceError(
+	db: WriteDb,
+	agentId: string,
+	entry: Extract<MemoryHeadRequest, { action: "commit" }>["input"]["entries"][number],
+): { code: string; error: string } | null {
+	if (entry.support.length === 0) return { code: "MISSING_PROVENANCE", error: `entry ${entry.entryId} has no evidence` };
+	for (const support of entry.support) {
+		const sourceRef =
+			typeof support.source_ref === "string"
+				? support.source_ref
+				: typeof support.sourceRef === "string"
+					? support.sourceRef
+					: "";
+		const quote = typeof support.quote === "string" ? support.quote.trim() : "";
+		if (!quote || sourceRef.startsWith("attention:") || !/^(memory|artifact|transcript|summary):.+$/.test(sourceRef))
+			return { code: "INVALID_PROVENANCE", error: `entry ${entry.entryId} requires scoped exact evidence` };
+		const source = currentSource(db, agentId, sourceRef);
+		if (source === null || !renderDreamingEvidence(source).includes(quote))
+			return { code: "INVALID_PROVENANCE", error: `entry ${entry.entryId} quote is not exact scoped evidence` };
+	}
+	return null;
+}
+
 function commitEntries(
 	db: WriteDb,
 	input: Extract<MemoryHeadRequest, { action: "commit" }>["input"],
@@ -252,32 +289,6 @@ function commitEntries(
 	revision: number,
 	currentHash: string,
 ): Record<string, unknown> {
-	for (const entry of input.entries) {
-		if (entry.support.length === 0)
-			return { ok: false, code: "MISSING_PROVENANCE", error: `entry ${entry.entryId} has no evidence` };
-		for (const support of entry.support) {
-			const sourceRef =
-				typeof support.source_ref === "string"
-					? support.source_ref
-					: typeof support.sourceRef === "string"
-						? support.sourceRef
-						: "";
-			const quote = typeof support.quote === "string" ? support.quote.trim() : "";
-			if (!quote || sourceRef.startsWith("attention:") || !/^(memory|artifact|transcript|summary):.+$/.test(sourceRef))
-				return {
-					ok: false,
-					code: "INVALID_PROVENANCE",
-					error: `entry ${entry.entryId} requires scoped exact evidence`,
-				};
-			const source = currentSource(db, input.agentId, sourceRef);
-			if (source === null || !renderDreamingEvidence(source).includes(quote))
-				return {
-					ok: false,
-					code: "INVALID_PROVENANCE",
-					error: `entry ${entry.entryId} quote is not exact scoped evidence`,
-				};
-		}
-	}
 	const nextRevision = revision + 1;
 	const revisionId = randomUUID();
 	const now = new Date().toISOString();
