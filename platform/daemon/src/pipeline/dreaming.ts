@@ -2502,7 +2502,26 @@ export async function evaluateDreamingTrigger(
 			)) !== undefined;
 		if (hasContinuation) return { trigger: true, reason: "continuation" };
 	}
-	const lastPassMs = state.lastPassAt === null ? Number.NaN : Date.parse(state.lastPassAt);
+	// last_pass_at is the evidence watermark: it stops moving when evidence goes quiet, so measuring the
+	// interval from it re-fires this trigger on every check. Measure from when the last pass finished.
+	const lastCompleted =
+		state.lastPassId === null
+			? undefined
+			: await ownerQueryOne<{ completedAt: string | null }>(
+					await getDbOwnerForAccessor(accessor),
+					"dreaming.pass.last-completed",
+					"SELECT completed_at AS completedAt FROM dreaming_passes WHERE id = ?",
+					[state.lastPassId],
+					{ deadlineMs: 30_000, estimatedWorkUnits: 1 },
+				);
+	// completed_at is written by SQLite datetime('now'): UTC without a zone suffix.
+	const completedMs = lastCompleted?.completedAt ? Date.parse(`${lastCompleted.completedAt.replace(" ", "T")}Z`) : NaN;
+	const watermarkMs = state.lastPassAt === null ? NaN : Date.parse(state.lastPassAt);
+	const lastPassMs = Number.isFinite(completedMs)
+		? Number.isFinite(watermarkMs)
+			? Math.max(completedMs, watermarkMs)
+			: completedMs
+		: watermarkMs;
 	if (backlog.hasBacklog !== false && Number.isFinite(lastPassMs) && nowMs - lastPassMs >= cfg.maxInterval) {
 		return { trigger: true, reason: "max-interval" };
 	}

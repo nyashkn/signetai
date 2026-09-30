@@ -1883,6 +1883,34 @@ describe("Dreaming", () => {
 		).toEqual({ trigger: true, reason: "max-interval" });
 	});
 
+	it("measures max-interval from the last pass's completion, not a stale evidence watermark", async () => {
+		const agentId = "max-interval-recent-pass";
+		const now = Date.now();
+		const sqliteTime = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 19);
+		accessor.withWriteTx((tx) => {
+			tx.prepare(
+				"INSERT INTO dreaming_passes (id, agent_id, mode, status, started_at, completed_at, created_at) VALUES ('recent-pass', ?, 'incremental-content', 'completed', ?, ?, ?)",
+			).run(agentId, sqliteTime(now - 11 * 60_000), sqliteTime(now - 10 * 60_000), sqliteTime(now - 11 * 60_000));
+			tx.prepare("INSERT INTO dreaming_state (agent_id, last_pass_at, last_pass_id) VALUES (?, ?, 'recent-pass')").run(
+				agentId,
+				new Date(now - 24 * 60 * 60 * 1_000).toISOString(),
+			);
+		});
+		const probe: DreamingEpisodicBacklogProbe = {
+			kind: "indeterminate",
+			tokenLowerBound: 3,
+			hasBacklog: null,
+			sourcesScanned: 50,
+		};
+		const cfg = defaultCfg({ tokenThreshold: 100_000, maxInterval: 6 * 60 * 60 * 1_000, backfillOnFirstRun: false });
+
+		expect(await evaluateDreamingTrigger(accessor, cfg, agentId, probe, now)).toEqual({ trigger: false });
+		expect(await evaluateDreamingTrigger(accessor, cfg, agentId, probe, now + 6 * 60 * 60 * 1_000)).toEqual({
+			trigger: true,
+			reason: "max-interval",
+		});
+	});
+
 	it("treats an unknown backlog as potential work on first-run backfill", async () => {
 		const agentId = "first-run-backfill";
 		expect(
