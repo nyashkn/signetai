@@ -245,6 +245,30 @@ describe("episodic source selection", () => {
 		]);
 	});
 
+	it("adds session summaries to the default scan only from the backfill floor on", () => {
+		getDbAccessor().withWriteTx((db) => {
+			const summary = db.prepare(
+				`INSERT INTO session_summaries
+				 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
+				 VALUES (?, 'ant', ?, 2, 0, 'session', ?, ?, ?, ?)`,
+			);
+			summary.run("old-summary", "old session summary", "compaction", "2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z");
+			summary.run("new-transcript-summary", "new session summary", "transcript", "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z");
+		});
+		const scan = (summariesSince?: string) =>
+			getDbAccessor()
+				.withReadDb((db) =>
+					searchEpisodicSources(db, { agentId: "ant", query: "", limit: null, ...(summariesSince ? { summariesSince } : {}) }),
+				)
+				.map((source) => `${source.kind}:${source.id}`);
+
+		expect(scan()).toEqual([]);
+		expect(scan("2026-09-01T00:00:00.000Z")).toEqual(["summary:new-transcript-summary"]);
+		expect(
+			getDbAccessor().withReadDb((db) => readEpisodicSource(db, { agentId: "ant", from: "summary:new-transcript-summary" })),
+		).toMatchObject({ kind: "summary", sourceKind: "transcript" });
+	});
+
 	it("orders timezone-less artifact timestamps like SQLite's UTC cursor", () => {
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(

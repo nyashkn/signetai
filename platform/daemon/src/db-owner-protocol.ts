@@ -376,6 +376,8 @@ export interface DbOwnerDreamingEvidenceSearch {
 	readonly sourceRef?: string;
 	readonly offset?: number;
 	readonly chunkSize?: number;
+	/** Include session summaries captured on/after this time in the default scan (operator backfill). */
+	readonly summariesSince?: string;
 }
 
 export interface DbOwnerDreamingEvidenceSource {

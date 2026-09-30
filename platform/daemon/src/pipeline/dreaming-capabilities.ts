@@ -288,6 +288,7 @@ export interface CreateDreamingCapabilitiesParams {
 	readonly passId?: string;
 	readonly mode?: DreamingCapabilityMode;
 	readonly writeCaps?: GraphWriteCaps;
+	readonly summaryBackfillSince?: string;
 	readonly onOperationsApplied?: (
 		result: ApplyDreamingOperationsResult,
 		operations: readonly DreamingOperationRequest[],
@@ -374,6 +375,7 @@ export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvi
 					kind: input.kind,
 					excludeDelivered: scanFirst,
 					limit: input.limit,
+					...(scanFirst && input.summariesSince !== undefined ? { summariesSince: input.summariesSince } : {}),
 				});
 	const items = scanFirst
 		? (() => {
@@ -674,6 +676,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 					...(sourceRef === undefined ? {} : { sourceRef }),
 					...(offset === undefined ? {} : { offset }),
 					...(chunkSize === undefined ? {} : { chunkSize }),
+					...(params.summaryBackfillSince === undefined ? {} : { summariesSince: params.summaryBackfillSince }),
 				};
 				return await runDbOwnerDomainOperation(accessor, {
 					runWithOwner: async (owner) => {

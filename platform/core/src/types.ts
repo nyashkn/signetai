@@ -456,6 +456,8 @@ export interface DreamingConfig {
 	readonly maxInputTokens: number;
 	readonly maxOutputTokens: number;
 	readonly backfillOnFirstRun: boolean;
+	/** Operator backfill: deliver session summaries captured on/after this ISO time in the default evidence scan. */
+	readonly summaryBackfillSince?: string;
 	readonly surprisal?: DreamingSurprisalConfig;
 }
 

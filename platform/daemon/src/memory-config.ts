@@ -970,6 +970,9 @@ export function loadDreamingConfig(yaml: Record<string, unknown>): DreamingConfi
 		maxInputTokens: clampWarn("maxInputTokens", raw.maxInputTokens, 8_000, 1_000_000, dd.maxInputTokens),
 		maxOutputTokens: clampWarn("maxOutputTokens", raw.maxOutputTokens, 1_000, 128_000, dd.maxOutputTokens),
 		backfillOnFirstRun: typeof raw.backfillOnFirstRun === "boolean" ? raw.backfillOnFirstRun : dd.backfillOnFirstRun,
+		...(typeof raw.summaryBackfillSince === "string" && Number.isFinite(Date.parse(raw.summaryBackfillSince))
+			? { summaryBackfillSince: new Date(raw.summaryBackfillSince).toISOString() }
+			: {}),
 		surprisal: {
 			enabled: typeof surprisal?.enabled === "boolean" ? surprisal.enabled : defaultSurprisal.enabled,
 			sampleSize: clampWarn("surprisal.sampleSize", surprisal?.sampleSize, 20, 500, defaultSurprisal.sampleSize),
