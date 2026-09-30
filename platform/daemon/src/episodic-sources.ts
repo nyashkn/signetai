@@ -5,6 +5,7 @@ export type EpisodicSourceKind = "memory" | "artifact" | "transcript" | "summary
 // Session summaries usable as Dreaming evidence. Transcript-derived summaries are the only
 // distilled form of many sessions whose raw transcripts were delivered but never extracted.
 export const EVIDENCE_SUMMARY_SOURCE_TYPES_SQL = "('summary', 'compaction', 'checkpoint', 'transcript')";
+const MAX_EPISODIC_ROWS_SCANNED = 500;
 export const EPISODIC_CAPTURED_AT_FLOOR = "2000-01-01T00:00:00.000Z";
 export function timestampMillis(value: string): number {
 	const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
@@ -989,20 +990,31 @@ export function searchEpisodicSources(
 	if (branches.length === 0) return [];
 	const union = branches.map((branch) => branch.sql).join("\nUNION ALL\n");
 	const orderBy = params.order === "none" ? "" : "ORDER BY julianday(captured_at) DESC, kind ASC, id ASC";
-	const rows = db
-		.prepare(
-			`SELECT kind, id
-			 FROM (
-			 ${union}
-			 )
-			 ${orderBy}
-			 LIMIT ${limit === null ? -1 : "?"}`,
-		)
-		.all(...branches.flatMap((branch) => branch.args), ...(limit === null ? [] : [limit])) as Array<{
-		kind: EpisodicSourceKind;
-		id: string;
-	}>;
-	return rows
-		.map((row) => readEpisodicSource(db, { agentId: params.agentId, from: `${row.kind}:${row.id}` }))
-		.filter((source): source is EpisodicSourceRecord => source !== null);
+	const statement = db.prepare(
+		`SELECT kind, id
+		 FROM (
+		 ${union}
+		 )
+		 ${orderBy}
+		 LIMIT ? OFFSET ?`,
+	);
+	const args = branches.flatMap((branch) => branch.args);
+	const readRows = (rows: Array<{ kind: EpisodicSourceKind; id: string }>) =>
+		rows
+			.map((row) => readEpisodicSource(db, { agentId: params.agentId, from: `${row.kind}:${row.id}` }))
+			.filter((source): source is EpisodicSourceRecord => source !== null);
+	if (limit === null) {
+		return readRows(statement.all(...args, -1, 0) as Array<{ kind: EpisodicSourceKind; id: string }>);
+	}
+	// Rows the content-safety filter rejects still match the SQL, and they stay undelivered forever.
+	// With a plain LIMIT a run of them at the top returned an empty page on every scan, hiding all
+	// older evidence. Page past them (ordered scans only) up to a bounded number of rows.
+	const sources: EpisodicSourceRecord[] = [];
+	const maxScanned = orderBy === "" ? limit : Math.max(limit, MAX_EPISODIC_ROWS_SCANNED);
+	for (let offset = 0; sources.length < limit && offset < maxScanned; offset += limit) {
+		const rows = statement.all(...args, limit, offset) as Array<{ kind: EpisodicSourceKind; id: string }>;
+		sources.push(...readRows(rows));
+		if (rows.length < limit) break;
+	}
+	return sources.slice(0, limit);
 }
