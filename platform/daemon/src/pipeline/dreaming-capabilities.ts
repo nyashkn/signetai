@@ -384,19 +384,26 @@ export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvi
 	const continuations = scanFirst
 		? pendingDreamingEvidenceContinuations(db, scopeId, input.limit ?? 20, input.kind)
 		: [];
+	const search = () =>
+		searchEpisodicSources(db, {
+			agentId: scopeId,
+			query: input.query ?? "",
+			since: input.since ?? watermark,
+			before: input.before,
+			kind: input.kind,
+			excludeDelivered: scanFirst,
+			limit: input.limit,
+			...(scanFirst && input.summariesSince !== undefined ? { summariesSince: input.summariesSince } : {}),
+		});
+	// Continuations normally preempt new sources. During a summary backfill one stuck continuation
+	// would starve every summary, so append new sources after them within the larger budget.
+	const continued = new Set(continuations.map((source) => `${source.kind}:${source.id}`));
 	const sources =
-		continuations.length > 0
-			? continuations
-			: searchEpisodicSources(db, {
-					agentId: scopeId,
-					query: input.query ?? "",
-					since: input.since ?? watermark,
-					before: input.before,
-					kind: input.kind,
-					excludeDelivered: scanFirst,
-					limit: input.limit,
-					...(scanFirst && input.summariesSince !== undefined ? { summariesSince: input.summariesSince } : {}),
-				});
+		continuations.length === 0
+			? search()
+			: input.summariesSince === undefined
+				? continuations
+				: [...continuations, ...search().filter((source) => !continued.has(`${source.kind}:${source.id}`))];
 	const items = scanFirst
 		? (() => {
 				// The scan is the delivery path: whatever it returns is recorded as consumed.

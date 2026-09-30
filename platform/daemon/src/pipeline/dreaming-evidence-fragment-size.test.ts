@@ -98,7 +98,7 @@ describe("dreaming evidence fragment size", () => {
 		expect(delivered).toBeLessThanOrEqual(32_000 + 20_000);
 	});
 
-	it("carries several session summaries per scan during a summary backfill, still bounded", () => {
+	it("carries several session summaries per scan during a summary backfill, even behind a continuation", () => {
 		getDbAccessor().withWriteTx((db) => {
 			for (let i = 0; i < 10; i += 1) {
 				db.prepare(
@@ -107,6 +107,14 @@ describe("dreaming evidence fragment size", () => {
 					 VALUES (?, 'ant', ?, 4000, 0, 'session', 'transcript', ?, ?, ?)`,
 				).run(`summary-${i}`, "s".repeat(15_000), "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z");
 			}
+			db.prepare(
+				"INSERT INTO dreaming_passes (id, agent_id, mode, status, started_at, created_at) VALUES ('p-prev', 'ant', 'incremental-content', 'completed', datetime('now'), datetime('now'))",
+			).run();
+			db.prepare(
+				`INSERT INTO dreaming_evidence_consumption
+				 (agent_id, source_kind, source_id, source_captured_at, source_entry_id, source_revision, delivered_offset, source_length, pass_id, updated_at)
+				 VALUES ('ant', 'artifact', 'sources/big.md', '2026-08-01T10:00:00.000Z', '', 'sha-big', 2000, ?, 'p-prev', datetime('now'))`,
+			).run(BIG.length);
 		});
 		const scan = getDbAccessor().withReadDb((db) =>
 			searchDreamingEvidenceInDb(db, { agentId: "ant", summariesSince: "2026-09-01T00:00:00.000Z" }),
