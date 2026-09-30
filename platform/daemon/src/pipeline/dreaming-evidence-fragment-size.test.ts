@@ -97,4 +97,26 @@ describe("dreaming evidence fragment size", () => {
 		const delivered = (scan.items ?? []).reduce((sum, item) => sum + contentLength(item), 0);
 		expect(delivered).toBeLessThanOrEqual(32_000 + 20_000);
 	});
+
+	it("carries several session summaries per scan during a summary backfill, still bounded", () => {
+		getDbAccessor().withWriteTx((db) => {
+			for (let i = 0; i < 10; i += 1) {
+				db.prepare(
+					`INSERT INTO session_summaries
+					 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
+					 VALUES (?, 'ant', ?, 4000, 0, 'session', 'transcript', ?, ?, ?)`,
+				).run(`summary-${i}`, "s".repeat(15_000), "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z");
+			}
+		});
+		const scan = getDbAccessor().withReadDb((db) =>
+			searchDreamingEvidenceInDb(db, { agentId: "ant", summariesSince: "2026-09-01T00:00:00.000Z" }),
+		);
+		expect(scan.ok).toBe(true);
+		const summaries = (scan.items ?? []).filter(
+			(item) => item !== null && typeof item === "object" && "kind" in item && item.kind === "summary",
+		);
+		expect(summaries.length).toBeGreaterThanOrEqual(6);
+		const delivered = (scan.items ?? []).reduce((sum, item) => sum + contentLength(item), 0);
+		expect(delivered).toBeLessThanOrEqual(120_000 + 20_000);
+	});
 });
