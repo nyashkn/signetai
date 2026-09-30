@@ -82,6 +82,43 @@ describe("memory head owner runtime", () => {
 		).toEqual({ content: "- Meeting is Tuesday." });
 	});
 
+	it("hands a stale head's last committed entries to the next pass so it can recommit them", async () => {
+		expect(await commit("first")).toMatchObject({ ok: true, revision: 1 });
+		await memory("other", "Unrelated note.");
+		await sql("UPDATE memories SET content='Unrelated note, revised.' WHERE id='other'");
+		const stale = await snapshot();
+		expect(stale).toMatchObject({
+			status: "stale",
+			entries: [],
+			previousEntries: [
+				{
+					entryId: "meeting",
+					text: "Meeting is Tuesday.",
+					support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }],
+				},
+			],
+		});
+
+		await pass("carry");
+		expect(
+			await head({
+				action: "commit",
+				input: {
+					passId: "carry",
+					agentId: "default",
+					baseRevision: Number(stale.revision),
+					baseHash: String(stale.hash),
+					entries: stale.previousEntries as Array<{
+						entryId: string;
+						text: string;
+						support: Array<{ source_ref: string; quote: string }>;
+					}>,
+				},
+			}),
+		).toMatchObject({ ok: true });
+		expect(await snapshot()).toMatchObject({ status: "current", content: "- Meeting is Tuesday." });
+	});
+
 	it("fences a commit even when stale work reads a new base after correction", async () => {
 		await pass("queued");
 		await sql("UPDATE memories SET content='Meeting is Thursday.' WHERE id='meeting'");

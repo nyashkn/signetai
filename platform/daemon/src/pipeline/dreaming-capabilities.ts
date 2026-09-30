@@ -438,7 +438,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 		capability(
 			"memory_head_read",
 			"Read curated memory head",
-			"Read the scoped Dreaming-curated MEMORY.md head.",
+			"Read the scoped Dreaming-curated MEMORY.md head: revision and hash for memory_head_commit, plus previousEntries (the last committed entries with their cited support) to carry forward.",
 			true,
 			z.object({ agentId: z.string().min(1) }),
 			async ({ agentId: scopeId }) =>
