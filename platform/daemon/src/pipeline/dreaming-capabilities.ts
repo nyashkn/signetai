@@ -49,6 +49,9 @@ const MAX_EVIDENCE_FRAGMENT_CHARS = 20_000;
 const DEFAULT_EVIDENCE_FRAGMENT_CHARS = 8_000;
 // Total across a scan response, which fans out over up to `limit` sources.
 const MAX_EVIDENCE_SCAN_RESULT_CHARS = 32_000;
+// During an operator summary backfill each pass pays its fixed overhead for only ~2 summaries at
+// 32k, so the backlog would need a pass per summary. Let the scan carry several per response.
+const MAX_BACKFILL_SCAN_RESULT_CHARS = 120_000;
 const MAX_EVIDENCE_RESULT_CHARS = 16_000;
 const MAX_HYDRATED_ITEMS = 50;
 const MAX_ENTITY_TEXT_CHARS = 2_000;
@@ -399,7 +402,8 @@ export function searchDreamingEvidenceInDb(db: ReadDb, input: DbOwnerDreamingEvi
 				// The scan is the delivery path: whatever it returns is recorded as consumed.
 				// A 2k slice per source means a large transcript needs hundreds of passes, so
 				// take real bites, bounded overall so one response cannot swallow the context.
-				let remaining = MAX_EVIDENCE_SCAN_RESULT_CHARS;
+				let remaining =
+					input.summariesSince === undefined ? MAX_EVIDENCE_SCAN_RESULT_CHARS : MAX_BACKFILL_SCAN_RESULT_CHARS;
 				return sources.flatMap((source) => {
 					if (remaining <= 0) return [];
 					const fragment = projectEvidenceFragment(
