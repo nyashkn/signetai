@@ -50,8 +50,10 @@ const DEFAULT_EVIDENCE_FRAGMENT_CHARS = 8_000;
 // Total across a scan response, which fans out over up to `limit` sources.
 const MAX_EVIDENCE_SCAN_RESULT_CHARS = 32_000;
 // During an operator summary backfill each pass pays its fixed overhead for only ~2 summaries at
-// 32k, so the backlog would need a pass per summary. Let the scan carry several per response.
-const MAX_BACKFILL_SCAN_RESULT_CHARS = 120_000;
+// 32k, so the backlog would need a pass per summary. Let the scan carry several per response, but
+// keep the serialized result under the 128k tool-trace cap: consumption is derived from the stored
+// trace, and a truncated trace records nothing, so the same sources come back every pass.
+const MAX_BACKFILL_SCAN_RESULT_CHARS = 80_000;
 const MAX_EVIDENCE_RESULT_CHARS = 16_000;
 const MAX_HYDRATED_ITEMS = 50;
 const MAX_ENTITY_TEXT_CHARS = 2_000;
