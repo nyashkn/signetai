@@ -119,6 +119,30 @@ describe("memory head owner runtime", () => {
 		expect(await snapshot()).toMatchObject({ status: "current", content: "- Meeting is Tuesday." });
 	});
 
+	it("publishes the proven entries and reports the one whose source is gone", async () => {
+		await pass("partial");
+		const base = await snapshot();
+		const result = await head({
+			action: "commit",
+			input: {
+				passId: "partial",
+				agentId: "default",
+				baseRevision: Number(base.revision),
+				baseHash: String(base.hash),
+				entries: [
+					{ entryId: "meeting", text: "Meeting is Tuesday.", support: [{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }] },
+					{ entryId: "goal", text: "Goal is 3.6M.", support: [{ source_ref: "transcript:purged", quote: "Goal is 3.6M." }] },
+				],
+			},
+		});
+		expect(result).toMatchObject({
+			ok: true,
+			changedIds: ["meeting"],
+			dropped: [{ entryId: "goal", code: "INVALID_PROVENANCE" }],
+		});
+		expect(await snapshot()).toMatchObject({ status: "current", content: "- Meeting is Tuesday." });
+	});
+
 	it("fences a commit even when stale work reads a new base after correction", async () => {
 		await pass("queued");
 		await sql("UPDATE memories SET content='Meeting is Thursday.' WHERE id='meeting'");
