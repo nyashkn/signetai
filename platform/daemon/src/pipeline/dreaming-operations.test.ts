@@ -433,6 +433,39 @@ describe("dreaming operations", () => {
 		).toEqual({ c: 1 });
 	});
 
+	it("accepts a compaction artifact cited by source_ref and quote alone, but not a mismatched stated kind", async () => {
+		const quote = "Definition published: dormant-winback-2026.";
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO memory_artifacts
+				 (agent_id, source_path, source_sha256, source_kind, session_id, session_token, captured_at, content, updated_at, is_deleted)
+				 VALUES ('agent-a', 'memory/winback--compaction.md', 'sha-winback', 'compaction', 'session-winback', 'token-winback', datetime('now'), ?, datetime('now'), 0)`,
+			).run(`## Summary\n${quote}\n`);
+		});
+		const sourceRef = "artifact:memory/winback--compaction.md";
+		const create = (evidence: Record<string, unknown>): DreamingOperationRequest => ({
+			operation: "create_entity",
+			payload: { name: "Dormant winback 2026", type: "project" },
+			evidence: [evidence],
+		});
+
+		const refOnly = await applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId: "agent-a",
+			actor: "dreaming",
+			operations: [create({ source_ref: sourceRef, quote })],
+		});
+		expect(refOnly.ok).toBe(true);
+
+		const wrongKind = await applyDreamingOperations({
+			accessor: getDbAccessor(),
+			agentId: "agent-a",
+			actor: "dreaming",
+			operations: [create({ source_ref: sourceRef, source_kind: "transcript", quote })],
+		});
+		expect(wrongKind).toMatchObject({ ok: false, error: "Every operation must cite an exact quote from scoped episodic evidence" });
+	});
+
 	it("deduplicates repeated review-required operations and honors a rejection", async () => {
 		insertEntity("e-source", "Local-first", "local-first");
 		insertEntity("e-target", "Hosted inference", "hosted inference");

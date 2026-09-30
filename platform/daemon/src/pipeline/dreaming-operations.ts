@@ -64,8 +64,8 @@ const HYGIENE_ARCHIVE_OPS = new Set([
 
 function citationRecord(value: unknown): {
 	readonly sourceRef: string;
-	readonly sourceKind: string;
-	readonly sourceId: string;
+	readonly sourceKind: string | null;
+	readonly sourceId: string | null;
 	readonly sourcePath: string | null;
 	readonly quote: string;
 } | null {
@@ -76,14 +76,12 @@ function citationRecord(value: unknown): {
 	const sourceId = typeof citation.source_id === "string" ? citation.source_id.trim() : "";
 	const sourcePath = typeof citation.source_path === "string" ? citation.source_path.trim() : null;
 	const quote = typeof citation.quote === "string" ? citation.quote.trim() : "";
-	let kind = sourceKind;
-	let id = sourceId;
 	const colon = sourceRef.indexOf(":");
-	if (colon > 0) {
-		if (!kind) kind = sourceRef.slice(0, colon);
-		if (!id) id = sourceRef.slice(colon + 1);
-	}
-	return sourceRef && kind && id && quote ? { sourceRef, sourceKind: kind, sourceId: id, sourcePath, quote } : null;
+	if (!sourceRef || colon <= 0 || colon === sourceRef.length - 1 || !quote) return null;
+	// source_ref alone identifies the source. Its kind/id prefix is not the record's sourceKind/sourceId
+	// (an artifact:<path> ref resolves to sourceKind "compaction" and a session id), so only compare
+	// those fields when the citation states them.
+	return { sourceRef, sourceKind: sourceKind || null, sourceId: sourceId || null, sourcePath, quote };
 }
 interface CitationResolution {
 	readonly evidence: DreamingAgentEvidence | null;
@@ -110,8 +108,8 @@ function citeEvidence(accessor: DbAccessor, agentId: string, citation: unknown):
 			result.evidence.find(
 				(record) =>
 					record.sourceRef === requested.sourceRef &&
-					record.sourceKind === requested.sourceKind &&
-					record.sourceId === requested.sourceId &&
+					(requested.sourceKind === null || record.sourceKind === requested.sourceKind) &&
+					(requested.sourceId === null || record.sourceId === requested.sourceId) &&
 					(requested.sourcePath === null || record.sourcePath === requested.sourcePath) &&
 					record.content.includes(requested.quote),
 			) ?? null,
