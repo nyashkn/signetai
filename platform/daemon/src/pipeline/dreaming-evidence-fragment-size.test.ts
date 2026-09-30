@@ -105,7 +105,13 @@ describe("dreaming evidence fragment size", () => {
 					`INSERT INTO session_summaries
 					 (id, agent_id, content, token_count, depth, kind, source_type, earliest_at, latest_at, created_at)
 					 VALUES (?, 'ant', ?, 4000, 0, 'session', 'transcript', ?, ?, ?)`,
-				).run(`summary-${i}`, "s".repeat(15_000), "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z", "2026-09-20T00:00:00.000Z");
+				).run(
+					`summary-${i}`,
+					"s".repeat(15_000),
+					"2026-09-20T00:00:00.000Z",
+					"2026-09-20T00:00:00.000Z",
+					"2026-09-20T00:00:00.000Z",
+				);
 			}
 			db.prepare(
 				"INSERT INTO dreaming_passes (id, agent_id, mode, status, started_at, created_at) VALUES ('p-prev', 'ant', 'incremental-content', 'completed', datetime('now'), datetime('now'))",
@@ -123,8 +129,10 @@ describe("dreaming evidence fragment size", () => {
 		const summaries = (scan.items ?? []).filter(
 			(item) => item !== null && typeof item === "object" && "kind" in item && item.kind === "summary",
 		);
-		expect(summaries.length).toBeGreaterThanOrEqual(6);
+		expect(summaries.length).toBeGreaterThanOrEqual(4);
 		const delivered = (scan.items ?? []).reduce((sum, item) => sum + contentLength(item), 0);
-		expect(delivered).toBeLessThanOrEqual(120_000 + 20_000);
+		expect(delivered).toBeLessThanOrEqual(80_000 + 20_000);
+		// The stored tool trace is cut at 128k chars, and a cut trace records no consumption.
+		expect(JSON.stringify({ tool: "search_evidence", ...scan }).length).toBeLessThan(128_000);
 	});
 });
