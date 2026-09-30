@@ -89,6 +89,7 @@ export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommit
 	const head = db
 		.prepare("SELECT revision, content, content_hash, revision_id, is_current FROM memory_md_heads WHERE agent_id=?")
 		.get(agentId) as Head | undefined;
+
 	const pass = db
 		.prepare("SELECT status, mode, agent_id, head_base_revision FROM dreaming_passes WHERE id=?")
 		.get(input.passId) as
@@ -226,7 +227,34 @@ export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHead
 						)
 						.all(agentId, head.revision)
 				: [],
+		// A stale head hides its text from sessions, but the curating pass needs the last committed
+		// set to carry forward; commit re-verifies every quote, so changed evidence still drops out.
+		previousEntries: previousHeadEntries(db, agentId),
 	};
+}
+
+function previousHeadEntries(
+	db: WriteDb,
+	agentId: string,
+): Array<{ entryId: string; text: string; support: unknown[] }> {
+	const rows = db
+		.prepare(
+			`SELECT e.entry_id AS entryId, e.canonical_text AS text, re.provenance_json AS provenanceJson
+			 FROM memory_head_entries e
+			 LEFT JOIN memory_head_revision_entries re
+			   ON re.agent_id = e.agent_id AND re.entry_id = e.entry_id AND re.revision = e.last_revision
+			 WHERE e.agent_id = ? AND e.status = 'active'
+			 ORDER BY e.entry_id`,
+		)
+		.all(agentId) as Array<{ entryId: string; text: string; provenanceJson: string | null }>;
+	return rows.map((row) => {
+		let support: unknown[] = [];
+		try {
+			const parsed = JSON.parse(row.provenanceJson ?? "[]");
+			if (Array.isArray(parsed)) support = parsed;
+		} catch {}
+		return { entryId: row.entryId, text: row.text, support };
+	});
 }
 
 function commitEntries(

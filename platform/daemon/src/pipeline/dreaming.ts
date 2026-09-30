@@ -1021,7 +1021,7 @@ export const DREAMING_CONTENT_AGENT_PROMPT = `You are a bounded Signet maintenan
 
 ## Process
 
-Purpose: maintain durable, evidence-cited semantic understanding in the knowledge graph. This is a CONTENT pass: process review work, inspect bounded surprisal hints, and find new evidence since the cutoff; extract/update claims with exact-quote citations and create entities only for durable subjects. Hygiene archives/merges belong to hygiene passes, which process structural attention. Use the pass log (runbook_read) as the dedup source: the previous pass's viewed sources and changes are the cutoff.
+Purpose: maintain durable, evidence-cited semantic understanding in the knowledge graph. This is a CONTENT pass: process review work, inspect bounded surprisal hints, and process unconsumed evidence; extract/update claims with exact-quote citations and create entities only for durable subjects. Hygiene archives/merges belong to hygiene passes, which process structural attention. Use the pass log (runbook_read) to avoid redoing changes already applied. search_evidence tracks what has been delivered, so every source it returns is unprocessed and in scope, whatever its timestamp.
 
 An install may have several agent scopes (listed in <agent_scopes> when there is more than one): the scoped tools take an agentId, so address any scope you need — each write is attributed to the agent you name. attention_list without an agentId lists the whole install's attention queue, with each record carrying its owning agentId.
 
@@ -1034,10 +1034,10 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
 
 ### Per-pass process
 
-1. Read the pass log (runbook_read). Establish cutoff: sources viewed, changes applied, deferred items.
+1. Read the pass log (runbook_read): changes already applied, deferred items, open questions. Do not derive a time cutoff from it.
 2. Query attention_list with kind=review_due. For expired records, inspect the cited memory with search_evidence using its subjectRef, then supersede the matching active claim with supersede_claim_value. Use the supplied entityId, aspectId, attributeId, and claimKey when present. The replacement must state that the planned event remains unconfirmed; never rewrite it as if the event happened. Cite an exact quote from the original memory. Do not supersede approaching records. When creating or setting a future temporal claim, set payload.reviewAfter to the referenced ISO timestamp.
 3. Query attention_list with kind=surprisal. These are bounded exploration hints, not evidence and not hygiene provenance. Inspect each hint's memory:<id> subjectRef with search_evidence in the owning scope. If the source establishes a useful settled fact, use a normal content operation with an exact quote; otherwise decline_attention after inspection. Never create a claim or entity from the score alone, and never cite attention:<id> for a content operation.
-4. Find new evidence since the cutoff. First LIST unprocessed sources with search_evidence — omit the query, since, and before so it drains the durable delivery queue of incomplete source revisions; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed transcript sessions; historical summary rows are not part of the default delivery path. A transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
+4. Find unprocessed evidence. First LIST unprocessed sources with search_evidence — omit the query, since, and before so it drains the durable delivery queue of incomplete source revisions; only after seeing what is there, narrow with a query if the list is large. Prefer evidence from completed transcript sessions; historical summary rows are not part of the default delivery path. A transcript with completed: false is mid-stream — defer filing from it with the named blocker "transcript still mid-stream" (re-check completed each pass: a session still active when re-checked is a re-verified blocker, not a repeated one), and note the deferral in the pass log, because its states may be contradicted by the session's end. For each new source:
    - search_entities for subjects it establishes.
    - File claims only for what the source establishes as settled fact: outcomes, decisions, shipped changes, stable behavior. Do not file instructions that were merely suggested, hypotheses or diagnoses, open questions, or intermediate states of an ongoing investigation. When a source shows an attempt and its outcome, file the outcome.
    - If you inspect an entire source revision and it contains no durable fact, add it to reviewedExcludedEvidence with the owning agentId, sourceRef, and a specific reason. The agentId must be the scope used for search_evidence. This is terminal for that immutable revision; do not use it for a temporary blocker, which belongs in deferredEvidence.
@@ -1047,7 +1047,9 @@ An install may have several agent scopes (listed in <agent_scopes> when there is
    - create_entity only for durable subjects clearly established by the source.
    - When the evidence supports a possible relationship, merge, or other ontology change but the relationship is ambiguous rather than settled, do not apply it immediately. Emit the normal ontology operation with risk: "review_required". Its reason must be a concise, human-readable explanation that names the entities and the proposed relationship; the exact evidence citation remains required. The daemon will place it in the user's review queue for confirmation, not treat the queue as a work-deferral mechanism.
    - Validate before writing (validate_proposal).
-5. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write a specific entity-named change manifest, not process narration. Use Markdown, max 2000 chars, with these sections when applicable: ## Updated, ## Created, ## Deferred, ## No-op. Under every section, each line must name the entity or entity id, state the exact change (claim filed or superseded, aspect touched, entity/aspect/link archived or merged, or why no change was needed), and cite the source or provenance reference (memory, artifact, or transcript as kind:id; hygiene attention:<id>). Deferred and No-op lines must state the specific blocker or reason; never use generic categories such as "content-related" or "ongoing structural process". Omit empty sections. Put the same deferred items and open questions in the runbook's deferred and openQuestions fields.
+   - Every source search_evidence returns ends in exactly one outcome: a filed or superseded claim, reviewedExcludedEvidence with a specific reason, or deferredEvidence with a named blocker. Never skip a returned source because of its timestamp or a rule written in an earlier pass log.
+5. Publish working memory (required every content pass), after your last graph write. Call memory_head_read, then memory_head_commit exactly once with passId set to the <pass_id> below, baseRevision and baseHash from the read, and the complete entry set: resubmit previousEntries that are still supported (their quotes are re-verified), update or drop any the evidence contradicts, and add the most important durable facts this pass established, each with an exact quote. Keep it short: at most 1000 tokens. Omitted entries are removed. The commit is staged (STAGED_FOR_FINALIZATION) and applied when the pass finalizes; entries whose quotes no longer verify are dropped then. A second memory_head_commit discards the staged set and fails the pass.
+6. Write the pass log (runbook_write) last. Its summary is read back by a human who did not watch the pass: write a specific entity-named change manifest, not process narration. Use Markdown, max 2000 chars, with these sections when applicable: ## Updated, ## Created, ## Deferred, ## No-op. Under every section, each line must name the entity or entity id, state the exact change (claim filed or superseded, aspect touched, entity/aspect/link archived or merged, or why no change was needed), and cite the source or provenance reference (memory, artifact, or transcript as kind:id; hygiene attention:<id>). Deferred and No-op lines must state the specific blocker or reason; never use generic categories such as "content-related" or "ongoing structural process". Omit empty sections. Put the same deferred items and open questions in the runbook's deferred and openQuestions fields.
 
 ### What counts as durable
 
@@ -1071,6 +1073,7 @@ The pass is done when:
 - Deferred records stay pending: deferral is not a close — the source is re-examined next pass.
 - Every write in the batch cites an exact quote from episodic evidence in the same agent scope as the graph target.
 - Expired temporal claims were reviewed, and only claims with exact source evidence were superseded.
+- memory_head_commit returned STAGED_FOR_FINALIZATION exactly once.
 - The pass log is written with sources viewed + changes applied (this is the next pass's dedup).
 - No writes attempted against pinned or source-root entities.
 `;
@@ -1555,10 +1558,13 @@ export async function runDreamingAgentPass(
 	let applied = 0;
 	let failed = 0;
 	try {
-		const basePrompt =
+		const scopedPrompt =
 			scopes.length > 1
 				? `${dreamingPromptForMode(mode)}\n\n<agent_scopes>\n${scopes.join("\n")}\n</agent_scopes>`
 				: dreamingPromptForMode(mode);
+		// Content passes must commit the memory head, which is authorized by this pass id.
+		const basePrompt =
+			mode === "incremental-content" ? `${scopedPrompt}\n\n<pass_id>${passId}</pass_id>` : scopedPrompt;
 		const prompt = liveOptions?.userRequest
 			? `${basePrompt}
 
