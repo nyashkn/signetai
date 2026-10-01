@@ -67,6 +67,7 @@ import {
 	type RejectedDreamingEvidence,
 	collectRejectedDreamingEvidence,
 	recordRejectedDreamingEvidenceInTx,
+	rejectedOperationsCiteEvidence,
 } from "./dreaming-evidence-retry";
 import type { ApplyDreamingOperationsResult, DreamingOperationRequest } from "./dreaming-operations";
 import {
@@ -1590,6 +1591,7 @@ export async function runDreamingAgentPass(
 	let toolCallSequence = 0;
 	let applied = 0;
 	let failed = 0;
+	let unattributedFailure = false;
 	try {
 		const scopedPrompt =
 			scopes.length > 1
@@ -1731,6 +1733,7 @@ export async function runDreamingAgentPass(
 				applied += result.items.filter((item) => item.ok).length;
 				failed += result.items.filter((item) => !item.ok).length;
 				if (!result.ok && result.items.length === 0) failed++;
+				if (!rejectedOperationsCiteEvidence(result, operations)) unattributedFailure = true;
 				await recordDreamingOperationEffects(accessor, scopeId, effects, result, operations, retirementCandidates);
 				retirementCandidates = new Map();
 				await resolveRequeuedDreamingEvidence(accessor, scopeId, passId, result, operations);
@@ -1771,10 +1774,11 @@ export async function runDreamingAgentPass(
 						const input = isRecord(trace.input) ? trace.input : null;
 						const operations = input?.operations;
 						if (Array.isArray(operations)) {
-							const evidenceOperations = operations.flatMap((operation) => {
-								if (!isRecord(operation)) return [];
-								return [{ evidence: Array.isArray(operation.evidence) ? operation.evidence : [] }];
-							});
+							const evidenceOperations = operations.map((operation) => ({
+								evidence: isRecord(operation) && Array.isArray(operation.evidence) ? operation.evidence : [],
+							}));
+							if (!rejectedOperationsCiteEvidence({ ok: false, items: [] }, evidenceOperations))
+								unattributedFailure = true;
 							const operationAgentId =
 								typeof input?.agentId === "string" && input.agentId.trim().length > 0 ? input.agentId.trim() : agentId;
 							rejectedEvidence.push(
@@ -1785,7 +1789,7 @@ export async function runDreamingAgentPass(
 									evidenceOperations,
 								)),
 							);
-						}
+						} else unattributedFailure = true;
 						failed++;
 					}
 					applyCallbackReported = false;
@@ -1861,6 +1865,7 @@ export async function runDreamingAgentPass(
 			failed,
 			summary,
 			rejectedEvidence,
+			unattributedFailure,
 			memoryHeadResult,
 			hasBacklogByScope: [...hasBacklogByScope].map(([scope, scopeHasBacklog]) => ({
 				scope,
@@ -2091,7 +2096,12 @@ export function finalizeDreamingPassInDb(db: WriteDb, input: DbOwnerDreamingPass
 		manifest.memoryHead = input.memoryHeadResult;
 		db.prepare("UPDATE dreaming_passes SET runbook_json = ? WHERE id = ?").run(JSON.stringify(manifest), input.passId);
 	}
-	if (input.mode !== "incremental-hygiene" && input.failed === 0) {
+	// Only completed passes reach here (a crashed pass goes through failDreamingPass), so `failed`
+	// counts rejected operations, not an interrupted pass. Each rejected citation's source is already
+	// excluded for retry above; defer just those. Gating all consumption on failed === 0 made one bad
+	// quote replay every source the pass read, so a backlog never drained. A rejection that cites no
+	// source can't be pinned to its evidence, so it still holds back everything the pass read.
+	if (input.mode !== "incremental-hygiene" && !input.unattributedFailure) {
 		const runbook = db
 			.prepare("SELECT runbook_json AS runbookJson FROM dreaming_passes WHERE id = ?")
 			.get(input.passId) as { runbookJson: string | null } | null;
@@ -2102,7 +2112,16 @@ export function finalizeDreamingPassInDb(db: WriteDb, input: DbOwnerDreamingPass
 		} catch {
 			parsedRunbook = null;
 		}
-		const deferredEvidence = parsedRunbook === null ? null : deferredEvidenceKeys(parsedRunbook, input.agentId);
+		const declaredDeferred = parsedRunbook === null ? null : deferredEvidenceKeys(parsedRunbook, input.agentId);
+		const deferredEvidence =
+			declaredDeferred === null
+				? null
+				: new Set([
+						...declaredDeferred,
+						...(input.rejectedEvidence as RejectedDreamingEvidence[]).map(
+							(item) => `${item.agentId}\u0000${item.sourceKind}:${item.sourceId}`,
+						),
+					]);
 		const reviewedExcludedEvidence =
 			parsedRunbook === null ? null : parseDreamingReviewedExcludedEvidence(parsedRunbook);
 		if (deferredEvidence !== null && reviewedExcludedEvidence !== null) {
