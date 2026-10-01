@@ -864,6 +864,50 @@ describe("Dreaming", () => {
 		expect(await getDreamingEpisodicTokenBacklog(accessor, AGENT)).toBeGreaterThan(0);
 	});
 
+	it("consumes the rest of a completed pass's evidence when one cited operation is rejected", async () => {
+		seedTranscript(db, "kept-transcript", "The deployment moved to the shared host.");
+		seedTranscript(db, "rejected-transcript", "The canonical source says the deployment is local.");
+		const result = await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					const search = input.tools.find((tool) => tool.name === "search_evidence");
+					const apply = input.tools.find((tool) => tool.name === "apply_ontology_ops");
+					if (!search || !apply) throw new Error("Missing dreaming tools");
+					await search.execute("call", { agentId: AGENT }, undefined, undefined, {} as never);
+					await apply.execute(
+						"call",
+						{
+							agentId: AGENT,
+							operations: [
+								{ evidence: [{ source_ref: "transcript:rejected-transcript", quote: "the deployment is remote" }] },
+							],
+						},
+						undefined,
+						undefined,
+						{} as never,
+					);
+					return { summary: "One rejected citation" };
+				},
+			},
+			defaultCfg(),
+			"/tmp",
+			AGENT,
+			[AGENT],
+			"incremental",
+		);
+		expect(result.failed).toBeGreaterThan(0);
+		const consumed = (id: string) =>
+			(
+				db.prepare("SELECT COUNT(*) AS count FROM dreaming_evidence_consumption WHERE source_id = ?").get(id) as {
+					count: number;
+				}
+			).count;
+		// The rejected source stays pending for its retry; one bad citation must not replay everything else.
+		expect(consumed("rejected-transcript")).toBe(0);
+		expect(consumed("kept-transcript")).toBe(1);
+	});
+
 	it("does not acknowledge an artifact revision replaced during a pass (#1430)", async () => {
 		const capturedAt = "2026-08-11T00:00:00.000Z";
 		seedArtifact(db, "sources/revised.md", "The old revision was delivered.", "sha-old", capturedAt);
@@ -1041,6 +1085,7 @@ describe("Dreaming", () => {
 		expect(await shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + 60 * 1000)).toBe(false);
 		expect(await shouldTriggerDreaming(accessor, cfg, AGENT, failedAt + DREAMING_HALT_COOLDOWN_MS + 1_000)).toBe(true);
 	});
+
 
 	it("isDreamingScopeHalted gates on the failure threshold and cooldown", () => {
 		const base = (overrides: Partial<DreamingState>): DreamingState => ({

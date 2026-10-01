@@ -121,6 +121,22 @@ function rejectedIndexes(
 	return new Set(indexes.length > 0 ? indexes : result.ok ? [] : operations.map((_operation, index) => index));
 }
 
+// A rejected operation that cites no episodic source cannot be pinned to the evidence it came from,
+// so the pass cannot tell which delivered source still needs another look.
+export function rejectedOperationsCiteEvidence(
+	result: ApplyDreamingOperationsResult,
+	operations: readonly Pick<DreamingOperationRequest, "evidence">[],
+): boolean {
+	for (const index of rejectedIndexes(result, operations)) {
+		const cited = (operations[index]?.evidence ?? []).some((raw) => {
+			const kind = sourceReference(raw)?.sourceRef.split(":", 1)[0];
+			return kind === "memory" || kind === "artifact" || kind === "transcript" || kind === "summary";
+		});
+		if (!cited) return false;
+	}
+	return true;
+}
+
 export function collectRejectedDreamingEvidenceInDb(
 	db: ReadDb,
 	agentId: string,

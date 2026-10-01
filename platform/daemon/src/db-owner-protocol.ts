@@ -401,6 +401,8 @@ export interface DbOwnerDreamingPassFinalize {
 	readonly failed: number;
 	readonly summary: string;
 	readonly rejectedEvidence: readonly unknown[];
+	/** A rejected operation cited no episodic source, so no delivered evidence may be consumed. */
+	readonly unattributedFailure: boolean;
 	readonly memoryHeadCommitInput: MemoryHeadCommitInput | null;
 	readonly hasBacklogByScope: readonly { readonly scope: string; readonly hasBacklog: boolean }[];
 	readonly nextWatermarkByScope: readonly { readonly scope: string; readonly watermark: string | null }[];
