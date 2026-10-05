@@ -332,9 +332,15 @@ describe("dreaming-agent-tools", () => {
 		expect(
 			getDbAccessor().withReadDb((db) => db.prepare("SELECT updated_by FROM memories WHERE id='mem-junk'").get()),
 		).toEqual({ updated_by: "dreaming" });
+		expect(
+			getDbAccessor().withReadDb((db) =>
+				db.prepare("SELECT content, is_current FROM memory_md_heads WHERE agent_id='owner'").get(),
+			),
+		).toEqual({ content: "- Meeting is Tuesday.", is_current: 1 });
 
-		// Case 2: a write from a different actor between read and commit still fences the commit.
-		await runDreamingAgentPass(
+		// Case 2: a write from a different actor between read and commit still fences the commit, which
+		// is staged during the pass and rejected when the pass finalizes.
+		const externalWrite = runDreamingAgentPass(
 			accessor,
 			{
 				async run(input) {
@@ -363,7 +369,7 @@ describe("dreaming-agent-tools", () => {
 							},
 						],
 					});
-					expect(publication).toMatchObject({ ok: false, code: "STALE_HEAD" });
+					expect(publication).toMatchObject({ ok: true, code: "STAGED_FOR_FINALIZATION" });
 					return { summary: "Attempted a commit after an external change." };
 				},
 			},
@@ -373,6 +379,7 @@ describe("dreaming-agent-tools", () => {
 			["owner"],
 			"incremental-content",
 		);
+		await expect(externalWrite).rejects.toThrow("STALE_HEAD");
 	}, 30000);
 
 	it("preserves a retry boundary through the Pi capability after a writer failure (#1414)", async () => {
