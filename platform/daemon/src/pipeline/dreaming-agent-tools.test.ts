@@ -191,6 +191,56 @@ describe("dreaming-agent-tools", () => {
 		expect(await status()).toEqual({ status: "failed" });
 	});
 
+	it("rejects an over-budget head when it is staged so the agent can shorten it and finish", async () => {
+		insertEpisodicMemory("head-evidence", "Meeting is Tuesday.");
+		const accessor = getDbAccessor();
+		const owner = await getDbOwnerForAccessor(accessor);
+		const options = { operation: "oversized-head-fixture", lane: "read" as const, deadlineMs: 10000 };
+		const cfg = {
+			tokenThreshold: 100000,
+			maxInterval: 3600000,
+			maxInputTokens: 32000,
+			maxOutputTokens: 16000,
+			timeout: 30000,
+			backfillOnFirstRun: true,
+		};
+		const support = [{ source_ref: "memory:head-evidence", quote: "Meeting is Tuesday." }];
+		let passId = "";
+		const results: Array<Record<string, unknown>> = [];
+		await runDreamingAgentPass(
+			accessor,
+			{
+				async run(input) {
+					passId = input.passId;
+					const invoke = async (name: string, args: unknown) =>
+						readResult(await findTool(input.tools, name).execute(name, args, undefined, undefined, {} as never));
+					await invoke("memory_head_read", { agentId: "owner" });
+					results.push(
+						await invoke("memory_head_commit", {
+							agentId: "owner",
+							entries: [{ entryId: "meeting", text: `Meeting is Tuesday. ${"filler ".repeat(1500)}`, support }],
+						}),
+						await invoke("memory_head_commit", {
+							agentId: "owner",
+							entries: [{ entryId: "meeting", text: "Meeting is Tuesday.", support }],
+						}),
+					);
+					return { summary: "Shortened the head after the first commit was refused." };
+				},
+			},
+			cfg,
+			dir,
+			"owner",
+			["owner"],
+			"incremental-content",
+		);
+		expect(results[0]).toMatchObject({ ok: false, code: "INVALID_HEAD" });
+		expect(results[1]).toMatchObject({ ok: true, code: "STAGED_FOR_FINALIZATION" });
+		expect(await ownerReadOne(owner, "SELECT status FROM dreaming_passes WHERE id=?", [passId], options)).toEqual({
+			status: "completed",
+		});
+	});
+
 	it("binds the memory-head commit to the running pass instead of asking the agent for its id", async () => {
 		const manifest = getDreamingCapabilityManifest().find((capability) => capability.id === "memory_head_commit");
 		const schema = manifest?.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;

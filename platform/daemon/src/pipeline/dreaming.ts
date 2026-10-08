@@ -1839,6 +1839,14 @@ ${JSON.stringify(liveOptions.userRequest)}
 					};
 					return { ok: false, ...memoryHeadCommitRejection };
 				}
+				// Finalization rejects an over-budget head and fails the whole pass, after the model can no
+				// longer react. Check the same bounds here so a rejection is a retryable tool result.
+				if (input.entries.length > 200 || countTokens(input.entries.map((entry) => `- ${entry.text.trim()}`).join("\n")) > 1000)
+					return {
+						ok: false,
+						code: "INVALID_HEAD",
+						error: "head must be at most 1000 tokens and 200 entries: drop or shorten entries and commit again",
+					};
 				memoryHeadCommitInput = input;
 				return { ok: true, code: "STAGED_FOR_FINALIZATION" };
 			},
