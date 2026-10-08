@@ -308,4 +308,43 @@ describe("memory head owner runtime", () => {
 		await client.close();
 		await expect(Promise.resolve().then(() => snapshot())).rejects.toThrow();
 	});
+
+	it("publishes the entries whose evidence still verifies and reports the rest as dropped", async () => {
+		await memory("gone", "Standup is at nine.");
+		await pass("partial");
+		await snapshot();
+		const result = await head({
+			action: "commit",
+			input: {
+				passId: "partial",
+				agentId: "default",
+				entries: [
+					{
+						entryId: "meeting",
+						text: "Meeting is Tuesday.",
+						support: [
+							{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." },
+							{ source_ref: "memory:purged", quote: "Meeting is Tuesday." },
+						],
+					},
+					{ entryId: "standup", text: "Standup is at nine.", support: [{ source_ref: "memory:gone", quote: "at ten" }] },
+					{ entryId: "meeting", text: "Meeting is Tuesday.", support: [{ source_ref: "memory:meeting", quote: "Tuesday" }] },
+				],
+			},
+		});
+		expect(result).toMatchObject({ ok: true, code: "COMMITTED" });
+		expect(result.dropped).toEqual([
+			expect.objectContaining({ entryId: "standup", code: "INVALID_PROVENANCE" }),
+			expect.objectContaining({ entryId: "meeting", code: "DUPLICATE_ENTRY_ID" }),
+		]);
+		expect(await snapshot()).toMatchObject({ content: "- Meeting is Tuesday." });
+		expect(
+			await ownerReadOne(
+				client,
+				"SELECT provenance_json AS support FROM memory_head_revision_entries WHERE entry_id='meeting'",
+				[],
+				options,
+			),
+		).toEqual({ support: JSON.stringify([{ source_ref: "memory:meeting", quote: "Meeting is Tuesday." }]) });
+	});
 });
