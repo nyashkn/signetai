@@ -111,15 +111,50 @@ export function withContentPassWrites<T>(db: WriteDb, passId: string | undefined
 	return result;
 }
 
-export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommitInput): Record<string, unknown> {
-	const agentId = input.agentId;
+// One entry whose cited source was purged or edited should not block the rest of the working memory
+// (the commit is applied at pass finalization, where a rejection fails the whole pass): drop the
+// support that no longer verifies and the entries left without any, repeat entryIds keep the first.
+function publishableEntries(
+	db: WriteDb,
+	input: MemoryHeadCommitInput,
+): { input: MemoryHeadCommitInput; dropped: Array<{ entryId: string; code: string; error: string }> } {
+	const evidence: Evidence = new Map();
+	const dropped: Array<{ entryId: string; code: string; error: string }> = [];
+	const seen = new Set<string>();
+	const entries: MemoryHeadCommitInput["entries"][number][] = [];
+	for (const entry of input.entries) {
+		if (seen.has(entry.entryId)) {
+			dropped.push({ entryId: entry.entryId, code: "DUPLICATE_ENTRY_ID", error: "entry submitted more than once" });
+			continue;
+		}
+		seen.add(entry.entryId);
+		let problem: { code: string; error: string } | null = null;
+		const support = entry.support.filter((item) => {
+			const invalid = supportError(db, input.agentId, entry.entryId, item, evidence);
+			problem ??= invalid;
+			return invalid === null;
+		});
+		if (support.length === 0) {
+			dropped.push({
+				entryId: entry.entryId,
+				...(problem ?? { code: "MISSING_PROVENANCE", error: `entry ${entry.entryId} has no evidence` }),
+			});
+			continue;
+		}
+		entries.push(support.length === entry.support.length ? entry : { ...entry, support });
+	}
+	return { input: dropped.length === 0 ? input : { ...input, entries }, dropped };
+}
+
+export function commitCuratedMemoryHeadInDb(db: WriteDb, rawInput: MemoryHeadCommitInput): Record<string, unknown> {
+	const agentId = rawInput.agentId;
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(agentId)) throw new Error("Invalid memory head agentId");
 	const head = db
 		.prepare("SELECT revision, content, content_hash, revision_id, is_current FROM memory_md_heads WHERE agent_id=?")
 		.get(agentId) as Head | undefined;
 	const pass = db
 		.prepare("SELECT status, mode, agent_id, head_base_revision FROM dreaming_passes WHERE id=?")
-		.get(input.passId) as
+		.get(rawInput.passId) as
 		| { status: string; mode: string; agent_id: string; head_base_revision: number | null }
 		| undefined;
 	if (pass?.status !== "running" || pass.mode !== "incremental-content" || pass.agent_id !== agentId)
@@ -139,14 +174,17 @@ export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommit
 			hash: currentHash,
 		};
 	if (
-		input.entries.length > 200 ||
-		Buffer.byteLength(JSON.stringify(input)) > 262144 ||
-		input.entries.some((entry) => entry.support.length > 8)
+		rawInput.entries.length > 200 ||
+		Buffer.byteLength(JSON.stringify(rawInput)) > 262144 ||
+		rawInput.entries.some((entry) => entry.support.length > 8)
 	)
 		return { ok: false, code: "INVALID_HEAD", error: "head input exceeds its bounded budget" };
+	const { input, dropped } = publishableEntries(db, rawInput);
+	if (input.entries.length === 0 && dropped.length > 0) return { ok: false, ...dropped[0], dropped };
+	const withDropped = (result: Record<string, unknown>) => (dropped.length > 0 ? { ...result, dropped } : result);
 	const body = input.entries.map((entry) => `- ${entry.text.trim()}`).join("\n");
 	if (input.entries.length === 0 && (head?.content ?? "") === "")
-		return { ok: true, code: "NOOP", revision, hash: currentHash, changed: false, changedIds: [] };
+		return withDropped({ ok: true, code: "NOOP", revision, hash: currentHash, changed: false, changedIds: [] });
 	if (input.entries.length === 0) {
 		const carried = committedEntries(db, agentId, head?.revision_id ?? null);
 		if (carried.entries.length > 0 || carried.unverifiable)
@@ -160,7 +198,7 @@ export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommit
 	if (countTokens(body) > 1000) return { ok: false, code: "INVALID_HEAD", error: "head must be at most 1000 tokens" };
 	const contentHash = hash(body);
 	if (head?.is_current === 1 && currentHash === contentHash)
-		return { ok: true, code: "NOOP", revision, hash: contentHash, changed: false, changedIds: [] };
+		return withDropped({ ok: true, code: "NOOP", revision, hash: contentHash, changed: false, changedIds: [] });
 	const result = commitEntries(db, input, body, contentHash, revision, currentHash);
 	if (result.ok) {
 		const now = new Date().toISOString();
@@ -178,7 +216,7 @@ export function commitCuratedMemoryHeadInDb(db: WriteDb, input: MemoryHeadCommit
 			"INSERT INTO memory_head_publications (agent_id, revision, revision_id, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
 		).run(agentId, revision + 1, revisionId, now);
 	}
-	return result;
+	return withDropped(result);
 }
 
 export function executeMemoryHead(db: WriteDb, root: string, request: MemoryHeadRequest): Record<string, unknown> {
