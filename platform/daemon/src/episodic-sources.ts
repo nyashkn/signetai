@@ -1,5 +1,9 @@
 import type { ReadDb } from "./db-accessor";
 export type EpisodicSourceKind = "memory" | "artifact" | "transcript" | "summary";
+
+// Session summaries usable as Dreaming evidence. Transcript-derived summaries are the only
+// distilled form of many sessions whose raw transcripts were delivered but never extracted.
+export const EVIDENCE_SUMMARY_SOURCE_TYPES_SQL = "('summary', 'compaction', 'checkpoint', 'transcript')";
 export const EPISODIC_CAPTURED_AT_FLOOR = "2000-01-01T00:00:00.000Z";
 export function utcTimestampMs(value: string): number {
 	const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
@@ -380,7 +384,7 @@ export function readEpisodicSummary(db: ReadDb, agentId: string, id: string): Ep
 			 FROM session_summaries
 			 WHERE agent_id = ?
 			   AND depth = 0
-			   AND COALESCE(source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+			   AND COALESCE(source_type, 'summary') IN ${EVIDENCE_SUMMARY_SOURCE_TYPES_SQL}
 			   AND (id IN (${placeholders}) OR source_ref IN (${placeholders}))
 			 ORDER BY latest_at DESC
 			 LIMIT 1`,
@@ -634,7 +638,7 @@ export function readRecentEpisodicSources(
 			 FROM session_summaries
 			 WHERE agent_id = ?
 			   AND depth = 0
-			   AND COALESCE(source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+			   AND COALESCE(source_type, 'summary') IN ${EVIDENCE_SUMMARY_SOURCE_TYPES_SQL}
 			   AND (${summaryCursor.sql} OR ${summaryRequeue})
 			 ${sourceOrder("latest_at", "id")}
 			 LIMIT ?`,
@@ -764,7 +768,7 @@ export function findEpisodicSourceAgentIds(db: ReadDb, from: string): readonly s
 				`SELECT DISTINCT agent_id
 				 FROM session_summaries
 				 WHERE depth = 0
-				   AND COALESCE(source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+				   AND COALESCE(source_type, 'summary') IN ${EVIDENCE_SUMMARY_SOURCE_TYPES_SQL}
 				   AND (id IN (${placeholders}) OR source_ref IN (${placeholders}))`,
 			)
 			.all(...ids, ...ids) as Array<{ agent_id: string | null }>;
@@ -810,6 +814,8 @@ interface EpisodicSourceSearchParams {
 	readonly limit?: number | null;
 	readonly order?: "newest" | "none";
 	readonly candidateRefs?: readonly EpisodicSourceCandidateRef[];
+	/** With no kind filter, also return summaries captured on/after this time (operator backfill). */
+	readonly summariesSince?: string;
 }
 
 export function searchEpisodicSources(db: ReadDb, params: EpisodicSourceSearchParams): EpisodicSourceRecord[] {
@@ -890,7 +896,9 @@ function selectEpisodicSourceRefs(
 			? null
 			: new Set<EpisodicSourceKind>(params.candidateRefs.map((ref) => ref.kind));
 	const wants = (kind: EpisodicSourceKind): boolean =>
-		(kind === "summary" ? params.kind === "summary" : params.kind === undefined || params.kind === kind) &&
+		(kind === "summary"
+			? params.kind === "summary" || (params.kind === undefined && params.summariesSince !== undefined)
+			: params.kind === undefined || params.kind === kind) &&
 		(candidateKinds === null || candidateKinds.has(kind));
 	const memoryCandidate = candidateRefFilter(params.candidateRefs, "memory", "id");
 	const artifactCandidate = candidateRefFilter(params.candidateRefs, "artifact", "ma.source_path");
@@ -964,18 +972,25 @@ function selectEpisodicSourceRefs(
 		});
 	}
 	if (wants("summary")) {
+		const summaryBackfillFloor = params.kind === undefined && params.summariesSince !== undefined;
 		branches.push({
 			sql: `SELECT 'summary' AS kind, id, latest_at AS captured_at, ${matchScore("content")} AS match_score
 			      FROM session_summaries
 			      WHERE agent_id = ? AND depth = 0
-			        AND COALESCE(source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+			        AND COALESCE(source_type, 'summary') IN ${EVIDENCE_SUMMARY_SOURCE_TYPES_SQL}
 			        ${params.since ? "AND (julianday(latest_at) >= julianday(?) OR julianday(latest_at) < julianday(?))" : ""}
 			        ${params.before ? "AND julianday(latest_at) <= julianday(?)" : ""}
 			        ${deliveredPredicate("summary", "id", "latest_at", "''", "latest_at")}
 			        ${reviewedPredicate("summary", "id", "latest_at", "''", "latest_at")}
 			        ${summaryCandidate.sql}
-			        ${summaryExcluded.sql}`,
-			args: [...commonArgs, ...summaryCandidate.args, ...summaryExcluded.args],
+			        ${summaryExcluded.sql}
+			        ${summaryBackfillFloor ? "AND julianday(latest_at) >= julianday(?)" : ""}`,
+			args: [
+				...commonArgs,
+				...summaryCandidate.args,
+				...summaryExcluded.args,
+				...(summaryBackfillFloor ? [params.summariesSince] : []),
+			],
 		});
 	}
 

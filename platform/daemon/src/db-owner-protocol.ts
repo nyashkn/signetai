@@ -380,6 +380,8 @@ export interface DbOwnerDreamingEvidenceSearch {
 	readonly chunkSize?: number;
 	readonly passId?: string;
 	readonly evidenceChars?: number;
+	/** Include session summaries captured on/after this time in the default scan (operator backfill). */
+	readonly summariesSince?: string;
 }
 
 export interface DbOwnerDreamingEvidenceSource {

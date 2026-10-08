@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ReadDb, WriteDb } from "../db-accessor";
-import { type EpisodicSourceKind, type EpisodicSourceRecord, readEpisodicSource } from "../episodic-sources";
+import {
+	EVIDENCE_SUMMARY_SOURCE_TYPES_SQL,
+	type EpisodicSourceKind,
+	type EpisodicSourceRecord,
+	readEpisodicSource,
+} from "../episodic-sources";
 import { renderDreamingEvidence } from "./dreaming-evidence";
 import { DREAMING_ATTENTION_OPERATIONS } from "./dreaming-operation-contract";
 
@@ -449,7 +454,7 @@ export function pendingDreamingEvidenceContinuations(
 			       SELECT 1 FROM session_summaries ss
 			       WHERE ss.agent_id = dec.agent_id AND ss.id = dec.source_id
 			         AND ss.depth = 0
-			         AND COALESCE(ss.source_type, 'summary') IN ('summary', 'compaction', 'checkpoint')
+			         AND COALESCE(ss.source_type, 'summary') IN ${EVIDENCE_SUMMARY_SOURCE_TYPES_SQL}
 			         AND dec.source_captured_at = ss.latest_at
 			         AND dec.source_entry_id = '' AND dec.source_revision = ss.latest_at
 			     ))
