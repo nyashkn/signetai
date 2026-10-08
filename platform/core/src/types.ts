@@ -460,6 +460,8 @@ export interface DreamingConfig {
 	readonly maxConcurrentPasses: number;
 	readonly codemode: boolean;
 	readonly backfillOnFirstRun: boolean;
+	/** Operator backfill: deliver session summaries captured on/after this ISO time in the default evidence scan. */
+	readonly summaryBackfillSince?: string;
 	readonly surprisal?: DreamingSurprisalConfig;
 }
 

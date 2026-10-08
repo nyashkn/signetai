@@ -221,6 +221,7 @@ export interface CreateDreamingCapabilitiesParams {
 	readonly passId?: string;
 	readonly evidenceDeliveryDeadline?: number;
 	readonly evidenceChars?: number;
+	readonly summaryBackfillSince?: string;
 	readonly mode?: DreamingCapabilityMode;
 	readonly writeCaps?: GraphWriteCaps;
 	readonly onOperationsApplied?: (
@@ -333,6 +334,7 @@ function drainDreamingEvidenceQueueInDb(db: ReadDb, input: DbOwnerDreamingEviden
 		query: "",
 		kind: input.kind,
 		excludeDelivered: true,
+		...(input.summariesSince === undefined ? {} : { summariesSince: input.summariesSince }),
 		excludeSourceRefs: input.passId ? passFullyServedSourceRefs(db, input.passId, scopeId) : [],
 		limit: DELIVERY_QUEUE_SCAN_LIMIT,
 	});
@@ -702,6 +704,7 @@ export function createDreamingCapabilities(params: CreateDreamingCapabilitiesPar
 					...(chunkSize === undefined ? {} : { chunkSize }),
 					...(params.passId === undefined ? {} : { passId: params.passId }),
 					...(params.evidenceChars === undefined ? {} : { evidenceChars: params.evidenceChars }),
+					...(params.summaryBackfillSince === undefined ? {} : { summariesSince: params.summaryBackfillSince }),
 				};
 				return await runDbOwnerDomainOperation(accessor, {
 					runWithOwner: async (owner) => {

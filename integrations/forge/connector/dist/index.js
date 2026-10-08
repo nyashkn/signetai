@@ -17747,6 +17747,7 @@ function defaultDiscordDesktopCachePath() {
       return resolve8(process.env.XDG_CONFIG_HOME || resolve8(homedir6(), ".config"), "discord");
   }
 }
+var VISIBILITIES = new Set(["global", "private", "archived"]);
 var IDENTITY_FILES = {
   agents: {
     path: "AGENTS.md",
@@ -35635,6 +35636,7 @@ function defaultDiscordDesktopCachePath2() {
       return resolve82(process.env.XDG_CONFIG_HOME || resolve82(homedir62(), ".config"), "discord");
   }
 }
+var VISIBILITIES2 = new Set(["global", "private", "archived"]);
 var IDENTITY_MODES = ["managed", "off"];
 var IDENTITY_FILES2 = {
   agents: {

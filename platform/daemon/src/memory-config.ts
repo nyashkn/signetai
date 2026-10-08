@@ -987,6 +987,9 @@ export function loadDreamingConfig(yaml: Record<string, unknown>): DreamingConfi
 		),
 		codemode: typeof raw.codemode === "boolean" ? raw.codemode : dd.codemode,
 		backfillOnFirstRun: typeof raw.backfillOnFirstRun === "boolean" ? raw.backfillOnFirstRun : dd.backfillOnFirstRun,
+		...(typeof raw.summaryBackfillSince === "string" && Number.isFinite(Date.parse(raw.summaryBackfillSince))
+			? { summaryBackfillSince: new Date(raw.summaryBackfillSince).toISOString() }
+			: {}),
 		surprisal: {
 			enabled: typeof surprisal?.enabled === "boolean" ? surprisal.enabled : defaultSurprisal.enabled,
 			sampleSize: clampWarn("surprisal.sampleSize", surprisal?.sampleSize, 20, 500, defaultSurprisal.sampleSize),
