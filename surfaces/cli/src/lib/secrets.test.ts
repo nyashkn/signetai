@@ -247,7 +247,7 @@ describe("daemonless secret API", () => {
 	test("uses the local vault for secret operations when the daemon is remote", async () => {
 		workspace = mkdtempSync(join(tmpdir(), "signet-remote-daemon-secrets-"));
 		process.env.SIGNET_PATH = workspace;
-		setSecretKeyringAdapterForTests(unavailableKeyring());
+		setSecretKeyringAdapterForTests(headlessKeyring());
 		let daemonCalls = 0;
 		let keyringReads = 0;
 		const api = createSecretCommandApiCall({

@@ -15840,83 +15840,27 @@ function up167(db) {
     return;
   recreateMemoriesFts(db);
 }
-function hasTable5(db, table) {
-  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) != null;
-}
-function hasColumn25(db, table, column) {
-  return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
-}
-function up168(db) {
-  if (!hasTable5(db, "entity_attributes") || !hasTable5(db, "entity_aspects") || !hasTable5(db, "entities") || !hasColumn25(db, "entity_attributes", "source_root") || !hasColumn25(db, "entities", "source_root")) {
+function up168(_db) {}
+function up169(db) {
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() == null)
     return;
+  const columns = db.prepare("PRAGMA table_info(dreaming_evidence_consumption)").all();
+  if (!columns.some((column) => column.name === "cursor_basis")) {
+    db.exec("ALTER TABLE dreaming_evidence_consumption ADD COLUMN cursor_basis TEXT NOT NULL DEFAULT 'delivery' CHECK (cursor_basis IN ('delivery', 'review'))");
   }
-  const now = new Date().toISOString();
+  if (!columns.some((column) => column.name === "stalled_passes")) {
+    db.exec("ALTER TABLE dreaming_evidence_consumption ADD COLUMN stalled_passes INTEGER NOT NULL DEFAULT 0 CHECK (stalled_passes >= 0)");
+  }
+}
+function up170(db) {
   db.exec(`
-		CREATE TEMP TABLE retired_source_paragraphs AS
-		SELECT attr.id, attr.memory_id, attr.agent_id, asp.entity_id
-		FROM entity_attributes attr
-		JOIN entity_aspects asp ON asp.id = attr.aspect_id
-		JOIN entities e ON e.id = asp.entity_id
-		WHERE e.entity_type IN ('source_document', 'source_document_reference')
-		  AND attr.source_root IS NOT NULL
-		  AND attr.source_root = e.source_root
-		  AND attr.source_id = e.source_id
-		  AND attr.source_root NOT IN ('dreaming', 'dreaming_attention')
-	`);
-  if (hasColumn25(db, "entity_attributes", "memory_id") && hasTable5(db, "memories")) {
-    if (hasTable5(db, "memory_history")) {
-      db.prepare(`INSERT INTO memory_history (id, memory_id, event, old_content, new_content, changed_by, reason, metadata, created_at)
-				 SELECT lower(hex(randomblob(16))), mem.id, 'deleted', mem.content, NULL, 'migration:168',
-				        'Source paragraph claims retired', '{"force":true}', ?
-				 FROM memories mem
-				 JOIN retired_source_paragraphs retired ON retired.memory_id = mem.id
-				 WHERE mem.is_deleted = 0`).run(now);
-    }
-    if (hasTable5(db, "derived_memory_sources") && hasColumn25(db, "memories", "stale_at")) {
-      db.prepare(`UPDATE memories
-				 SET stale_at = ?
-				 WHERE stale_at IS NULL
-				   AND is_deleted = 0
-				   AND id IN (
-				     SELECT dms.derived_memory_id
-				     FROM derived_memory_sources dms
-				     JOIN retired_source_paragraphs retired ON retired.agent_id = dms.agent_id
-				     WHERE (dms.source_kind = 'memory' AND dms.source_id = retired.memory_id)
-				        OR (dms.source_kind = 'ontology_claim' AND dms.source_id = retired.id)
-				   )`).run(now);
-    }
-    const forget = [
-      "is_deleted = 1",
-      ...["deleted_at", "updated_at"].filter((column) => hasColumn25(db, "memories", column)).map((column) => `${column} = $now`),
-      ...hasColumn25(db, "memories", "updated_by") ? ["updated_by = 'migration:168'"] : [],
-      ...hasColumn25(db, "memories", "version") ? ["version = version + 1"] : []
-    ];
-    db.prepare(`UPDATE memories
-			 SET ${forget.join(", ")}
-			 WHERE is_deleted = 0
-			   AND id IN (SELECT memory_id FROM retired_source_paragraphs WHERE memory_id IS NOT NULL)`).run({ $now: now });
-    if (hasTable5(db, "memory_entity_mentions")) {
-      db.exec(`
-				DELETE FROM memory_entity_mentions
-				WHERE memory_id IN (SELECT memory_id FROM retired_source_paragraphs WHERE memory_id IS NOT NULL)
-			`);
-    }
-  }
-  if (hasTable5(db, "ontology_contradictions")) {
-    db.prepare(`UPDATE ontology_contradictions
-			 SET status = 'resolved', resolved_at = ?, resolution_reason = 'source paragraph claims retired', updated_at = ?
-			 WHERE status = 'active'
-			   AND (left_attribute_id IN (SELECT id FROM retired_source_paragraphs)
-			     OR right_attribute_id IN (SELECT id FROM retired_source_paragraphs))`).run(now, now);
-  }
-  db.exec(`
-		DELETE FROM entity_attributes WHERE id IN (SELECT id FROM retired_source_paragraphs);
-		DELETE FROM entity_aspects
-		WHERE entity_id IN (
-		    SELECT id FROM entities WHERE entity_type IN ('source_document', 'source_document_reference')
-		  )
-		  AND NOT EXISTS (SELECT 1 FROM entity_attributes attr WHERE attr.aspect_id = entity_aspects.id);
-		DROP TABLE retired_source_paragraphs;
+		CREATE TABLE IF NOT EXISTS dependency_history_compaction_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (cursor_rowid >= 0),
+			pruned_rows INTEGER NOT NULL DEFAULT 0 CHECK (pruned_rows >= 0),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT OR IGNORE INTO dependency_history_compaction_state (id) VALUES (1);
 	`);
 }
 var MIGRATIONS = [
@@ -17272,6 +17216,25 @@ var MIGRATIONS = [
     version: 168,
     name: "retire-source-paragraph-claims",
     up: up168
+  },
+  {
+    version: 169,
+    name: "dreaming-evidence-review-cursor",
+    up: up169,
+    artifacts: {
+      columns: [
+        { table: "dreaming_evidence_consumption", column: "cursor_basis" },
+        { table: "dreaming_evidence_consumption", column: "stalled_passes" }
+      ]
+    }
+  },
+  {
+    version: 170,
+    name: "dependency-history-compaction-state",
+    up: up170,
+    artifacts: {
+      tables: ["dependency_history_compaction_state"]
+    }
   }
 ];
 var LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
@@ -28478,7 +28441,7 @@ var DAEMON_DERIVED_MEMORY_SOURCE_TYPES2 = [
   "checkpoint",
   "dreaming"
 ];
-function up169(db) {
+function up171(db) {
   const hasColumn = (table, column) => {
     const statement = db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`);
     try {
@@ -28794,12 +28757,12 @@ function up610(db) {
   } catch {}
   createMemoriesFts2(db);
 }
-function hasColumn26(db, table, column) {
+function hasColumn25(db, table, column) {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all();
   return rows.some((r) => r.name === column);
 }
 function addColumnIfMissing210(db, table, column, definition) {
-  if (!hasColumn26(db, table, column)) {
+  if (!hasColumn25(db, table, column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
@@ -28949,12 +28912,12 @@ function up810(db) {
 			WHERE content_hash IS NOT NULL AND is_deleted = 0
 	`);
 }
-function hasColumn27(db, table, column) {
+function hasColumn26(db, table, column) {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all();
   return rows.some((r) => r.name === column);
 }
 function addColumnIfMissing42(db, table, column, definition) {
-  if (!hasColumn27(db, table, column)) {
+  if (!hasColumn26(db, table, column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
@@ -30349,7 +30312,7 @@ function up542(db) {
 		);
 	`);
 }
-function hasTable6(db, name) {
+function hasTable5(db, name) {
   return db.prepare(`SELECT name
 			 FROM sqlite_master
 			 WHERE type = 'table' AND name = ?
@@ -30379,7 +30342,7 @@ function up552(db) {
 		CREATE INDEX IF NOT EXISTS idx_entity_dependency_history_created
 			ON entity_dependency_history(created_at DESC);
 	`);
-  if (!hasTable6(db, "entity_dependencies"))
+  if (!hasTable5(db, "entity_dependencies"))
     return;
   db.exec("DROP TRIGGER IF EXISTS trg_entity_dependencies_related_to_reason_insert");
   db.exec("DROP TRIGGER IF EXISTS trg_entity_dependencies_related_to_reason_update");
@@ -33903,83 +33866,27 @@ function up1672(db) {
     return;
   recreateMemoriesFts2(db);
 }
-function hasTable52(db, table) {
-  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) != null;
-}
-function hasColumn252(db, table, column) {
-  return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
-}
-function up1682(db) {
-  if (!hasTable52(db, "entity_attributes") || !hasTable52(db, "entity_aspects") || !hasTable52(db, "entities") || !hasColumn252(db, "entity_attributes", "source_root") || !hasColumn252(db, "entities", "source_root")) {
+function up1682(_db) {}
+function up1692(db) {
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dreaming_evidence_consumption'").get() == null)
     return;
+  const columns = db.prepare("PRAGMA table_info(dreaming_evidence_consumption)").all();
+  if (!columns.some((column) => column.name === "cursor_basis")) {
+    db.exec("ALTER TABLE dreaming_evidence_consumption ADD COLUMN cursor_basis TEXT NOT NULL DEFAULT 'delivery' CHECK (cursor_basis IN ('delivery', 'review'))");
   }
-  const now = new Date().toISOString();
+  if (!columns.some((column) => column.name === "stalled_passes")) {
+    db.exec("ALTER TABLE dreaming_evidence_consumption ADD COLUMN stalled_passes INTEGER NOT NULL DEFAULT 0 CHECK (stalled_passes >= 0)");
+  }
+}
+function up1702(db) {
   db.exec(`
-		CREATE TEMP TABLE retired_source_paragraphs AS
-		SELECT attr.id, attr.memory_id, attr.agent_id, asp.entity_id
-		FROM entity_attributes attr
-		JOIN entity_aspects asp ON asp.id = attr.aspect_id
-		JOIN entities e ON e.id = asp.entity_id
-		WHERE e.entity_type IN ('source_document', 'source_document_reference')
-		  AND attr.source_root IS NOT NULL
-		  AND attr.source_root = e.source_root
-		  AND attr.source_id = e.source_id
-		  AND attr.source_root NOT IN ('dreaming', 'dreaming_attention')
-	`);
-  if (hasColumn252(db, "entity_attributes", "memory_id") && hasTable52(db, "memories")) {
-    if (hasTable52(db, "memory_history")) {
-      db.prepare(`INSERT INTO memory_history (id, memory_id, event, old_content, new_content, changed_by, reason, metadata, created_at)
-				 SELECT lower(hex(randomblob(16))), mem.id, 'deleted', mem.content, NULL, 'migration:168',
-				        'Source paragraph claims retired', '{"force":true}', ?
-				 FROM memories mem
-				 JOIN retired_source_paragraphs retired ON retired.memory_id = mem.id
-				 WHERE mem.is_deleted = 0`).run(now);
-    }
-    if (hasTable52(db, "derived_memory_sources") && hasColumn252(db, "memories", "stale_at")) {
-      db.prepare(`UPDATE memories
-				 SET stale_at = ?
-				 WHERE stale_at IS NULL
-				   AND is_deleted = 0
-				   AND id IN (
-				     SELECT dms.derived_memory_id
-				     FROM derived_memory_sources dms
-				     JOIN retired_source_paragraphs retired ON retired.agent_id = dms.agent_id
-				     WHERE (dms.source_kind = 'memory' AND dms.source_id = retired.memory_id)
-				        OR (dms.source_kind = 'ontology_claim' AND dms.source_id = retired.id)
-				   )`).run(now);
-    }
-    const forget = [
-      "is_deleted = 1",
-      ...["deleted_at", "updated_at"].filter((column) => hasColumn252(db, "memories", column)).map((column) => `${column} = $now`),
-      ...hasColumn252(db, "memories", "updated_by") ? ["updated_by = 'migration:168'"] : [],
-      ...hasColumn252(db, "memories", "version") ? ["version = version + 1"] : []
-    ];
-    db.prepare(`UPDATE memories
-			 SET ${forget.join(", ")}
-			 WHERE is_deleted = 0
-			   AND id IN (SELECT memory_id FROM retired_source_paragraphs WHERE memory_id IS NOT NULL)`).run({ $now: now });
-    if (hasTable52(db, "memory_entity_mentions")) {
-      db.exec(`
-				DELETE FROM memory_entity_mentions
-				WHERE memory_id IN (SELECT memory_id FROM retired_source_paragraphs WHERE memory_id IS NOT NULL)
-			`);
-    }
-  }
-  if (hasTable52(db, "ontology_contradictions")) {
-    db.prepare(`UPDATE ontology_contradictions
-			 SET status = 'resolved', resolved_at = ?, resolution_reason = 'source paragraph claims retired', updated_at = ?
-			 WHERE status = 'active'
-			   AND (left_attribute_id IN (SELECT id FROM retired_source_paragraphs)
-			     OR right_attribute_id IN (SELECT id FROM retired_source_paragraphs))`).run(now, now);
-  }
-  db.exec(`
-		DELETE FROM entity_attributes WHERE id IN (SELECT id FROM retired_source_paragraphs);
-		DELETE FROM entity_aspects
-		WHERE entity_id IN (
-		    SELECT id FROM entities WHERE entity_type IN ('source_document', 'source_document_reference')
-		  )
-		  AND NOT EXISTS (SELECT 1 FROM entity_attributes attr WHERE attr.aspect_id = entity_aspects.id);
-		DROP TABLE retired_source_paragraphs;
+		CREATE TABLE IF NOT EXISTS dependency_history_compaction_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			cursor_rowid INTEGER NOT NULL DEFAULT 0 CHECK (cursor_rowid >= 0),
+			pruned_rows INTEGER NOT NULL DEFAULT 0 CHECK (pruned_rows >= 0),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT OR IGNORE INTO dependency_history_compaction_state (id) VALUES (1);
 	`);
 }
 var MIGRATIONS2 = [
@@ -35185,7 +35092,7 @@ var MIGRATIONS2 = [
   {
     version: 151,
     name: "transcript-import-bytes",
-    up: up169,
+    up: up171,
     artifacts: {
       tables: [
         "source_import_chunks",
@@ -35335,6 +35242,25 @@ var MIGRATIONS2 = [
     version: 168,
     name: "retire-source-paragraph-claims",
     up: up1682
+  },
+  {
+    version: 169,
+    name: "dreaming-evidence-review-cursor",
+    up: up1692,
+    artifacts: {
+      columns: [
+        { table: "dreaming_evidence_consumption", column: "cursor_basis" },
+        { table: "dreaming_evidence_consumption", column: "stalled_passes" }
+      ]
+    }
+  },
+  {
+    version: 170,
+    name: "dependency-history-compaction-state",
+    up: up1702,
+    artifacts: {
+      tables: ["dependency_history_compaction_state"]
+    }
   }
 ];
 var LATEST_SCHEMA_VERSION2 = MIGRATIONS2[MIGRATIONS2.length - 1]?.version ?? 0;

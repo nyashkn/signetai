@@ -54,8 +54,11 @@ export function createOfflineSecretApiCall(): DaemonApiCall {
 				return errorResponse("Command and secret references are required");
 			}
 			try {
+				// Upstream keyring access is noninteractive by default on macOS, so a rebuilt binary can never
+				// be granted Always Allow from the CLI; this is a foreground command, so allow the prompt.
 				const result = await execWithSecrets(command, secrets, {
 					timeoutMs: normalizeSecretExecTimeoutMs(request?.timeoutMs),
+					allowInteraction: true,
 				});
 				return { ok: true, data: { id: null, status: "completed", result } };
 			} catch (error) {
@@ -68,7 +71,7 @@ export function createOfflineSecretApiCall(): DaemonApiCall {
 			const value = bodyRecord(body)?.value;
 			if (typeof value !== "string" || value.length === 0) return errorResponse("Secret value cannot be empty");
 			try {
-				await putLocalSecret(name, value);
+				await putLocalSecret(name, value, { allowInteraction: true });
 				return { ok: true, data: { success: true, name } };
 			} catch (error) {
 				return errorResponse(error instanceof Error ? error.message : String(error));

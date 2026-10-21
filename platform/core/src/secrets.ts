@@ -76,6 +76,8 @@ export interface ExecResult {
 export interface SecretExecOptions {
 	timeoutMs?: number;
 	maxOutputBytes?: number;
+	/** macOS: let the keychain show its authorization prompt when this binary is not yet trusted. */
+	allowInteraction?: boolean;
 }
 
 export type SecretExecJobStatus = "queued" | "running" | "completed" | "failed";
@@ -944,7 +946,10 @@ export async function execWithSecrets(
 	const maxOutputBytes = normalizeSecretExecMaxOutputBytes(options.maxOutputBytes);
 	const resolved: Record<string, string> = {};
 	for (const [envVar, secretName] of Object.entries(secretRefs)) {
-		resolved[envVar] = await getLocalSecretValue(secretName);
+		resolved[envVar] = await getLocalSecretValue(
+			secretName,
+			options.allowInteraction === true ? { allowInteraction: true } : undefined,
+		);
 	}
 	recordSecretEvent("secret.resolved_for_exec", {
 		secretCount: Object.keys(secretRefs).length,
